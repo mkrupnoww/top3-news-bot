@@ -4,4 +4,8 @@ version = "0.1.0"
 description = "Telegram bot for collecting, ranking, reviewing and publishing TOP-3 movie news"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "aiogram>=3.30.0",
+    "asyncpg>=0.31.0",
+    "pydantic-settings>=2.14.2",
+]
