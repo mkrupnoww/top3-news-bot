@@ -149,7 +149,7 @@ async def mark_publication_published(
     telegram_message_id: int,
     response_payload: Mapping[str, Any],
 ) -> None:
-    """Фиксирует успешную публикацию во всех связанных таблицах."""
+    """Фиксирует полностью успешную публикацию."""
 
     encoded_response = _encode_json(response_payload)
 
@@ -194,6 +194,66 @@ async def mark_publication_published(
             )
 
 
+async def mark_publication_unknown(
+    pool: asyncpg.Pool,
+    publication: PublicationAttempt,
+    *,
+    telegram_message_id: int,
+    response_payload: Mapping[str, Any],
+    error_message: str,
+) -> None:
+    """
+    Фиксирует подтверждённую Telegram-отправку при сбое финализации.
+
+    Публикация уже существует в Telegram, поэтому post и batch получают
+    published. Сама попытка получает unknown и требует сверки человеком.
+    """
+
+    encoded_response = _encode_json(response_payload)
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                """
+                UPDATE publication_attempts
+                SET
+                    attempt_status = 'unknown',
+                    telegram_message_id = $2,
+                    response_payload = $3::jsonb,
+                    telegram_error_code = NULL,
+                    error_message = $4,
+                    finished_at = now()
+                WHERE publication_attempt_id = $1
+                """,
+                publication.publication_attempt_id,
+                telegram_message_id,
+                encoded_response,
+                error_message,
+            )
+
+            await connection.execute(
+                """
+                UPDATE generated_posts
+                SET post_status = 'published'
+                WHERE generated_post_id = $1
+                """,
+                publication.generated_post_id,
+            )
+
+            await connection.execute(
+                """
+                UPDATE publication_batches
+                SET
+                    batch_status = 'published',
+                    published_at = COALESCE(published_at, now()),
+                    error_message = $2
+                WHERE batch_id = $1
+                """,
+                publication.batch_id,
+                error_message,
+            )
+
+
 async def mark_publication_failed(
     pool: asyncpg.Pool,
     publication: PublicationAttempt,
@@ -201,7 +261,7 @@ async def mark_publication_failed(
     error_message: str,
     telegram_error_code: int | None = None,
 ) -> None:
-    """Фиксирует неуспешную попытку публикации."""
+    """Фиксирует ошибку до подтверждённой отправки в Telegram."""
 
     async with pool.acquire() as connection:
         async with connection.transaction():
