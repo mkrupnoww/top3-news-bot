@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 from aiogram import Bot
 from aiogram.enums import ChatType
@@ -14,6 +15,12 @@ from app.db.publications import (
     mark_publication_failed,
     mark_publication_published,
 )
+
+
+def enum_value(value: Any) -> str:
+    """Возвращает строковое значение Enum или обычной строки."""
+
+    return str(getattr(value, "value", value))
 
 
 async def main() -> None:
@@ -91,7 +98,7 @@ async def main() -> None:
             response_payload = {
                 "message_id": message.message_id,
                 "chat_id": message.chat.id,
-                "chat_type": message.chat.type.value,
+                "chat_type": enum_value(message.chat.type),
                 "chat_title": message.chat.title,
                 "message_date": message.date.isoformat(),
             }
