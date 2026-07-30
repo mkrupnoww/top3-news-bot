@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,10 @@ class Settings(BaseSettings):
 
     telegram_bot_token: SecretStr = Field(
         validation_alias="TELEGRAM_BOT_TOKEN",
+    )
+
+    telegram_channel_id: int = Field(
+        validation_alias="TELEGRAM_CHANNEL_ID",
     )
 
     db_host: str = Field(
@@ -67,6 +71,18 @@ class Settings(BaseSettings):
         pattern=r"^[a-z_][a-z0-9_]*$",
         validation_alias="DB_SCHEMA",
     )
+
+    @field_validator("telegram_channel_id")
+    @classmethod
+    def validate_telegram_channel_id(cls, value: int) -> int:
+        """Проверяет полный Bot API ID Telegram-канала."""
+
+        if not str(value).startswith("-100"):
+            raise ValueError(
+                "TELEGRAM_CHANNEL_ID должен начинаться с -100"
+            )
+
+        return value
 
 
 @lru_cache(maxsize=1)
