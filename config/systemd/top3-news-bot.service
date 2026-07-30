@@ -1,0 +1,27 @@
+[Unit]
+Description=TOP 3 Movie News Telegram Bot
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=michael
+Group=michael
+WorkingDirectory=/opt/top3-news-bot
+
+ExecStart=/opt/top3-news-bot/.venv/bin/python -m app.bot.main
+
+Environment=PYTHONUNBUFFERED=1
+
+Restart=on-failure
+RestartSec=5
+
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
