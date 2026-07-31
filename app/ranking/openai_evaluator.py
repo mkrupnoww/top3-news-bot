@@ -17,6 +17,11 @@ from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
 
+from app.ranking.openai_usage import (
+    OpenAICostEstimate,
+    OpenAITokenUsage,
+)
+
 
 OPENAI_EVALUATOR_VERSION = (
     "openai_ranking_evaluator_v1"
@@ -35,6 +40,25 @@ class RankingModelRequest:
     instructions: str
     input_text: str
 
+@dataclass(frozen=True, slots=True)
+class RankingModelResponse:
+    """Ответ модели вместе с телеметрией."""
+
+    output_text: str
+    usage: OpenAITokenUsage | None = None
+    cost_estimate: OpenAICostEstimate | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIRankingEvaluationResult:
+    """Оценки новостей и данные API-запроса."""
+
+    assessments: tuple[
+        ManualNewsAssessment,
+        ...
+    ]
+    model_response: RankingModelResponse
+
 
 @runtime_checkable
 class StructuredRankingClient(Protocol):
@@ -49,11 +73,10 @@ class StructuredRankingClient(Protocol):
     async def create_response(
         self,
         request: RankingModelRequest,
-    ) -> str:
-        """Возвращает JSON-текст ответа модели."""
+    ) -> RankingModelResponse:
+        """Возвращает ответ модели и телеметрию."""
 
         ...
-
 
 class OpenAINewsScorePayload(BaseModel):
     """Структурированная оценка одной новости."""
@@ -416,17 +439,14 @@ class OpenAIRankingEvaluator:
 
         return self._metadata
 
-    async def evaluate(
+    async def evaluate_detailed(
         self,
         candidates: tuple[
             NewsCandidate,
             ...
         ],
-    ) -> tuple[
-        ManualNewsAssessment,
-        ...
-    ]:
-        """Оценивает все переданные новости."""
+    ) -> OpenAIRankingEvaluationResult:
+        """Оценивает новости и возвращает телеметрию."""
 
         expected_news_ids = (
             _validate_candidates(
@@ -447,14 +467,14 @@ class OpenAIRankingEvaluator:
             ),
         )
 
-        response_text = (
+        model_response = (
             await self._client.create_response(
                 request
             )
         )
 
         payload = _parse_response(
-            response_text
+            model_response.output_text
         )
 
         _validate_response_news_ids(
@@ -469,7 +489,7 @@ class OpenAIRankingEvaluator:
             for score in payload.scores
         }
 
-        return tuple(
+        assessments = tuple(
             ManualNewsAssessment(
                 news_id=candidate.news_id,
                 f_score=(
@@ -505,3 +525,26 @@ class OpenAIRankingEvaluator:
             )
             for candidate in candidates
         )
+
+        return OpenAIRankingEvaluationResult(
+            assessments=assessments,
+            model_response=model_response,
+        )
+
+    async def evaluate(
+        self,
+        candidates: tuple[
+            NewsCandidate,
+            ...
+        ],
+    ) -> tuple[
+        ManualNewsAssessment,
+        ...
+    ]:
+        """Оценивает новости через общий интерфейс."""
+
+        result = await self.evaluate_detailed(
+            candidates
+        )
+
+        return result.assessments

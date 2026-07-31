@@ -2,7 +2,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from app.ranking.openai_evaluator import (
     RankingModelRequest,
+    RankingModelResponse,
     StructuredRankingClient,
+)
+from app.ranking.openai_usage import (
+    calculate_openai_cost,
+    extract_response_usage,
+    get_model_pricing,
 )
 
 
@@ -109,8 +115,9 @@ class OpenAIResponsesRankingClient(
     """
     Адаптер OpenAI Responses API.
 
-    Он получает внутренний RankingModelRequest
-    и возвращает только JSON-текст модели.
+    Получает внутренний RankingModelRequest
+    и возвращает структурированный ответ модели
+    вместе с токенами и расчётом стоимости.
     """
 
     def __init__(
@@ -132,8 +139,15 @@ class OpenAIResponsesRankingClient(
     async def create_response(
         self,
         request: RankingModelRequest,
-    ) -> str:
-        """Выполняет один запрос Responses API."""
+    ) -> RankingModelResponse:
+        """
+        Выполняет один запрос Responses API.
+
+        Возвращает:
+        - структурированный JSON-текст;
+        - фактическое потребление токенов;
+        - оценочную стоимость запроса.
+        """
 
         normalized_model = (
             request.model.strip()
@@ -218,4 +232,21 @@ class OpenAIResponsesRankingClient(
                 "пустой output_text."
             )
 
-        return normalized_output
+        usage = extract_response_usage(
+            response
+        )
+
+        pricing = get_model_pricing(
+            normalized_model
+        )
+
+        cost_estimate = calculate_openai_cost(
+            usage,
+            pricing,
+        )
+
+        return RankingModelResponse(
+            output_text=normalized_output,
+            usage=usage,
+            cost_estimate=cost_estimate,
+        )

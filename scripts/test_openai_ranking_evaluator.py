@@ -6,6 +6,7 @@ from app.db.news_candidates import NewsCandidate
 from app.ranking.openai_evaluator import (
     OpenAIRankingEvaluator,
     RankingModelRequest,
+    RankingModelResponse,
 )
 
 
@@ -24,12 +25,14 @@ class FakeStructuredRankingClient:
     async def create_response(
         self,
         request: RankingModelRequest,
-    ) -> str:
+    ) -> RankingModelResponse:
         """Возвращает заранее заданный JSON."""
 
         self.requests.append(request)
 
-        return self._response_text
+        return RankingModelResponse(
+            output_text=self._response_text,
+        )
 
 
 def build_candidates() -> tuple[
@@ -154,8 +157,24 @@ async def test_valid_response() -> None:
 
     candidates = build_candidates()
 
-    assessments = await evaluator.evaluate(
-        candidates
+    evaluation = (
+        await evaluator.evaluate_detailed(
+            candidates
+        )
+    )
+
+    assessments = evaluation.assessments
+
+    assert (
+        evaluation.model_response.usage
+        is None
+    )
+
+    assert (
+        evaluation
+        .model_response
+        .cost_estimate
+        is None
     )
 
     assert len(client.requests) == 1
@@ -224,6 +243,49 @@ async def test_valid_response() -> None:
             for assessment in assessments
         )
     )
+    print("usage_present=false")
+    print("cost_estimate_present=false")
+
+
+async def test_common_interface() -> None:
+    """
+    Проверяет совместимость с RankingEvaluator.
+
+    Обычный метод evaluate() должен возвращать
+    только набор оценок без телеметрии.
+    """
+
+    client = FakeStructuredRankingClient(
+        build_valid_response()
+    )
+
+    evaluator = OpenAIRankingEvaluator(
+        client=client,
+        model_name="test-model-no-network",
+    )
+
+    assessments = await evaluator.evaluate(
+        build_candidates()
+    )
+
+    assert len(client.requests) == 1
+
+    assert tuple(
+        assessment.news_id
+        for assessment in assessments
+    ) == (
+        101,
+        102,
+    )
+
+    print()
+    print(
+        "Common evaluator interface: OK"
+    )
+    print(
+        f"assessment_count="
+        f"{len(assessments)}"
+    )
 
 
 async def test_missing_candidate() -> None:
@@ -272,6 +334,156 @@ async def test_missing_candidate() -> None:
 
     raise AssertionError(
         "Неполный ответ модели "
+        "не был заблокирован."
+    )
+
+
+async def test_unexpected_candidate() -> None:
+    """Проверяет посторонний news_id."""
+
+    response_text = json.dumps(
+        {
+            "scores": [
+                {
+                    "news_id": 101,
+                    "f_score": 8,
+                    "m_score": 7,
+                    "r_score": 6,
+                    "h_score": 5,
+                    "q_score": 0.9,
+                    "explanation": (
+                        "Первая оценка."
+                    ),
+                },
+                {
+                    "news_id": 102,
+                    "f_score": 7,
+                    "m_score": 6,
+                    "r_score": 5,
+                    "h_score": 4,
+                    "q_score": 0.8,
+                    "explanation": (
+                        "Вторая оценка."
+                    ),
+                },
+                {
+                    "news_id": 999,
+                    "f_score": 6,
+                    "m_score": 5,
+                    "r_score": 4,
+                    "h_score": 3,
+                    "q_score": 0.7,
+                    "explanation": (
+                        "Посторонняя оценка."
+                    ),
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    evaluator = OpenAIRankingEvaluator(
+        client=(
+            FakeStructuredRankingClient(
+                response_text
+            )
+        ),
+        model_name="test-model-no-network",
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_candidates()
+        )
+    except ValueError as error:
+        assert (
+            "unexpected=[999]"
+            in str(error)
+        )
+
+        print()
+        print(
+            "Unexpected candidate blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Посторонний news_id "
+        "не был заблокирован."
+    )
+
+
+async def test_duplicate_candidate() -> None:
+    """Проверяет повторяющийся news_id."""
+
+    response_text = json.dumps(
+        {
+            "scores": [
+                {
+                    "news_id": 101,
+                    "f_score": 8,
+                    "m_score": 7,
+                    "r_score": 6,
+                    "h_score": 5,
+                    "q_score": 0.9,
+                    "explanation": (
+                        "Первая оценка."
+                    ),
+                },
+                {
+                    "news_id": 101,
+                    "f_score": 7,
+                    "m_score": 6,
+                    "r_score": 5,
+                    "h_score": 4,
+                    "q_score": 0.8,
+                    "explanation": (
+                        "Повторная оценка."
+                    ),
+                },
+                {
+                    "news_id": 102,
+                    "f_score": 6,
+                    "m_score": 5,
+                    "r_score": 4,
+                    "h_score": 3,
+                    "q_score": 0.7,
+                    "explanation": (
+                        "Вторая новость."
+                    ),
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    evaluator = OpenAIRankingEvaluator(
+        client=(
+            FakeStructuredRankingClient(
+                response_text
+            )
+        ),
+        model_name="test-model-no-network",
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_candidates()
+        )
+    except ValueError as error:
+        assert (
+            "повторяющиеся news_id"
+            in str(error)
+        )
+
+        print()
+        print(
+            "Duplicate candidate blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Повторяющийся news_id "
         "не был заблокирован."
     )
 
@@ -340,12 +552,118 @@ async def test_invalid_score() -> None:
     )
 
 
+async def test_invalid_json() -> None:
+    """Проверяет синтаксически неверный JSON."""
+
+    evaluator = OpenAIRankingEvaluator(
+        client=(
+            FakeStructuredRankingClient(
+                "{invalid-json"
+            )
+        ),
+        model_name="test-model-no-network",
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_candidates()
+        )
+    except ValueError as error:
+        assert (
+            "не соответствует схеме"
+            in str(error)
+        )
+
+        print()
+        print(
+            "Invalid JSON blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Некорректный JSON "
+        "не был заблокирован."
+    )
+
+
+async def test_empty_response() -> None:
+    """Проверяет пустой ответ модели."""
+
+    evaluator = OpenAIRankingEvaluator(
+        client=(
+            FakeStructuredRankingClient(
+                "   "
+            )
+        ),
+        model_name="test-model-no-network",
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_candidates()
+        )
+    except ValueError as error:
+        assert "пустой ответ" in str(error)
+
+        print()
+        print(
+            "Empty response blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Пустой ответ модели "
+        "не был заблокирован."
+    )
+
+
+async def test_empty_candidates() -> None:
+    """Проверяет пустой список кандидатов."""
+
+    client = FakeStructuredRankingClient(
+        build_valid_response()
+    )
+
+    evaluator = OpenAIRankingEvaluator(
+        client=client,
+        model_name="test-model-no-network",
+    )
+
+    try:
+        await evaluator.evaluate(())
+    except ValueError as error:
+        assert (
+            "Список кандидатов"
+            in str(error)
+        )
+
+        assert len(client.requests) == 0
+
+        print()
+        print(
+            "Empty candidates blocking: OK"
+        )
+        print("client_call_count=0")
+        return
+
+    raise AssertionError(
+        "Пустой список кандидатов "
+        "не был заблокирован."
+    )
+
+
 async def main() -> int:
     """Запускает тест оценщика."""
 
     await test_valid_response()
+    await test_common_interface()
     await test_missing_candidate()
+    await test_unexpected_candidate()
+    await test_duplicate_candidate()
     await test_invalid_score()
+    await test_invalid_json()
+    await test_empty_response()
+    await test_empty_candidates()
 
     print()
     print("API key required: no")
