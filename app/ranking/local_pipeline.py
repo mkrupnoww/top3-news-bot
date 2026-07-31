@@ -13,11 +13,19 @@ from app.db.ranking_scores import (
     RankingPersistenceResult,
     persist_manual_ranking_test,
 )
+from app.ranking.evaluator import (
+    RankingEvaluator,
+    RankingEvaluatorMetadata,
+)
 from app.ranking.score_formula import ScoreInput
 
 
 LOCAL_EVALUATOR_VERSION = (
     "local_fixture_evaluator_v1"
+)
+
+LOCAL_PROMPT_VERSION = (
+    "local_fixture_no_prompt_v1"
 )
 
 
@@ -59,6 +67,7 @@ class LocalRankingPipelineResult:
     candidate_count: int
     scored_count: int
     eligible_count: int
+    evaluator_metadata: RankingEvaluatorMetadata
     ranked_candidates: tuple[
         RankedCandidate,
         ...
@@ -77,10 +86,6 @@ class LocalFixtureEvaluator:
     Значения передаются явно по news_id.
     """
 
-    evaluator_version = (
-        LOCAL_EVALUATOR_VERSION
-    )
-
     def __init__(
         self,
         scores_by_news_id: Mapping[
@@ -94,11 +99,64 @@ class LocalFixtureEvaluator:
                 "не может быть пустым."
             )
 
+        invalid_news_ids = sorted(
+            news_id
+            for news_id in scores_by_news_id
+            if news_id <= 0
+        )
+
+        if invalid_news_ids:
+            raise ValueError(
+                "Все news_id в тестовом наборе "
+                "должны быть больше нуля: "
+                + ",".join(
+                    str(news_id)
+                    for news_id in invalid_news_ids
+                )
+            )
+
         self._scores_by_news_id = dict(
             scores_by_news_id
         )
 
-    def evaluate(
+        self._metadata = (
+            RankingEvaluatorMetadata(
+                run_mode="local_fixture_test",
+                evaluator_name=(
+                    "LocalFixtureEvaluator"
+                ),
+                evaluator_version=(
+                    LOCAL_EVALUATOR_VERSION
+                ),
+                prompt_version=(
+                    LOCAL_PROMPT_VERSION
+                ),
+                model_name=None,
+            )
+        )
+
+    @property
+    def metadata(
+        self,
+    ) -> RankingEvaluatorMetadata:
+        """Возвращает метаданные оценщика."""
+
+        return self._metadata
+
+    @property
+    def evaluator_version(
+        self,
+    ) -> str:
+        """
+        Возвращает версию оценщика.
+
+        Свойство оставлено для совместимости
+        с существующим тестовым сценарием.
+        """
+
+        return self._metadata.evaluator_version
+
+    async def evaluate(
         self,
         candidates: tuple[
             NewsCandidate,
@@ -114,6 +172,12 @@ class LocalFixtureEvaluator:
         Если хотя бы для одного кандидата нет
         фикстуры, запуск блокируется.
         """
+
+        if not candidates:
+            raise ValueError(
+                "Список кандидатов "
+                "не может быть пустым."
+            )
 
         candidate_ids = {
             candidate.news_id
@@ -276,14 +340,14 @@ async def run_local_ranking_pipeline(
     candidate_limit: int,
     top_size: int,
     test_key: str,
-    evaluator: LocalFixtureEvaluator,
+    evaluator: RankingEvaluator,
 ) -> LocalRankingPipelineResult:
     """
     Запускает локальный тестовый конвейер.
 
     Последовательность:
     1. Выбрать кандидатов.
-    2. Получить тестовые оценки.
+    2. Получить оценки через единый интерфейс.
     3. Создать или повторно использовать ranking_run.
     4. Сохранить news_scores.
     5. Вернуть TOP-N.
@@ -293,6 +357,15 @@ async def run_local_ranking_pipeline(
         raise ValueError(
             "top_size должен быть больше нуля."
         )
+
+    normalized_test_key = test_key.strip()
+
+    if not normalized_test_key:
+        raise ValueError(
+            "test_key не может быть пустым."
+        )
+
+    evaluator_metadata = evaluator.metadata
 
     candidate_result = (
         await select_news_candidates(
@@ -322,14 +395,43 @@ async def run_local_ranking_pipeline(
             f"{len(candidate_result.candidates)}"
         )
 
-    assessments = evaluator.evaluate(
+    assessments = await evaluator.evaluate(
         candidate_result.candidates
     )
+
+    assessed_news_ids = {
+        assessment.news_id
+        for assessment in assessments
+    }
+
+    candidate_news_ids = {
+        candidate.news_id
+        for candidate
+        in candidate_result.candidates
+    }
+
+    if assessed_news_ids != candidate_news_ids:
+        missing_ids = sorted(
+            candidate_news_ids
+            - assessed_news_ids
+        )
+
+        unexpected_ids = sorted(
+            assessed_news_ids
+            - candidate_news_ids
+        )
+
+        raise RuntimeError(
+            "Оценщик вернул некорректный "
+            "набор новостей: "
+            f"missing={missing_ids}, "
+            f"unexpected={unexpected_ids}"
+        )
 
     persistence_result = (
         await persist_manual_ranking_test(
             pool,
-            test_key=test_key,
+            test_key=normalized_test_key,
             window_started_at=(
                 candidate_result.window_start
             ),
@@ -377,6 +479,9 @@ async def run_local_ranking_pipeline(
         ),
         eligible_count=(
             persistence_result.eligible_count
+        ),
+        evaluator_metadata=(
+            evaluator_metadata
         ),
         ranked_candidates=(
             ranked_candidates
