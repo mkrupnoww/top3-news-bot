@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed
+    xmlns="http://www.w3.org/2005/Atom"
+    xmlns:media="http://search.yahoo.com/mrss/"
+>
+    <title>Cinema Atom</title>
+    <id>https://example.org/cinema/feed</id>
+    <updated>2026-07-31T08:00:00Z</updated>
+
+    <entry>
+        <id>tag:example.org,2026:movie-atom-001</id>
+        <title>Actor confirmed for an upcoming thriller</title>
+        <link
+            rel="alternate"
+            href="https://example.org/cinema/upcoming-thriller"
+        />
+        <summary type="html">
+            The casting was announced during a festival event.
+        </summary>
+        <published>2026-07-31T07:45:00Z</published>
+        <author>
+            <name>Maria Journalist</name>
+        </author>
+        <media:thumbnail
+            url="https://example.org/images/thriller.jpg"
+        />
+    </entry>
+
+    <entry>
+        <id>tag:example.org,2026:movie-atom-002</id>
+        <title>Animation sequel receives a release date</title>
+        <link
+            rel="alternate"
+            href="https://example.org/cinema/animation-sequel"
+        />
+        <summary>
+            The film will arrive in cinemas next summer.
+        </summary>
+        <updated>2026-07-31T06:30:00+00:00</updated>
+    </entry>
+</feed>

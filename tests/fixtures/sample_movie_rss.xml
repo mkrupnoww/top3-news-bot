@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss
+    version="2.0"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:media="http://search.yahoo.com/mrss/"
+>
+    <channel>
+        <title>Movie Wire RSS</title>
+        <link>https://example.com/movies</link>
+        <description>Test movie-news RSS feed</description>
+
+        <item>
+            <guid isPermaLink="false">movie-rss-001</guid>
+            <title>Studio announces a new science-fiction film</title>
+            <link>https://example.com/movies/science-fiction-film</link>
+            <description><![CDATA[
+                The studio <b>confirmed</b> the project on Friday.
+            ]]></description>
+            <pubDate>Fri, 31 Jul 2026 07:15:00 GMT</pubDate>
+            <dc:creator>Alex Reporter</dc:creator>
+            <media:content
+                url="https://example.com/images/science-fiction.jpg"
+                medium="image"
+            />
+        </item>
+
+        <item>
+            <guid isPermaLink="false">movie-rss-002</guid>
+            <title>Director joins a historical drama</title>
+            <link>https://example.com/movies/historical-drama</link>
+            <description>
+                Production is expected to begin next year.
+            </description>
+            <pubDate>Fri, 31 Jul 2026 06:20:00 GMT</pubDate>
+        </item>
+
+        <item>
+            <guid isPermaLink="false">movie-rss-invalid</guid>
+            <title>Entry without a source link</title>
+            <description>This item must be skipped.</description>
+        </item>
+    </channel>
+</rss>
