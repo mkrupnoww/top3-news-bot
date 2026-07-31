@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     )
 
     openai_ranking_model: str = Field(
-        default="gpt-5.5",
+        default="gpt-5.6-terra",
         min_length=1,
         max_length=128,
         validation_alias=(
