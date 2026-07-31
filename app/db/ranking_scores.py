@@ -17,7 +17,7 @@ from app.ranking.score_formula import (
 
 @dataclass(frozen=True, slots=True)
 class ManualNewsAssessment:
-    """Ручные тестовые оценки одной новости."""
+    """Оценки одной новости."""
 
     news_id: int
     f_score: ScoreInput
@@ -39,6 +39,17 @@ class PreparedNewsAssessment:
 
 
 @dataclass(frozen=True, slots=True)
+class RankingRunMetadata:
+    """Метаданные оценщика для ranking_runs."""
+
+    run_mode: str
+    evaluator_name: str
+    evaluator_version: str
+    prompt_version: str
+    model_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PersistedNewsScore:
     """Сопоставление расчёта Python и PostgreSQL."""
 
@@ -52,7 +63,7 @@ class PersistedNewsScore:
 
 @dataclass(frozen=True, slots=True)
 class RankingPersistenceResult:
-    """Результат сохранения тестового ranking run."""
+    """Результат сохранения ranking run."""
 
     ranking_run_id: int
     run_status: str
@@ -61,7 +72,17 @@ class RankingPersistenceResult:
     scored_count: int
     eligible_count: int
     already_persisted: bool
+    metadata: RankingRunMetadata
     scores: tuple[PersistedNewsScore, ...]
+
+
+DEFAULT_MANUAL_TEST_METADATA = RankingRunMetadata(
+    run_mode="manual_formula_test",
+    evaluator_name="manual_formula_test",
+    evaluator_version="manual_formula_test_v1",
+    prompt_version="manual_formula_test_v1",
+    model_name=None,
+)
 
 
 def _encode_json(
@@ -73,6 +94,78 @@ def _encode_json(
         payload,
         ensure_ascii=False,
         separators=(",", ":"),
+    )
+
+
+def _normalize_required_text(
+    value: str,
+    *,
+    field_name: str,
+) -> str:
+    """Нормализует обязательное текстовое поле."""
+
+    normalized_value = value.strip()
+
+    if not normalized_value:
+        raise ValueError(
+            f"{field_name} не может быть пустым."
+        )
+
+    return normalized_value
+
+
+def _normalize_optional_text(
+    value: str | None,
+    *,
+    field_name: str,
+) -> str | None:
+    """Нормализует необязательное текстовое поле."""
+
+    if value is None:
+        return None
+
+    normalized_value = value.strip()
+
+    if not normalized_value:
+        raise ValueError(
+            f"{field_name} не может быть пустой строкой."
+        )
+
+    return normalized_value
+
+
+def _normalize_metadata(
+    metadata: RankingRunMetadata | None,
+) -> RankingRunMetadata:
+    """Проверяет и нормализует метаданные оценщика."""
+
+    source_metadata = (
+        metadata
+        if metadata is not None
+        else DEFAULT_MANUAL_TEST_METADATA
+    )
+
+    return RankingRunMetadata(
+        run_mode=_normalize_required_text(
+            source_metadata.run_mode,
+            field_name="run_mode",
+        ),
+        evaluator_name=_normalize_required_text(
+            source_metadata.evaluator_name,
+            field_name="evaluator_name",
+        ),
+        evaluator_version=_normalize_required_text(
+            source_metadata.evaluator_version,
+            field_name="evaluator_version",
+        ),
+        prompt_version=_normalize_required_text(
+            source_metadata.prompt_version,
+            field_name="prompt_version",
+        ),
+        model_name=_normalize_optional_text(
+            source_metadata.model_name,
+            field_name="model_name",
+        ),
     )
 
 
@@ -234,6 +327,78 @@ async def _validate_news_items(
         )
 
 
+def _extract_existing_metadata(
+    record: asyncpg.Record,
+) -> RankingRunMetadata:
+    """
+    Получает метаданные существующего запуска.
+
+    Поля legacy_mode и prompt_version позволяют
+    повторно читать записи, созданные до появления
+    универсального интерфейса оценщика.
+    """
+
+    run_mode = (
+        record["run_mode"]
+        or record["legacy_mode"]
+        or "manual_formula_test"
+    )
+
+    evaluator_name = (
+        record["evaluator_name"]
+        or "manual_formula_test"
+    )
+
+    evaluator_version = (
+        record["evaluator_version"]
+        or record["prompt_version"]
+    )
+
+    return RankingRunMetadata(
+        run_mode=run_mode,
+        evaluator_name=evaluator_name,
+        evaluator_version=evaluator_version,
+        prompt_version=record["prompt_version"],
+        model_name=record["model_name"],
+    )
+
+
+def _describe_metadata_mismatch(
+    *,
+    expected: RankingRunMetadata,
+    actual: RankingRunMetadata,
+) -> str:
+    """Формирует описание несовпадающих полей."""
+
+    differences: list[str] = []
+
+    for field_name in (
+        "run_mode",
+        "evaluator_name",
+        "evaluator_version",
+        "prompt_version",
+        "model_name",
+    ):
+        expected_value = getattr(
+            expected,
+            field_name,
+        )
+
+        actual_value = getattr(
+            actual,
+            field_name,
+        )
+
+        if expected_value != actual_value:
+            differences.append(
+                f"{field_name}: "
+                f"expected={expected_value!r}, "
+                f"actual={actual_value!r}"
+            )
+
+    return "; ".join(differences)
+
+
 async def _load_persisted_scores(
     connection: asyncpg.Connection,
     *,
@@ -372,12 +537,16 @@ async def persist_manual_ranking_test(
     window_started_at: datetime,
     window_finished_at: datetime,
     assessments: tuple[ManualNewsAssessment, ...],
+    metadata: RankingRunMetadata | None = None,
 ) -> RankingPersistenceResult:
     """
-    Сохраняет тестовый ranking run и сверяет формулу.
+    Сохраняет ranking run и сверяет формулу.
 
     Если Python и PostgreSQL дают разные значения,
     транзакция откатывается целиком.
+
+    Параметр metadata позволяет использовать тот же
+    слой сохранения для локального и OpenAI-оценщика.
     """
 
     normalized_test_key = test_key.strip()
@@ -386,6 +555,10 @@ async def persist_manual_ranking_test(
         raise ValueError(
             "test_key не может быть пустым."
         )
+
+    normalized_metadata = _normalize_metadata(
+        metadata
+    )
 
     normalized_window_start = _normalize_datetime(
         window_started_at,
@@ -431,9 +604,19 @@ async def persist_manual_ranking_test(
                     ranking_run_id,
                     run_status,
                     formula_version,
+                    model_name,
+                    prompt_version,
                     candidate_count,
                     scored_count,
-                    eligible_count
+                    eligible_count,
+                    parameters->>'mode'
+                        AS legacy_mode,
+                    parameters->>'run_mode'
+                        AS run_mode,
+                    parameters->>'evaluator_name'
+                        AS evaluator_name,
+                    parameters->>'evaluator_version'
+                        AS evaluator_version
                 FROM ranking_runs
                 WHERE formula_version = $1
                   AND parameters->>'test_key' = $2
@@ -446,6 +629,29 @@ async def persist_manual_ranking_test(
             )
 
             if existing_run is not None:
+                existing_metadata = (
+                    _extract_existing_metadata(
+                        existing_run
+                    )
+                )
+
+                if (
+                    existing_metadata
+                    != normalized_metadata
+                ):
+                    mismatch = (
+                        _describe_metadata_mismatch(
+                            expected=normalized_metadata,
+                            actual=existing_metadata,
+                        )
+                    )
+
+                    raise ValueError(
+                        "test_key уже использован "
+                        "с другими метаданными: "
+                        f"{mismatch}"
+                    )
+
                 persisted_scores = (
                     await _load_persisted_scores(
                         connection,
@@ -499,6 +705,7 @@ async def persist_manual_ranking_test(
                         ]
                     ),
                     already_persisted=True,
+                    metadata=existing_metadata,
                     scores=persisted_scores,
                 )
 
@@ -509,7 +716,19 @@ async def persist_manual_ranking_test(
 
             parameters = _encode_json(
                 {
-                    "mode": "manual_formula_test",
+                    "mode": (
+                        normalized_metadata.run_mode
+                    ),
+                    "run_mode": (
+                        normalized_metadata.run_mode
+                    ),
+                    "evaluator_name": (
+                        normalized_metadata.evaluator_name
+                    ),
+                    "evaluator_version": (
+                        normalized_metadata
+                        .evaluator_version
+                    ),
                     "test_key": normalized_test_key,
                     "news_ids": list(news_ids),
                     "scales": {
@@ -540,18 +759,20 @@ async def persist_manual_ranking_test(
                 VALUES (
                     'running',
                     $1,
-                    NULL,
-                    'manual_formula_test_v1',
                     $2,
                     $3,
                     $4,
+                    $5,
+                    $6,
                     0,
                     0,
-                    $5::jsonb
+                    $7::jsonb
                 )
                 RETURNING ranking_run_id
                 """,
                 FORMULA_VERSION,
+                normalized_metadata.model_name,
+                normalized_metadata.prompt_version,
                 normalized_window_start,
                 normalized_window_end,
                 len(prepared_assessments),
@@ -564,8 +785,23 @@ async def persist_manual_ranking_test(
 
                 score_details = _encode_json(
                     {
-                        "mode": (
-                            "manual_formula_test"
+                        "run_mode": (
+                            normalized_metadata.run_mode
+                        ),
+                        "evaluator_name": (
+                            normalized_metadata
+                            .evaluator_name
+                        ),
+                        "evaluator_version": (
+                            normalized_metadata
+                            .evaluator_version
+                        ),
+                        "prompt_version": (
+                            normalized_metadata
+                            .prompt_version
+                        ),
+                        "model_name": (
+                            normalized_metadata.model_name
                         ),
                         "python_individual_score": (
                             str(
@@ -691,5 +927,6 @@ async def persist_manual_ranking_test(
             prepared_assessments
         ),
         already_persisted=False,
+        metadata=normalized_metadata,
         scores=persisted_scores,
     )
