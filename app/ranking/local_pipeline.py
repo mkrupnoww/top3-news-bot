@@ -11,6 +11,7 @@ from app.db.news_candidates import (
 from app.db.ranking_scores import (
     ManualNewsAssessment,
     RankingPersistenceResult,
+    RankingRunMetadata,
     persist_manual_ranking_test,
 )
 from app.ranking.evaluator import (
@@ -428,6 +429,20 @@ async def run_local_ranking_pipeline(
             f"unexpected={unexpected_ids}"
         )
 
+    ranking_run_metadata = RankingRunMetadata(
+        run_mode=evaluator_metadata.run_mode,
+        evaluator_name=(
+            evaluator_metadata.evaluator_name
+        ),
+        evaluator_version=(
+            evaluator_metadata.evaluator_version
+        ),
+        prompt_version=(
+            evaluator_metadata.prompt_version
+        ),
+        model_name=evaluator_metadata.model_name,
+    )
+
     persistence_result = (
         await persist_manual_ranking_test(
             pool,
@@ -439,6 +454,7 @@ async def run_local_ranking_pipeline(
                 candidate_result.window_end
             ),
             assessments=assessments,
+            metadata=ranking_run_metadata,
         )
     )
 

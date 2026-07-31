@@ -13,7 +13,7 @@ from app.ranking.local_pipeline import (
 )
 
 
-TEST_KEY = "variety_local_pipeline_v1"
+TEST_KEY = "variety_local_pipeline_metadata_v1"
 
 AS_OF = datetime(
     2026,
@@ -125,6 +125,22 @@ async def main() -> int:
     print(
         "evaluator_version="
         f"{evaluator.evaluator_version}"
+    )
+    print(
+        "run_mode="
+        f"{result.evaluator_metadata.run_mode}"
+    )
+    print(
+        "evaluator_name="
+        f"{result.evaluator_metadata.evaluator_name}"
+    )
+    print(
+        "prompt_version="
+        f"{result.evaluator_metadata.prompt_version}"
+    )
+    print(
+        "model_name="
+        f"{result.evaluator_metadata.model_name or 'none'}"
     )
     print(
         "already_persisted="
