@@ -1,12 +1,24 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import (
+    Field,
+    SecretStr,
+    field_validator,
+)
+from pydantic_settings import (
+    BaseSettings,
+    SettingsConfigDict,
+)
 
 
 class Settings(BaseSettings):
-    """Настройки приложения, загружаемые из переменных окружения и .env."""
+    """
+    Настройки приложения.
+
+    Значения загружаются из переменных окружения
+    и локального файла .env.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -16,19 +28,31 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_env: Literal["development", "testing", "production"] = Field(
+    app_env: Literal[
+        "development",
+        "testing",
+        "production",
+    ] = Field(
         default="development",
         validation_alias="APP_ENV",
     )
 
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+    log_level: Literal[
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    ] = Field(
         default="INFO",
         validation_alias="LOG_LEVEL",
     )
 
     telegram_bot_username: str = Field(
         min_length=1,
-        validation_alias="TELEGRAM_BOT_USERNAME",
+        validation_alias=(
+            "TELEGRAM_BOT_USERNAME"
+        ),
     )
 
     telegram_bot_token: SecretStr = Field(
@@ -72,21 +96,81 @@ class Settings(BaseSettings):
         validation_alias="DB_SCHEMA",
     )
 
-    @field_validator("telegram_channel_id")
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="OPENAI_API_KEY",
+    )
+
+    openai_ranking_model: str = Field(
+        default="gpt-5.5",
+        min_length=1,
+        max_length=128,
+        validation_alias=(
+            "OPENAI_RANKING_MODEL"
+        ),
+    )
+
+    openai_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=300,
+        validation_alias=(
+            "OPENAI_TIMEOUT_SECONDS"
+        ),
+    )
+
+    openai_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        validation_alias=(
+            "OPENAI_MAX_RETRIES"
+        ),
+    )
+
+    @field_validator(
+        "telegram_channel_id"
+    )
     @classmethod
-    def validate_telegram_channel_id(cls, value: int) -> int:
-        """Проверяет полный Bot API ID Telegram-канала."""
+    def validate_telegram_channel_id(
+        cls,
+        value: int,
+    ) -> int:
+        """Проверяет полный Bot API ID канала."""
 
         if not str(value).startswith("-100"):
             raise ValueError(
-                "TELEGRAM_CHANNEL_ID должен начинаться с -100"
+                "TELEGRAM_CHANNEL_ID "
+                "должен начинаться с -100"
             )
 
         return value
 
+    @field_validator(
+        "openai_ranking_model"
+    )
+    @classmethod
+    def validate_openai_ranking_model(
+        cls,
+        value: str,
+    ) -> str:
+        """Нормализует название OpenAI-модели."""
+
+        normalized_value = value.strip()
+
+        if not normalized_value:
+            raise ValueError(
+                "OPENAI_RANKING_MODEL "
+                "не может быть пустым."
+            )
+
+        return normalized_value
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Возвращает единый экземпляр настроек приложения."""
+    """
+    Возвращает единый экземпляр настроек.
+    """
 
     return Settings()
