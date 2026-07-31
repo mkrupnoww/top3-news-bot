@@ -1,0 +1,60 @@
+{
+  "publication_date": "2026-07-31",
+  "text_format": "markdown",
+  "post_text": "**TOP-3 киноновостей — пример входного файла**\n\n**1. Первая тестовая новость**\nКраткий текст первой новости.\n\n**2. Вторая тестовая новость**\nКраткий текст второй новости.\n\n**3. Третья тестовая новость**\nКраткий текст третьей новости.\n\n__Это только пример структуры. Не публиковать.__",
+  "items": [
+    {
+      "position": 1,
+      "source_code": "example_source_1",
+      "source_name": "Example Source 1",
+      "source_base_url": "https://example.com",
+      "source_url": "https://example.com/movie-news/example-1",
+      "title": "Первая тестовая киноновость",
+      "summary": "Краткое проверяемое описание первой тестовой новости.",
+      "source_published_at": "2026-07-31T05:30:00Z",
+      "primary_image_url": null,
+      "image_credit": null,
+      "selection_reason": "Первая позиция в примере структуры выпуска.",
+      "metadata": {
+        "example_only": true
+      }
+    },
+    {
+      "position": 2,
+      "source_code": "example_source_2",
+      "source_name": "Example Source 2",
+      "source_base_url": "https://example.org",
+      "source_url": "https://example.org/movie-news/example-2",
+      "title": "Вторая тестовая киноновость",
+      "summary": "Краткое проверяемое описание второй тестовой новости.",
+      "source_published_at": "2026-07-31T04:15:00Z",
+      "primary_image_url": null,
+      "image_credit": null,
+      "selection_reason": "Вторая позиция в примере структуры выпуска.",
+      "metadata": {
+        "example_only": true
+      }
+    },
+    {
+      "position": 3,
+      "source_code": "example_source_3",
+      "source_name": "Example Source 3",
+      "source_base_url": "https://example.net",
+      "source_url": "https://example.net/movie-news/example-3",
+      "title": "Третья тестовая киноновость",
+      "summary": "Краткое проверяемое описание третьей тестовой новости.",
+      "source_published_at": "2026-07-31T03:00:00Z",
+      "primary_image_url": null,
+      "image_credit": null,
+      "selection_reason": "Третья позиция в примере структуры выпуска.",
+      "metadata": {
+        "example_only": true
+      }
+    }
+  ],
+  "metadata": {
+    "input_mode": "manual",
+    "example_only": true,
+    "comment": "Пример формата. Не загружать в рабочую базу."
+  }
+}
