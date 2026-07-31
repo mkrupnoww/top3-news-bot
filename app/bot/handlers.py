@@ -10,10 +10,16 @@ from aiogram.types import (
     Message,
 )
 
+from app.bot.review_source_messages import (
+    build_review_source_messages,
+)
 from app.config import get_settings
 from app.db.review_queue import (
     get_latest_review_draft,
     record_human_review_decision,
+)
+from app.db.review_sources import (
+    get_review_sources,
 )
 from app.db.users import BotUser, get_active_bot_user
 from app.publication import (
@@ -217,29 +223,96 @@ async def handle_review(
         )
         return
 
-    draft = await get_latest_review_draft(db_pool)
+    draft = await get_latest_review_draft(
+        db_pool
+    )
 
     if draft is None:
         await message.answer(
-            "Сейчас нет черновиков со статусом awaiting_review."
+            "Сейчас нет черновиков со статусом "
+            "awaiting_review."
         )
         return
 
     if len(draft.post_text) > 4096:
         await message.answer(
-            "Черновик превышает лимит Telegram в 4096 символов. "
-            "Его нельзя одобрить до сокращения."
+            "Черновик превышает лимит Telegram "
+            "в 4096 символов. Его нельзя одобрить "
+            "до сокращения."
+        )
+        return
+
+    try:
+        source_items = await get_review_sources(
+            db_pool,
+            generated_post_id=(
+                draft.generated_post_id
+            ),
+        )
+
+        source_messages = (
+            build_review_source_messages(
+                source_items
+            )
+        )
+
+    except (LookupError, ValueError) as error:
+        logger.warning(
+            "Review source validation failed: "
+            "generated_post_id=%s, error=%s",
+            draft.generated_post_id,
+            error,
+        )
+
+        await message.answer(
+            "Не удалось подготовить досье "
+            "источников выпуска.\n\n"
+            f"Generated post ID: "
+            f"{draft.generated_post_id}\n"
+            f"Ошибка: {error}\n\n"
+            "Одобрение и публикация заблокированы."
+        )
+        return
+
+    except Exception:
+        logger.exception(
+            "Review source loading failed: "
+            "generated_post_id=%s",
+            draft.generated_post_id,
+        )
+
+        await message.answer(
+            "Не удалось загрузить источники выпуска.\n\n"
+            "Одобрение и публикация заблокированы. "
+            "Подробности сохранены в журнале."
         )
         return
 
     await message.answer(
         "Черновик на проверку\n\n"
-        f"Дата публикации: {draft.publication_date}\n"
+        f"Дата публикации: "
+        f"{draft.publication_date}\n"
         f"Выпуск: {draft.edition}\n"
         f"Batch ID: {draft.batch_id}\n"
-        f"Generated post ID: {draft.generated_post_id}\n"
+        f"Generated post ID: "
+        f"{draft.generated_post_id}\n"
         f"Версия: {draft.version_number}\n"
-        f"Формат: {draft.text_format}"
+        f"Формат: {draft.text_format}\n"
+        f"Источников: {len(source_items)}"
+    )
+
+    await message.answer(
+        "Сначала проверьте источники "
+        "трёх выбранных новостей."
+    )
+
+    for source_message in source_messages:
+        await message.answer(
+            source_message
+        )
+
+    await message.answer(
+        "Итоговый текст публикации:"
     )
 
     await message.answer(
