@@ -110,6 +110,15 @@ class Settings(BaseSettings):
         ),
     )
 
+    openai_generation_model: str = Field(
+        default="gpt-5.6-terra",
+        min_length=1,
+        max_length=128,
+        validation_alias=(
+            "OPENAI_GENERATION_MODEL"
+        ),
+    )
+
     openai_timeout_seconds: float = Field(
         default=60.0,
         gt=0,
@@ -147,10 +156,11 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "openai_ranking_model"
+        "openai_ranking_model",
+        "openai_generation_model",
     )
     @classmethod
-    def validate_openai_ranking_model(
+    def validate_openai_model_name(
         cls,
         value: str,
     ) -> str:
@@ -160,7 +170,7 @@ class Settings(BaseSettings):
 
         if not normalized_value:
             raise ValueError(
-                "OPENAI_RANKING_MODEL "
+                "Название OpenAI-модели "
                 "не может быть пустым."
             )
 
