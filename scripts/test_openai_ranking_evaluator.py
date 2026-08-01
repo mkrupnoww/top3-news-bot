@@ -37,7 +37,7 @@ class FakeStructuredRankingClient:
 
 def build_candidates() -> tuple[
     NewsCandidate,
-    ...
+    ...,
 ]:
     """Создаёт два тестовых кандидата."""
 
@@ -143,17 +143,204 @@ def build_valid_response() -> str:
     )
 
 
-async def test_valid_response() -> None:
-    """Проверяет корректный ответ."""
+def build_evaluator(
+    response_text: str | None = None,
+) -> tuple[
+    OpenAIRankingEvaluator,
+    FakeStructuredRankingClient,
+]:
+    """Создаёт оценщик и fake-клиент."""
 
     client = FakeStructuredRankingClient(
-        build_valid_response()
+        response_text or build_valid_response()
     )
 
     evaluator = OpenAIRankingEvaluator(
         client=client,
         model_name="test-model-no-network",
     )
+
+    return evaluator, client
+
+
+def test_build_request() -> None:
+    """Проверяет подготовку запроса без модели."""
+
+    evaluator, client = build_evaluator()
+
+    candidates = build_candidates()
+
+    request = evaluator.build_request(
+        candidates
+    )
+
+    assert len(client.requests) == 0
+
+    assert request.model == (
+        "test-model-no-network"
+    )
+
+    assert request.instructions.strip()
+
+    input_payload = json.loads(
+        request.input_text
+    )
+
+    assert input_payload["task"] == (
+        "score_movie_news_candidates"
+    )
+
+    assert input_payload["formula"] == (
+        "0.20F + 0.30M + 0.20R "
+        "+ 0.15(H × Q)"
+    )
+
+    assert [
+        candidate["news_id"]
+        for candidate
+        in input_payload["candidates"]
+    ] == [
+        101,
+        102,
+    ]
+
+    assert input_payload[
+        "candidates"
+    ][0]["age_hours"] == 2.0
+
+    assert input_payload[
+        "candidates"
+    ][1]["age_hours"] == 4.0
+
+    print("Request preparation: OK")
+    print("client_call_count=0")
+    print(
+        f"model={request.model}"
+    )
+    print(
+        "candidate_news_ids="
+        + ",".join(
+            str(candidate["news_id"])
+            for candidate
+            in input_payload["candidates"]
+        )
+    )
+
+
+async def test_prepared_request() -> None:
+    """Проверяет заранее подготовленный запрос."""
+
+    evaluator, client = build_evaluator()
+
+    candidates = build_candidates()
+
+    request = evaluator.build_request(
+        candidates
+    )
+
+    evaluation = (
+        await evaluator
+        .evaluate_prepared_request(
+            candidates,
+            request,
+        )
+    )
+
+    assessments = evaluation.assessments
+
+    assert len(client.requests) == 1
+    assert client.requests[0] == request
+
+    assert tuple(
+        assessment.news_id
+        for assessment in assessments
+    ) == (
+        101,
+        102,
+    )
+
+    assert (
+        evaluation.model_response.usage
+        is None
+    )
+
+    assert (
+        evaluation
+        .model_response
+        .cost_estimate
+        is None
+    )
+
+    print()
+    print("Prepared request evaluation: OK")
+    print("client_call_count=1")
+    print(
+        "assessment_order="
+        + ",".join(
+            str(assessment.news_id)
+            for assessment in assessments
+        )
+    )
+
+
+async def test_modified_request_blocking() -> None:
+    """
+    Проверяет изменение подготовленного запроса.
+
+    Изменённый запрос не должен быть отправлен
+    клиенту модели.
+    """
+
+    evaluator, client = build_evaluator()
+
+    candidates = build_candidates()
+
+    valid_request = evaluator.build_request(
+        candidates
+    )
+
+    modified_request = RankingModelRequest(
+        model=valid_request.model,
+        instructions=(
+            valid_request.instructions
+        ),
+        input_text=(
+            valid_request.input_text
+            + " "
+        ),
+    )
+
+    try:
+        await evaluator.evaluate_prepared_request(
+            candidates,
+            modified_request,
+        )
+    except ValueError as error:
+        assert (
+            "Подготовленный запрос "
+            "не соответствует"
+            in str(error)
+        )
+
+        assert len(client.requests) == 0
+
+        print()
+        print(
+            "Modified request blocking: OK"
+        )
+        print("client_call_count=0")
+        return
+
+    raise AssertionError(
+        "Изменённый подготовленный запрос "
+        "не был заблокирован."
+    )
+
+
+async def test_valid_response() -> None:
+    """Проверяет обычный детальный вызов."""
+
+    evaluator, client = build_evaluator()
 
     candidates = build_candidates()
 
@@ -225,6 +412,7 @@ async def test_valid_response() -> None:
         first_assessment.q_score
     ) == "0.95"
 
+    print()
     print(
         "Valid structured response: OK"
     )
@@ -255,14 +443,7 @@ async def test_common_interface() -> None:
     только набор оценок без телеметрии.
     """
 
-    client = FakeStructuredRankingClient(
-        build_valid_response()
-    )
-
-    evaluator = OpenAIRankingEvaluator(
-        client=client,
-        model_name="test-model-no-network",
-    )
+    evaluator, client = build_evaluator()
 
     assessments = await evaluator.evaluate(
         build_candidates()
@@ -310,13 +491,8 @@ async def test_missing_candidate() -> None:
         ensure_ascii=False,
     )
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                response_text
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        response_text
     )
 
     try:
@@ -382,13 +558,8 @@ async def test_unexpected_candidate() -> None:
         ensure_ascii=False,
     )
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                response_text
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        response_text
     )
 
     try:
@@ -457,13 +628,8 @@ async def test_duplicate_candidate() -> None:
         ensure_ascii=False,
     )
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                response_text
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        response_text
     )
 
     try:
@@ -521,13 +687,8 @@ async def test_invalid_score() -> None:
         ensure_ascii=False,
     )
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                response_text
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        response_text
     )
 
     try:
@@ -555,13 +716,8 @@ async def test_invalid_score() -> None:
 async def test_invalid_json() -> None:
     """Проверяет синтаксически неверный JSON."""
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                "{invalid-json"
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        "{invalid-json"
     )
 
     try:
@@ -589,13 +745,8 @@ async def test_invalid_json() -> None:
 async def test_empty_response() -> None:
     """Проверяет пустой ответ модели."""
 
-    evaluator = OpenAIRankingEvaluator(
-        client=(
-            FakeStructuredRankingClient(
-                "   "
-            )
-        ),
-        model_name="test-model-no-network",
+    evaluator, _ = build_evaluator(
+        "   "
     )
 
     try:
@@ -620,17 +771,10 @@ async def test_empty_response() -> None:
 async def test_empty_candidates() -> None:
     """Проверяет пустой список кандидатов."""
 
-    client = FakeStructuredRankingClient(
-        build_valid_response()
-    )
-
-    evaluator = OpenAIRankingEvaluator(
-        client=client,
-        model_name="test-model-no-network",
-    )
+    evaluator, client = build_evaluator()
 
     try:
-        await evaluator.evaluate(())
+        evaluator.build_request(())
     except ValueError as error:
         assert (
             "Список кандидатов"
@@ -655,6 +799,9 @@ async def test_empty_candidates() -> None:
 async def main() -> int:
     """Запускает тест оценщика."""
 
+    test_build_request()
+    await test_prepared_request()
+    await test_modified_request_blocking()
     await test_valid_response()
     await test_common_interface()
     await test_missing_candidate()

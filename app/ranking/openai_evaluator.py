@@ -16,7 +16,6 @@ from app.db.ranking_scores import ManualNewsAssessment
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
-
 from app.ranking.openai_usage import (
     OpenAICostEstimate,
     OpenAITokenUsage,
@@ -40,6 +39,7 @@ class RankingModelRequest:
     instructions: str
     input_text: str
 
+
 @dataclass(frozen=True, slots=True)
 class RankingModelResponse:
     """Ответ модели вместе с телеметрией."""
@@ -55,7 +55,7 @@ class OpenAIRankingEvaluationResult:
 
     assessments: tuple[
         ManualNewsAssessment,
-        ...
+        ...,
     ]
     model_response: RankingModelResponse
 
@@ -65,8 +65,8 @@ class StructuredRankingClient(Protocol):
     """
     Транспортный интерфейс модели.
 
-    Реальная реализация будет использовать
-    OpenAI Responses API. В тестах применяется
+    Реальная реализация использует OpenAI
+    Responses API. В тестах применяется
     локальный клиент без сетевых запросов.
     """
 
@@ -77,6 +77,7 @@ class StructuredRankingClient(Protocol):
         """Возвращает ответ модели и телеметрию."""
 
         ...
+
 
 class OpenAINewsScorePayload(BaseModel):
     """Структурированная оценка одной новости."""
@@ -157,7 +158,6 @@ SYSTEM_INSTRUCTIONS = """
 мировых киноновостей.
 
 Для каждой новости верни пять компонентов:
-
 F — свежесть и актуальность, шкала 0–10.
 Учитывай age_hours. Новость уже прошла строгий
 фильтр временного окна не более 24 часов.
@@ -172,7 +172,6 @@ R — резонанс и потенциальная вовлечённость,
 
 H — цепляющий, необычный или конфликтный
 элемент новости, шкала 0–10.
-
 Q — подтверждённость и качество доступных
 данных, шкала 0–1.
 
@@ -189,7 +188,6 @@ B = 0.20F + 0.30M + 0.20R + 0.15(H × Q)
 4. Для каждой оценки дай краткое объяснение.
 5. Верни только JSON-объект без Markdown.
 6. Формат ответа:
-
 {
   "scores": [
     {
@@ -209,7 +207,7 @@ B = 0.20F + 0.30M + 0.20R + 0.15(H × Q)
 def _validate_candidates(
     candidates: tuple[
         NewsCandidate,
-        ...
+        ...,
     ],
 ) -> tuple[int, ...]:
     """Проверяет входной набор кандидатов."""
@@ -246,7 +244,7 @@ def _validate_candidates(
 def _build_input_text(
     candidates: tuple[
         NewsCandidate,
-        ...
+        ...,
     ],
 ) -> str:
     """Формирует JSON с кандидатами для модели."""
@@ -394,6 +392,62 @@ def _validate_response_news_ids(
         )
 
 
+def _build_assessments(
+    *,
+    candidates: tuple[
+        NewsCandidate,
+        ...,
+    ],
+    payload: OpenAIRankingPayload,
+) -> tuple[
+    ManualNewsAssessment,
+    ...,
+]:
+    """Преобразует ответ модели в оценки."""
+
+    score_by_news_id = {
+        score.news_id: score
+        for score in payload.scores
+    }
+
+    return tuple(
+        ManualNewsAssessment(
+            news_id=candidate.news_id,
+            f_score=(
+                score_by_news_id[
+                    candidate.news_id
+                ].f_score
+            ),
+            m_score=(
+                score_by_news_id[
+                    candidate.news_id
+                ].m_score
+            ),
+            r_score=(
+                score_by_news_id[
+                    candidate.news_id
+                ].r_score
+            ),
+            h_score=(
+                score_by_news_id[
+                    candidate.news_id
+                ].h_score
+            ),
+            q_score=(
+                score_by_news_id[
+                    candidate.news_id
+                ].q_score
+            ),
+            explanation=(
+                score_by_news_id[
+                    candidate.news_id
+                ].explanation
+            ),
+        )
+        for candidate in candidates
+    )
+
+
 class OpenAIRankingEvaluator:
     """Оценщик киноновостей через модель OpenAI."""
 
@@ -439,14 +493,54 @@ class OpenAIRankingEvaluator:
 
         return self._metadata
 
-    async def evaluate_detailed(
+    def build_request(
         self,
         candidates: tuple[
             NewsCandidate,
-            ...
+            ...,
         ],
+    ) -> RankingModelRequest:
+        """
+        Формирует точный запрос без вызова модели.
+
+        Этот объект можно использовать для
+        вычисления request_key и резервирования
+        ranking_run до платного API-запроса.
+        """
+
+        _validate_candidates(candidates)
+
+        model_name = self._metadata.model_name
+
+        if model_name is None:
+            raise RuntimeError(
+                "В метаданных оценщика "
+                "отсутствует model_name."
+            )
+
+        return RankingModelRequest(
+            model=model_name,
+            instructions=SYSTEM_INSTRUCTIONS,
+            input_text=_build_input_text(
+                candidates
+            ),
+        )
+
+    async def evaluate_prepared_request(
+        self,
+        candidates: tuple[
+            NewsCandidate,
+            ...,
+        ],
+        request: RankingModelRequest,
     ) -> OpenAIRankingEvaluationResult:
-        """Оценивает новости и возвращает телеметрию."""
+        """
+        Выполняет заранее сформированный запрос.
+
+        Перед обращением к модели проверяет,
+        что запрос в точности соответствует
+        текущим кандидатам, модели и промпту.
+        """
 
         expected_news_ids = (
             _validate_candidates(
@@ -454,18 +548,16 @@ class OpenAIRankingEvaluator:
             )
         )
 
-        request = RankingModelRequest(
-            model=(
-                self._metadata.model_name
-                or ""
-            ),
-            instructions=(
-                SYSTEM_INSTRUCTIONS
-            ),
-            input_text=_build_input_text(
-                candidates
-            ),
+        expected_request = self.build_request(
+            candidates
         )
+
+        if request != expected_request:
+            raise ValueError(
+                "Подготовленный запрос не "
+                "соответствует текущим "
+                "кандидатам, модели или промпту."
+            )
 
         model_response = (
             await self._client.create_response(
@@ -484,46 +576,9 @@ class OpenAIRankingEvaluator:
             payload=payload,
         )
 
-        score_by_news_id = {
-            score.news_id: score
-            for score in payload.scores
-        }
-
-        assessments = tuple(
-            ManualNewsAssessment(
-                news_id=candidate.news_id,
-                f_score=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].f_score
-                ),
-                m_score=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].m_score
-                ),
-                r_score=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].r_score
-                ),
-                h_score=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].h_score
-                ),
-                q_score=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].q_score
-                ),
-                explanation=(
-                    score_by_news_id[
-                        candidate.news_id
-                    ].explanation
-                ),
-            )
-            for candidate in candidates
+        assessments = _build_assessments(
+            candidates=candidates,
+            payload=payload,
         )
 
         return OpenAIRankingEvaluationResult(
@@ -531,15 +586,33 @@ class OpenAIRankingEvaluator:
             model_response=model_response,
         )
 
+    async def evaluate_detailed(
+        self,
+        candidates: tuple[
+            NewsCandidate,
+            ...,
+        ],
+    ) -> OpenAIRankingEvaluationResult:
+        """Оценивает новости и возвращает телеметрию."""
+
+        request = self.build_request(
+            candidates
+        )
+
+        return await self.evaluate_prepared_request(
+            candidates,
+            request,
+        )
+
     async def evaluate(
         self,
         candidates: tuple[
             NewsCandidate,
-            ...
+            ...,
         ],
     ) -> tuple[
         ManualNewsAssessment,
-        ...
+        ...,
     ]:
         """Оценивает новости через общий интерфейс."""
 
