@@ -1,8 +1,8 @@
 import asyncio
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from uuid import uuid4
-from datetime import datetime, timezone
 
 import asyncpg
 
@@ -17,15 +17,18 @@ from app.db.ranking_run_reservation import (
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
+from app.ranking.openai_evaluator import (
+    OPENAI_EVALUATOR_VERSION,
+    OPENAI_PROMPT_VERSION,
+)
 from app.ranking.request_key import (
     REQUEST_KEY_VERSION,
     RankingRequestKey,
 )
-
-
-FORMULA_VERSION = (
-    "individual_score_formula_v1"
+from app.ranking.score_formula import (
+    FORMULA_VERSION,
 )
+
 
 TEST_NEWS_IDS = (
     7,
@@ -43,10 +46,10 @@ def build_metadata() -> RankingEvaluatorMetadata:
             "OpenAIRankingEvaluator"
         ),
         evaluator_version=(
-            "openai_ranking_evaluator_v1"
+            OPENAI_EVALUATOR_VERSION
         ),
         prompt_version=(
-            "openai_ranking_prompt_v1"
+            OPENAI_PROMPT_VERSION
         ),
         model_name="gpt-5.6-terra",
     )
@@ -172,22 +175,27 @@ async def test_reservation(
     )
 
     assert first_reservation.created_new is True
+
     assert (
         first_reservation.should_call_model
         is True
     )
+
     assert (
         first_reservation.run_status
         == "running"
     )
+
     assert (
         first_reservation.request_key
         == request_key.value
     )
+
     assert (
         first_reservation.formula_version
         == FORMULA_VERSION
     )
+
     assert (
         first_reservation.candidate_count
         == len(TEST_NEWS_IDS)
@@ -201,6 +209,10 @@ async def test_reservation(
     print(
         "request_key="
         f"{first_reservation.request_key}"
+    )
+    print(
+        "formula_version="
+        f"{first_reservation.formula_version}"
     )
     print("created_new=true")
     print("should_call_model=true")
@@ -226,14 +238,17 @@ async def test_reservation(
         second_reservation.ranking_run_id
         == first_reservation.ranking_run_id
     )
+
     assert (
         second_reservation.created_new
         is False
     )
+
     assert (
         second_reservation.should_call_model
         is False
     )
+
     assert (
         second_reservation.run_status
         == "running"
@@ -290,44 +305,70 @@ async def test_reservation(
         record["request_key"]
         == request_key.value
     )
+
     assert record["run_status"] == "running"
+
     assert (
         record["formula_version"]
         == FORMULA_VERSION
     )
+
     assert (
         record["model_name"]
         == metadata.model_name
     )
+
     assert (
         record["prompt_version"]
-        == metadata.prompt_version
+        == OPENAI_PROMPT_VERSION
     )
+
     assert (
         record["candidate_count"]
         == len(TEST_NEWS_IDS)
     )
+
     assert record["scored_count"] == 0
     assert record["eligible_count"] == 0
+
     assert (
         record["run_mode"]
         == metadata.run_mode
     )
+
     assert (
         record["evaluator_name"]
         == metadata.evaluator_name
     )
+
     assert (
         record["evaluator_version"]
-        == metadata.evaluator_version
+        == OPENAI_EVALUATOR_VERSION
     )
+
     assert (
         record["request_key_version"]
         == REQUEST_KEY_VERSION
     )
 
+    assert list(
+        record["news_ids"]
+    ) == list(TEST_NEWS_IDS)
+
     print()
     print("Persisted reservation data: OK")
+    print(
+        "formula_version="
+        f"{record['formula_version']}"
+    )
+    print(
+        "prompt_version="
+        f"{record['prompt_version']}"
+    )
+    print(
+        "evaluator_version="
+        f"{record['evaluator_version']}"
+    )
     print(
         "candidate_count="
         f"{record['candidate_count']}"
