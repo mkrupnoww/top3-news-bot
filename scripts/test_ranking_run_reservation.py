@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from typing import Any
 from uuid import uuid4
 
 import asyncpg
@@ -83,6 +84,55 @@ def build_test_request_key() -> RankingRequestKey:
     )
 
 
+def decode_jsonb_array(
+    value: Any,
+) -> list[int]:
+    """
+    Преобразует значение jsonb в список int.
+
+    asyncpg по умолчанию может вернуть jsonb
+    как строку JSON, а при пользовательском
+    кодеке — уже как Python-объект.
+    """
+
+    decoded_value: Any
+
+    if isinstance(value, str):
+        try:
+            decoded_value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                "Поле jsonb содержит "
+                "некорректный JSON."
+            ) from error
+    else:
+        decoded_value = value
+
+    if not isinstance(decoded_value, list):
+        raise AssertionError(
+            "Поле jsonb news_ids "
+            "не является массивом."
+        )
+
+    result: list[int] = []
+
+    for item in decoded_value:
+        if isinstance(item, bool):
+            raise AssertionError(
+                "news_ids содержит bool."
+            )
+
+        if not isinstance(item, int):
+            raise AssertionError(
+                "news_ids содержит значение "
+                "не типа int."
+            )
+
+        result.append(item)
+
+    return result
+
+
 async def delete_test_run(
     pool: asyncpg.Pool,
     *,
@@ -134,8 +184,10 @@ async def assert_test_run_deleted(
 
 async def test_reservation(
     pool: asyncpg.Pool,
-) -> int:
-    """Проверяет первичное резервирование."""
+    *,
+    created_run_ids: set[int],
+) -> None:
+    """Проверяет резервирование запуска."""
 
     request_key = build_test_request_key()
     metadata = build_metadata()
@@ -172,6 +224,12 @@ async def test_reservation(
             ),
             news_ids=TEST_NEWS_IDS,
         )
+    )
+
+    # Сохраняем ID немедленно, чтобы finally
+    # удалил запись при любом последующем сбое.
+    created_run_ids.add(
+        first_reservation.ranking_run_id
     )
 
     assert first_reservation.created_new is True
@@ -301,6 +359,10 @@ async def test_reservation(
             "не найден."
         )
 
+    persisted_news_ids = decode_jsonb_array(
+        record["news_ids"]
+    )
+
     assert (
         record["request_key"]
         == request_key.value
@@ -351,9 +413,10 @@ async def test_reservation(
         == REQUEST_KEY_VERSION
     )
 
-    assert list(
-        record["news_ids"]
-    ) == list(TEST_NEWS_IDS)
+    assert (
+        persisted_news_ids
+        == list(TEST_NEWS_IDS)
+    )
 
     print()
     print("Persisted reservation data: OK")
@@ -384,6 +447,13 @@ async def test_reservation(
     print(
         "request_key_version="
         f"{record['request_key_version']}"
+    )
+    print(
+        "news_ids="
+        + ",".join(
+            str(news_id)
+            for news_id in persisted_news_ids
+        )
     )
 
     try:
@@ -420,7 +490,36 @@ async def test_reservation(
             "не был заблокирован."
         )
 
-    return first_reservation.ranking_run_id
+
+async def cleanup_test_runs(
+    pool: asyncpg.Pool,
+    *,
+    created_run_ids: set[int],
+) -> None:
+    """Удаляет все созданные тестом запуски."""
+
+    for ranking_run_id in sorted(
+        created_run_ids
+    ):
+        await delete_test_run(
+            pool,
+            ranking_run_id=ranking_run_id,
+        )
+
+        await assert_test_run_deleted(
+            pool,
+            ranking_run_id=ranking_run_id,
+        )
+
+        print()
+        print("Test data cleanup: OK")
+        print(
+            "temporary_ranking_run_id="
+            f"{ranking_run_id}"
+        )
+        print(
+            "temporary_ranking_run_deleted=true"
+        )
 
 
 async def main() -> int:
@@ -432,31 +531,21 @@ async def main() -> int:
         settings
     )
 
-    ranking_run_id: int | None = None
+    created_run_ids: set[int] = set()
 
     try:
-        ranking_run_id = (
-            await test_reservation(pool)
+        await test_reservation(
+            pool,
+            created_run_ids=created_run_ids,
         )
     finally:
-        if ranking_run_id is not None:
-            await delete_test_run(
+        try:
+            await cleanup_test_runs(
                 pool,
-                ranking_run_id=ranking_run_id,
+                created_run_ids=created_run_ids,
             )
-
-            await assert_test_run_deleted(
-                pool,
-                ranking_run_id=ranking_run_id,
-            )
-
-            print()
-            print("Test data cleanup: OK")
-            print(
-                "temporary_ranking_run_deleted=true"
-            )
-
-        await close_database_pool(pool)
+        finally:
+            await close_database_pool(pool)
 
     print()
     print("OpenAI requests: not performed")
