@@ -47,7 +47,8 @@ def parse_as_of(
         or parsed_value.utcoffset() is None
     ):
         raise argparse.ArgumentTypeError(
-            "--as-of должен содержать часовой пояс."
+            "--as-of должен содержать "
+            "часовой пояс."
         )
 
     return parsed_value.astimezone(
@@ -60,9 +61,9 @@ def parse_arguments() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Оценивает реальные кандидаты из "
-            "PostgreSQL одним запросом OpenAI. "
-            "Данные не изменяются."
+            "Оценивает реальные кандидаты "
+            "из PostgreSQL одним запросом "
+            "OpenAI. Данные не изменяются."
         ),
     )
 
@@ -80,8 +81,9 @@ def parse_arguments() -> argparse.Namespace:
         type=parse_as_of,
         default=None,
         help=(
-            "Конец временного окна в ISO 8601. "
-            "По умолчанию используется текущее UTC."
+            "Конец временного окна "
+            "в ISO 8601. По умолчанию "
+            "используется текущее UTC."
         ),
     )
 
@@ -106,7 +108,9 @@ def parse_arguments() -> argparse.Namespace:
         "--limit",
         type=int,
         default=20,
-        help="Максимальное число кандидатов.",
+        help=(
+            "Максимальное число кандидатов."
+        ),
     )
 
     parser.add_argument(
@@ -146,22 +150,26 @@ def validate_arguments(
 
     if arguments.window_hours <= 0:
         raise ValueError(
-            "--window-hours должен быть больше нуля."
+            "--window-hours должен быть "
+            "больше нуля."
         )
 
     if arguments.limit <= 0:
         raise ValueError(
-            "--limit должен быть больше нуля."
+            "--limit должен быть "
+            "больше нуля."
         )
 
     if arguments.limit > 100:
         raise ValueError(
-            "--limit не может превышать 100."
+            "--limit не может "
+            "превышать 100."
         )
 
     if arguments.top_size <= 0:
         raise ValueError(
-            "--top-size должен быть больше нуля."
+            "--top-size должен быть "
+            "больше нуля."
         )
 
 
@@ -177,7 +185,10 @@ async def main(
         print(f"error={error}")
         print("OpenAI requests: not performed")
         print("Database changes: not performed")
-        print("Telegram publication: not performed")
+        print(
+            "Telegram publication: "
+            "not performed"
+        )
         return 2
 
     if not arguments.confirm_live_request:
@@ -188,7 +199,10 @@ async def main(
         )
         print("OpenAI requests: not performed")
         print("Database changes: not performed")
-        print("Telegram publication: not performed")
+        print(
+            "Telegram publication: "
+            "not performed"
+        )
         return 2
 
     as_of = (
@@ -212,7 +226,9 @@ async def main(
                 ),
                 limit=arguments.limit,
                 source_codes=(
-                    tuple(arguments.source_code)
+                    tuple(
+                        arguments.source_code
+                    )
                     if arguments.source_code
                     else None
                 ),
@@ -233,18 +249,25 @@ async def main(
         )
         print("OpenAI requests: not performed")
         print("Database changes: not performed")
-        print("Telegram publication: not performed")
+        print(
+            "Telegram publication: "
+            "not performed"
+        )
         return 2
 
     if arguments.top_size > len(candidates):
         print("OpenAI candidate probe refused")
         print(
-            "--top-size превышает количество "
-            f"кандидатов: {len(candidates)}"
+            "--top-size превышает "
+            "количество кандидатов: "
+            f"{len(candidates)}"
         )
         print("OpenAI requests: not performed")
         print("Database changes: not performed")
-        print("Telegram publication: not performed")
+        print(
+            "Telegram publication: "
+            "not performed"
+        )
         return 2
 
     runtime = create_openai_ranking_runtime(
@@ -253,7 +276,7 @@ async def main(
 
     print("OpenAI candidate probe started")
     print(
-        f"model="
+        "model="
         f"{runtime.evaluator.metadata.model_name}"
     )
     print(
@@ -269,22 +292,56 @@ async def main(
     )
 
     try:
-        assessments = (
-            await runtime.evaluator.evaluate(
+        evaluation = (
+            await runtime
+            .evaluator
+            .evaluate_detailed(
                 candidates
             )
         )
+
+        usage = (
+            evaluation.model_response.usage
+        )
+
+        cost_estimate = (
+            evaluation
+            .model_response
+            .cost_estimate
+        )
+
+        if usage is None:
+            raise ValueError(
+                "Оценщик не вернул "
+                "OpenAI token usage."
+            )
+
+        if cost_estimate is None:
+            raise ValueError(
+                "Оценщик не вернул "
+                "расчёт стоимости."
+            )
+
+        assessments = (
+            evaluation.assessments
+        )
+
     except Exception as error:
         print()
         print("OpenAI candidate probe: FAILED")
         print(
-            f"error_type="
+            "error_type="
             f"{type(error).__name__}"
         )
         print(f"error={error}")
+        print("OpenAI requests: attempted=1")
         print("Database changes: not performed")
-        print("Telegram publication: not performed")
+        print(
+            "Telegram publication: "
+            "not performed"
+        )
         return 1
+
     finally:
         await close_sdk_client(
             runtime.sdk_client
@@ -350,9 +407,11 @@ async def main(
             f"news_id={candidate.news_id} "
             f"score={individual_score}"
         )
-        print(f"   title={candidate.title}")
         print(
-            f"   source="
+            f"   title={candidate.title}"
+        )
+        print(
+            "   source="
             f"{candidate.source_name} "
             f"[{candidate.source_code}]"
         )
@@ -368,7 +427,7 @@ async def main(
             f"   explanation={explanation}"
         )
         print(
-            f"   source_url="
+            "   source_url="
             f"{candidate.source_url}"
         )
 
@@ -395,9 +454,74 @@ async def main(
         )
 
     print()
+    print("OpenAI token usage:")
+    print(
+        f"input_tokens="
+        f"{usage.input_tokens}"
+    )
+    print(
+        f"regular_input_tokens="
+        f"{usage.regular_input_tokens}"
+    )
+    print(
+        f"cached_input_tokens="
+        f"{usage.cached_input_tokens}"
+    )
+    print(
+        f"cache_write_tokens="
+        f"{usage.cache_write_tokens}"
+    )
+    print(
+        f"output_tokens="
+        f"{usage.output_tokens}"
+    )
+    print(
+        f"reasoning_tokens="
+        f"{usage.reasoning_tokens}"
+    )
+    print(
+        f"total_tokens="
+        f"{usage.total_tokens}"
+    )
+
+    print()
+    print("OpenAI estimated cost:")
+    print(
+        f"model="
+        f"{cost_estimate.model_name}"
+    )
+    print(
+        f"pricing_version="
+        f"{cost_estimate.pricing_version}"
+    )
+    print(
+        "regular_input_cost_usd="
+        f"{cost_estimate.regular_input_cost_usd}"
+    )
+    print(
+        "cached_input_cost_usd="
+        f"{cost_estimate.cached_input_cost_usd}"
+    )
+    print(
+        "cache_write_cost_usd="
+        f"{cost_estimate.cache_write_cost_usd}"
+    )
+    print(
+        "output_cost_usd="
+        f"{cost_estimate.output_cost_usd}"
+    )
+    print(
+        "total_cost_usd="
+        f"{cost_estimate.total_cost_usd}"
+    )
+
+    print()
     print("OpenAI requests: performed=1")
     print("Database changes: not performed")
-    print("Telegram publication: not performed")
+    print(
+        "Telegram publication: "
+        "not performed"
+    )
     print("OpenAI candidate probe: OK")
 
     return 0
