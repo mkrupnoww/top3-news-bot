@@ -77,6 +77,44 @@ class CalculatedEventScore:
 
 
 @dataclass(frozen=True, slots=True)
+class EventScoreCalculationResult:
+    """Промежуточный расчёт всех event-level баллов."""
+
+    formula_version: str
+    window_start: datetime
+    window_end: datetime
+    audience_maxima: AudienceMetricMaxima
+    calculated_events: tuple[
+        CalculatedEventScore,
+        ...,
+    ]
+
+    @property
+    def scores(
+        self,
+    ) -> tuple[
+        FullNewsScore,
+        ...,
+    ]:
+        """Возвращает только полные оценки."""
+
+        return tuple(
+            item.score
+            for item in self.calculated_events
+        )
+
+    @property
+    def eligible_count(self) -> int:
+        """Возвращает число допустимых инфоповодов."""
+
+        return sum(
+            1
+            for item in self.calculated_events
+            if item.score.is_eligible
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EventFormulaCalculationResult:
     """Результат полного расчёта TOP-3 для окна."""
 
@@ -553,7 +591,7 @@ def _normalize_metric(
     )
 
 
-def calculate_event_formula(
+def calculate_event_scores(
     *,
     selection: CandidateSelectionResult,
     events: tuple[
@@ -564,9 +602,13 @@ def calculate_event_formula(
         EventAudienceMetrics,
         ...,
     ] = (),
-) -> EventFormulaCalculationResult:
+) -> EventScoreCalculationResult:
     """
-    Выполняет детерминированный расчёт v2.
+    Рассчитывает баллы всех инфоповодов.
+
+    Выбор комбинации TOP-3 не выполняется.
+    Поэтому результат остаётся доступным даже
+    при числе допустимых инфоповодов меньше трёх.
 
     OpenAI, PostgreSQL и Telegram не вызываются.
     """
@@ -679,24 +721,94 @@ def calculate_event_formula(
             )
         )
 
-    calculated_tuple = tuple(
-        calculated_events
-    )
-
-    top3_selection = (
-        select_top3_combination(
-            tuple(
-                item.score
-                for item in calculated_tuple
-            )
-        )
-    )
-
-    return EventFormulaCalculationResult(
+    return EventScoreCalculationResult(
         formula_version=FULL_FORMULA_VERSION,
         window_start=window_start,
         window_end=window_end,
         audience_maxima=audience_maxima,
-        calculated_events=calculated_tuple,
+        calculated_events=tuple(
+            calculated_events
+        ),
+    )
+
+
+def select_event_top3(
+    calculation: EventScoreCalculationResult,
+) -> EventFormulaCalculationResult:
+    """
+    Выбирает победившую комбинацию TOP-3.
+
+    При eligible_count < 3 функция выбрасывает
+    ValueError, но исходный промежуточный объект
+    calculation остаётся доступным вызывающему коду.
+    """
+
+    if not isinstance(
+        calculation,
+        EventScoreCalculationResult,
+    ):
+        raise TypeError(
+            "calculation должен быть "
+            "EventScoreCalculationResult."
+        )
+
+    if calculation.formula_version != (
+        FULL_FORMULA_VERSION
+    ):
+        raise ValueError(
+            "Неподдерживаемая formula_version "
+            "промежуточного расчёта."
+        )
+
+    top3_selection = (
+        select_top3_combination(
+            calculation.scores
+        )
+    )
+
+    return EventFormulaCalculationResult(
+        formula_version=(
+            calculation.formula_version
+        ),
+        window_start=calculation.window_start,
+        window_end=calculation.window_end,
+        audience_maxima=(
+            calculation.audience_maxima
+        ),
+        calculated_events=(
+            calculation.calculated_events
+        ),
         top3_selection=top3_selection,
+    )
+
+
+def calculate_event_formula(
+    *,
+    selection: CandidateSelectionResult,
+    events: tuple[
+        EventAssessment,
+        ...,
+    ],
+    audience_metrics: tuple[
+        EventAudienceMetrics,
+        ...,
+    ] = (),
+) -> EventFormulaCalculationResult:
+    """
+    Выполняет полный детерминированный расчёт v2.
+
+    Сохраняет прежний публичный интерфейс:
+    рассчитывает все баллы и сразу выбирает TOP-3.
+
+    OpenAI, PostgreSQL и Telegram не вызываются.
+    """
+
+    score_calculation = calculate_event_scores(
+        selection=selection,
+        events=events,
+        audience_metrics=audience_metrics,
+    )
+
+    return select_event_top3(
+        score_calculation
     )

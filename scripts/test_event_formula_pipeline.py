@@ -13,6 +13,8 @@ from app.ranking.event_evaluator import (
 from app.ranking.event_formula_pipeline import (
     EventAudienceMetrics,
     calculate_event_formula,
+    calculate_event_scores,
+    select_event_top3,
 )
 from app.ranking.full_formula import (
     EXCLUSION_REASON_QUALITY_ZERO,
@@ -517,6 +519,115 @@ def test_no_audience_metrics() -> None:
     print("all_resonance_scores=0")
 
 
+
+def test_intermediate_scores_survive_insufficient_top3(
+) -> None:
+    """Сохраняет баллы при eligible_count меньше трёх."""
+
+    events = list(build_events())
+
+    events[1] = replace(
+        events[1],
+        q_score=Decimal("0"),
+        q_reason=(
+            "Synthetic diagnostic exclusion."
+        ),
+    )
+
+    events[2] = replace(
+        events[2],
+        q_score=Decimal("0"),
+        q_reason=(
+            "Synthetic diagnostic exclusion."
+        ),
+    )
+
+    score_calculation = calculate_event_scores(
+        selection=build_selection(),
+        events=tuple(events),
+    )
+
+    assert score_calculation.formula_version == (
+        FULL_FORMULA_VERSION
+    )
+
+    assert len(
+        score_calculation.calculated_events
+    ) == 4
+
+    assert len(score_calculation.scores) == 4
+
+    assert score_calculation.eligible_count == 1
+
+    eligible_news_ids = tuple(
+        item.score.news_id
+        for item
+        in score_calculation.calculated_events
+        if item.score.is_eligible
+    )
+
+    excluded_news_ids = tuple(
+        item.score.news_id
+        for item
+        in score_calculation.calculated_events
+        if not item.score.is_eligible
+    )
+
+    assert eligible_news_ids == (
+        101,
+    )
+
+    assert excluded_news_ids == (
+        103,
+        104,
+        105,
+    )
+
+    assert all(
+        item.score.exclusion_reason
+        == EXCLUSION_REASON_QUALITY_ZERO
+        for item
+        in score_calculation.calculated_events
+        if not item.score.is_eligible
+    )
+
+    try:
+        select_event_top3(
+            score_calculation
+        )
+    except ValueError as error:
+        assert "eligible_count=1" in str(error)
+
+        print()
+        print(
+            "Intermediate scores on insufficient "
+            "TOP-3: OK"
+        )
+        print("calculated_event_count=4")
+        print("eligible_count=1")
+        print(
+            "eligible_news_ids="
+            + ",".join(
+                str(news_id)
+                for news_id
+                in eligible_news_ids
+            )
+        )
+        print(
+            "excluded_news_ids="
+            + ",".join(
+                str(news_id)
+                for news_id
+                in excluded_news_ids
+            )
+        )
+        return
+
+    raise AssertionError(
+        "TOP-3 был ошибочно выбран "
+        "при eligible_count=1."
+    )
+
 def test_invalid_window() -> None:
     """Блокирует окно, отличное от 24 часов."""
 
@@ -691,6 +802,7 @@ def main() -> int:
 
     test_complete_calculation()
     test_no_audience_metrics()
+    test_intermediate_scores_survive_insufficient_top3()
     test_invalid_window()
     test_missing_candidate_coverage()
     test_unknown_metrics_event()
