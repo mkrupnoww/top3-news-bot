@@ -135,11 +135,6 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                                 "counts_toward_reach": {
                                     "type": "boolean",
                                 },
-                                "source_weight": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 3,
-                                },
                                 "membership_reason": {
                                     "type": "string",
                                     "minLength": 1,
@@ -152,7 +147,6 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                                 "is_representative",
                                 "is_independent_source",
                                 "counts_toward_reach",
-                                "source_weight",
                                 "membership_reason",
                             ],
                             "additionalProperties": False,

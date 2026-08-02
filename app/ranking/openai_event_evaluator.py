@@ -11,7 +11,6 @@ from pydantic import (
 )
 
 from app.prompt_loader import load_prompt
-
 from app.db.news_candidates import (
     CandidateSelectionResult,
     NewsCandidate,
@@ -28,10 +27,8 @@ from app.ranking.event_evaluator import (
     EventMemberAssessment,
     EventRankingEvaluationResult,
     EventRankingModelRequest,
-    EventRankingModelResponse,
     StructuredEventRankingClient,
 )
-
 
 
 class OpenAIEventMemberPayload(BaseModel):
@@ -53,11 +50,6 @@ class OpenAIEventMemberPayload(BaseModel):
     is_representative: bool
     is_independent_source: bool
     counts_toward_reach: bool
-
-    source_weight: int = Field(
-        ge=0,
-        le=3,
-    )
 
     membership_reason: str = Field(
         min_length=1,
@@ -255,7 +247,7 @@ class OpenAIEventRankingPayload(BaseModel):
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v1.txt"
+    "ranking/movie_news_event_ranking_prompt_v2.txt"
 )
 
 
@@ -406,6 +398,34 @@ def _validate_candidate(
             f"news_id={candidate.news_id}"
         )
 
+    source_weight = candidate.source_weight
+
+    if source_weight is None:
+        raise ValueError(
+            "Для event-level v2 не настроен "
+            "вес источника: "
+            f"news_id={candidate.news_id}, "
+            f"source_code={candidate.source_code!r}"
+        )
+
+    if (
+        isinstance(source_weight, bool)
+        or not isinstance(source_weight, int)
+    ):
+        raise ValueError(
+            "Вес источника должен быть int: "
+            f"news_id={candidate.news_id}, "
+            f"source_weight={source_weight!r}"
+        )
+
+    if not 1 <= source_weight <= 3:
+        raise ValueError(
+            "Настроенный вес источника должен "
+            "находиться в диапазоне 1..3: "
+            f"news_id={candidate.news_id}, "
+            f"source_weight={source_weight}"
+        )
+
 
 def _build_input_text(
     selection: CandidateSelectionResult,
@@ -444,23 +464,18 @@ def _build_input_text(
         "source_relations": sorted(
             SOURCE_RELATIONS
         ),
-        "source_weight_scale": {
-            "3": (
-                "leading international agency "
-                "or trade publication"
+        "source_weight_policy": {
+            "configured_by": (
+                "sources.settings.ranking."
+                "source_weight"
             ),
-            "2": (
-                "major national, business, "
-                "or entertainment media"
-            ),
-            "1": (
-                "authoritative local or "
-                "niche publication"
-            ),
-            "0": (
-                "aggregator, weak source, "
-                "syndication, or duplicate"
-            ),
+            "model_must_not_return": True,
+            "effective_weight_rules": {
+                "counts_toward_reach_true": (
+                    "use configured_source_weight"
+                ),
+                "otherwise": 0,
+            },
         },
         "candidates": [
             {
@@ -471,6 +486,9 @@ def _build_input_text(
                 ),
                 "source_name": (
                     candidate.source_name
+                ),
+                "configured_source_weight": (
+                    candidate.source_weight
                 ),
                 "collection_priority": (
                     candidate.collection_priority
@@ -534,13 +552,125 @@ def _parse_response(
         ) from error
 
 
-def _build_events(
+def _validate_payload_coverage(
+    *,
+    expected_news_ids: tuple[int, ...],
     payload: OpenAIEventRankingPayload,
+) -> None:
+    """Проверяет raw payload до построения доменных типов."""
+
+    response_news_ids = [
+        member.news_id
+        for event in payload.events
+        for member in event.members
+    ]
+
+    duplicate_news_ids = sorted(
+        {
+            news_id
+            for news_id in response_news_ids
+            if response_news_ids.count(
+                news_id
+            ) > 1
+        }
+    )
+
+    if duplicate_news_ids:
+        raise ValueError(
+            "Модель распределила news_id "
+            "по нескольким инфоповодам: "
+            + ",".join(
+                str(news_id)
+                for news_id
+                in duplicate_news_ids
+            )
+        )
+
+    expected_set = set(
+        expected_news_ids
+    )
+
+    response_set = set(
+        response_news_ids
+    )
+
+    missing_news_ids = sorted(
+        expected_set - response_set
+    )
+
+    unexpected_news_ids = sorted(
+        response_set - expected_set
+    )
+
+    if (
+        missing_news_ids
+        or unexpected_news_ids
+    ):
+        raise ValueError(
+            "Модель вернула некорректное "
+            "распределение news_id: "
+            f"missing={missing_news_ids}, "
+            f"unexpected={unexpected_news_ids}"
+        )
+
+    representative_news_ids = [
+        event.representative_news_id
+        for event in payload.events
+    ]
+
+    if (
+        len(set(representative_news_ids))
+        != len(representative_news_ids)
+    ):
+        raise ValueError(
+            "Несколько инфоповодов используют "
+            "одинаковый representative_news_id."
+        )
+
+
+def _effective_source_weight(
+    *,
+    member: OpenAIEventMemberPayload,
+    candidates_by_news_id: dict[
+        int,
+        NewsCandidate,
+    ],
+) -> int:
+    """Назначает расчётный вес из конфигурации источника."""
+
+    if not member.counts_toward_reach:
+        return 0
+
+    candidate = candidates_by_news_id[
+        member.news_id
+    ]
+
+    source_weight = candidate.source_weight
+
+    if source_weight is None:
+        raise RuntimeError(
+            "Вес источника неожиданно "
+            "отсутствует после проверки: "
+            f"news_id={member.news_id}"
+        )
+
+    return source_weight
+
+
+def _build_events(
+    *,
+    payload: OpenAIEventRankingPayload,
+    selection: CandidateSelectionResult,
 ) -> tuple[
     EventAssessment,
     ...,
 ]:
-    """Преобразует Pydantic payload в доменные типы."""
+    """Преобразует payload, подставляя веса из БД."""
+
+    candidates_by_news_id = {
+        candidate.news_id: candidate
+        for candidate in selection.candidates
+    }
 
     return tuple(
         EventAssessment(
@@ -581,7 +711,12 @@ def _build_events(
                         .counts_toward_reach
                     ),
                     source_weight=(
-                        member.source_weight
+                        _effective_source_weight(
+                            member=member,
+                            candidates_by_news_id=(
+                                candidates_by_news_id
+                            ),
+                        )
                     ),
                     membership_reason=(
                         member
@@ -726,7 +861,7 @@ def _sort_events_by_input_order(
     ],
 ) -> tuple[
     EventAssessment,
-    ...,
+        ...,
 ]:
     """Делает порядок инфоповодов детерминированным."""
 
@@ -861,8 +996,16 @@ class OpenAIEventRankingEvaluator:
             model_response.output_text
         )
 
+        _validate_payload_coverage(
+            expected_news_ids=(
+                expected_news_ids
+            ),
+            payload=payload,
+        )
+
         events = _build_events(
-            payload
+            payload=payload,
+            selection=selection,
         )
 
         _validate_event_coverage(

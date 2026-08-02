@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 
@@ -97,6 +98,7 @@ def build_selection() -> CandidateSelectionResult:
             primary_image_url=(
                 "https://example.com/101.jpg"
             ),
+            source_weight=3,
         ),
         NewsCandidate(
             news_id=102,
@@ -127,6 +129,7 @@ def build_selection() -> CandidateSelectionResult:
                 "https://example.com/news/102"
             ),
             primary_image_url=None,
+            source_weight=2,
         ),
         NewsCandidate(
             news_id=103,
@@ -153,6 +156,7 @@ def build_selection() -> CandidateSelectionResult:
                 "https://example.com/news/103"
             ),
             primary_image_url=None,
+            source_weight=1,
         ),
     )
 
@@ -168,8 +172,8 @@ def build_valid_response() -> str:
     """
     Возвращает два инфоповода.
 
-    Порядок специально обратный входному,
-    чтобы проверить детерминированную сортировку.
+    Модель не возвращает source_weight.
+    Порядок событий специально обратный входному.
     """
 
     return json.dumps(
@@ -218,7 +222,6 @@ def build_valid_response() -> str:
                             "counts_toward_reach": (
                                 True
                             ),
-                            "source_weight": 2,
                             "membership_reason": (
                                 "Первичная профильная "
                                 "публикация."
@@ -269,7 +272,6 @@ def build_valid_response() -> str:
                             "counts_toward_reach": (
                                 True
                             ),
-                            "source_weight": 3,
                             "membership_reason": (
                                 "Наиболее содержательная "
                                 "первичная публикация."
@@ -287,7 +289,6 @@ def build_valid_response() -> str:
                             "counts_toward_reach": (
                                 False
                             ),
-                            "source_weight": 0,
                             "membership_reason": (
                                 "Повторяет тот же "
                                 "инфоповод без новых фактов."
@@ -368,6 +369,24 @@ def test_build_request() -> None:
         103,
     ]
 
+    assert [
+        candidate["configured_source_weight"]
+        for candidate
+        in payload["candidates"]
+    ] == [
+        3,
+        2,
+        1,
+    ]
+
+    assert (
+        payload["source_weight_policy"]
+        ["model_must_not_return"]
+        is True
+    )
+
+    assert "source_weight_scale" not in payload
+
     forbidden_fields = {
         "f_score",
         "u_score",
@@ -398,10 +417,17 @@ def test_build_request() -> None:
         == EVENT_PROMPT_VERSION
     )
 
+    assert EVENT_EVALUATOR_VERSION == (
+        "event_ranking_evaluator_v2"
+    )
+    assert EVENT_PROMPT_VERSION == (
+        "movie_news_event_ranking_prompt_v2"
+    )
+
     print("Request preparation: OK")
     print("client_call_count=0")
     print(
-        "candidate_news_ids=101,102,103"
+        "configured_source_weights=3,2,1"
     )
     print(
         f"prompt_chars="
@@ -410,7 +436,7 @@ def test_build_request() -> None:
 
 
 async def test_prepared_request() -> None:
-    """Проверяет заранее подготовленный запрос."""
+    """Проверяет подстановку веса из конфигурации."""
 
     evaluator, client = build_evaluator()
     selection = build_selection()
@@ -444,12 +470,27 @@ async def test_prepared_request() -> None:
     )
 
     first_event = result.events[0]
+    second_event = result.events[1]
 
     assert first_event.member_news_ids == (
         101,
         102,
     )
     assert first_event.source_weight_sum == 3
+
+    first_weights = {
+        member.news_id: member.source_weight
+        for member in first_event.members
+    }
+
+    assert first_weights == {
+        101: 3,
+        102: 0,
+    }
+
+    assert second_event.source_weight_sum == 1
+    assert second_event.members[0].source_weight == 1
+
     assert (
         first_event.event_time_utc
         == datetime(
@@ -464,14 +505,94 @@ async def test_prepared_request() -> None:
 
     print()
     print(
-        "Prepared request evaluation: OK"
+        "Configured source weight application: OK"
     )
     print("client_call_count=1")
-    print(
-        "event_order=101,103"
+    print("first_event_weights=101:3,102:0")
+    print("second_event_weights=103:1")
+
+
+def test_missing_configured_source_weight() -> None:
+    """Блокирует запрос до модели без веса в БД."""
+
+    evaluator, client = build_evaluator()
+    selection = build_selection()
+
+    candidates = list(
+        selection.candidates
     )
-    print(
-        "first_event_members=101,102"
+
+    candidates[1] = replace(
+        candidates[1],
+        source_weight=None,
+    )
+
+    invalid_selection = replace(
+        selection,
+        candidates=tuple(candidates),
+    )
+
+    try:
+        evaluator.build_request(
+            invalid_selection
+        )
+    except ValueError as error:
+        assert "не настроен" in str(error)
+        assert "example_wire" in str(error)
+        assert len(client.requests) == 0
+
+        print()
+        print(
+            "Missing source weight blocking: OK"
+        )
+        print("client_call_count=0")
+        return
+
+    raise AssertionError(
+        "Отсутствующий source_weight "
+        "не был заблокирован."
+    )
+
+
+async def test_model_source_weight_rejected() -> None:
+    """Блокирует попытку модели вернуть вес."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["events"][0]["members"][0][
+        "source_weight"
+    ] = 3
+
+    evaluator, client = build_evaluator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_selection()
+        )
+    except ValueError as error:
+        assert (
+            "не соответствует "
+            "event-level схеме"
+            in str(error)
+        )
+        assert len(client.requests) == 1
+
+        print()
+        print(
+            "Model source_weight rejection: OK"
+        )
+        return
+
+    raise AssertionError(
+        "source_weight от модели "
+        "не был заблокирован."
     )
 
 
@@ -593,7 +714,6 @@ async def test_unexpected_candidate() -> None:
             "is_representative": False,
             "is_independent_source": False,
             "counts_toward_reach": False,
-            "source_weight": 0,
             "membership_reason": (
                 "Посторонняя тестовая публикация."
             ),
@@ -642,7 +762,6 @@ async def test_cross_event_duplicate() -> None:
             "is_representative": False,
             "is_independent_source": False,
             "counts_toward_reach": False,
-            "source_weight": 0,
             "membership_reason": (
                 "Повторное ошибочное включение."
             ),
@@ -858,6 +977,8 @@ async def main() -> int:
 
     test_build_request()
     await test_prepared_request()
+    test_missing_configured_source_weight()
+    await test_model_source_weight_rejected()
     await test_modified_request_blocking()
     await test_common_interface()
     await test_missing_candidate()
@@ -876,7 +997,7 @@ async def main() -> int:
     print("Telegram publication: not performed")
     print(
         "OpenAI event ranking evaluator "
-        "fake-client test: OK"
+        "source-weight test: OK"
     )
 
     return 0

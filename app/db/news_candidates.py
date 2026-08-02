@@ -21,6 +21,7 @@ class NewsCandidate:
     age_hours: float
     source_url: str
     primary_image_url: str | None
+    source_weight: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,9 @@ async def select_news_candidates(
 ) -> CandidateSelectionResult:
     """
     Выбирает новости из заданного временного окна.
+
+    Вес источника читается из:
+    sources.settings.ranking.source_weight.
 
     PostgreSQL изменён не будет.
     """
@@ -112,6 +116,18 @@ async def select_news_candidates(
             s.source_code,
             s.source_name,
             s.collection_priority,
+            CASE
+                WHEN COALESCE(
+                    s.settings
+                    #>> '{ranking,source_weight}',
+                    ''
+                ) ~ '^[0-9]+$'
+                THEN (
+                    s.settings
+                    #>> '{ranking,source_weight}'
+                )::integer
+                ELSE NULL
+            END AS source_weight,
             n.processing_status,
             COALESCE(
                 NULLIF(n.normalized_title, ''),
@@ -193,6 +209,7 @@ async def select_news_candidates(
             primary_image_url=(
                 record["primary_image_url"]
             ),
+            source_weight=record["source_weight"],
         )
         for record in records
     )
