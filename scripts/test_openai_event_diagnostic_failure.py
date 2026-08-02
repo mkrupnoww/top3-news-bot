@@ -167,7 +167,6 @@ class FakeInsufficientTop3Client:
                             "is_representative": True,
                             "is_independent_source": True,
                             "counts_toward_reach": True,
-                            "source_weight": 3,
                             "membership_reason": (
                                 "Synthetic primary "
                                 "representative."

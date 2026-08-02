@@ -149,7 +149,6 @@ def build_output() -> str:
         '"is_representative":true,'
         '"is_independent_source":true,'
         '"counts_toward_reach":true,'
-        '"source_weight":3,'
         '"membership_reason":'
         '"Первичная публикация."'
         '}]}]}'
@@ -358,9 +357,13 @@ async def test_successful_request() -> None:
         "is_representative",
         "is_independent_source",
         "counts_toward_reach",
-        "source_weight",
         "membership_reason",
     }
+
+    assert (
+        "source_weight"
+        not in member_item_schema["properties"]
+    )
 
     assert (
         event_item_schema[
