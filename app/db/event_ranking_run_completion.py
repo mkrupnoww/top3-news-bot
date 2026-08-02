@@ -13,6 +13,7 @@ from app.ranking.evaluator import (
 from app.ranking.event_formula_pipeline import (
     CalculatedEventScore,
     EventFormulaCalculationResult,
+    EventScoreCalculationResult,
 )
 from app.ranking.full_formula import (
     FULL_FORMULA_VERSION,
@@ -29,6 +30,10 @@ from app.ranking.request_key import (
 
 COMPLETION_VERSION = (
     "reserved_event_ranking_completion_v1"
+)
+
+DIAGNOSTIC_FAILURE_VERSION = (
+    "reserved_event_ranking_diagnostic_failure_v1"
 )
 
 AUDIENCE_PLATFORM_CODE = (
@@ -61,6 +66,26 @@ class EventRankingRunCompletionResult:
     combination_count: int
     winner_combination_id: int
     already_completed: bool
+    persisted_events: tuple[
+        PersistedEventScore,
+        ...,
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class EventRankingRunDiagnosticFailureResult:
+    """Результат сохранения диагностического сбоя v2."""
+
+    ranking_run_id: int
+    request_key: str
+    run_status: str
+    formula_version: str
+    candidate_count: int
+    scored_count: int
+    eligible_count: int
+    failure_stage: str
+    already_failed: bool
+    error_message: str
     persisted_events: tuple[
         PersistedEventScore,
         ...,
@@ -382,12 +407,15 @@ def _validate_telemetry(
         )
 
 
-def _validate_calculation(
+def _validate_scored_calculation(
     *,
-    calculation: EventFormulaCalculationResult,
+    calculation: (
+        EventScoreCalculationResult
+        | EventFormulaCalculationResult
+    ),
     candidate_news_ids: tuple[int, ...],
 ) -> None:
-    """Проверяет согласованность полного расчёта."""
+    """Проверяет общий результат расчёта баллов."""
 
     if calculation.formula_version != (
         FULL_FORMULA_VERSION
@@ -456,6 +484,19 @@ def _validate_calculation(
             "совпадать с representative_news_id."
         )
 
+
+def _validate_calculation(
+    *,
+    calculation: EventFormulaCalculationResult,
+    candidate_news_ids: tuple[int, ...],
+) -> None:
+    """Проверяет согласованность полного расчёта."""
+
+    _validate_scored_calculation(
+        calculation=calculation,
+        candidate_news_ids=candidate_news_ids,
+    )
+
     winner = calculation.top3_selection.winner
 
     if winner.is_winner is not True:
@@ -464,9 +505,10 @@ def _validate_calculation(
             "не отмечена is_winner=true."
         )
 
-    score_id_set = set(
-        score_news_ids
-    )
+    score_id_set = {
+        item.score.news_id
+        for item in calculation.calculated_events
+    }
 
     if not set(
         winner.news_ids
@@ -475,7 +517,6 @@ def _validate_calculation(
             "Победившая комбинация содержит "
             "неизвестный news_id."
         )
-
 
 def _event_key(
     item: CalculatedEventScore,
@@ -569,7 +610,10 @@ def _combination_key(
 
 
 def _rank_positions(
-    calculation: EventFormulaCalculationResult,
+    calculation: (
+        EventScoreCalculationResult
+        | EventFormulaCalculationResult
+    ),
 ) -> dict[int, int]:
     """Рассчитывает общий порядок по B_i."""
 
@@ -850,7 +894,10 @@ def _validate_reserved_run(
     request_key: str,
     metadata: RankingEvaluatorMetadata,
     candidate_news_ids: tuple[int, ...],
-    calculation: EventFormulaCalculationResult,
+    calculation: (
+        EventScoreCalculationResult
+        | EventFormulaCalculationResult
+    ),
 ) -> None:
     """Проверяет reservation перед записью."""
 
@@ -1198,6 +1245,329 @@ async def _load_and_verify_completed(
     )
 
 
+async def _insert_event_scores(
+    connection: asyncpg.Connection,
+    *,
+    ranking_run_id: int,
+    request_key: str,
+    metadata: RankingEvaluatorMetadata,
+    calculation: (
+        EventScoreCalculationResult
+        | EventFormulaCalculationResult
+    ),
+    winner_positions: Mapping[int, int],
+) -> tuple[
+    tuple[PersistedEventScore, ...],
+    dict[int, int],
+]:
+    """Сохраняет события, участников, метрики и баллы."""
+
+    rank_positions = _rank_positions(
+        calculation
+    )
+
+    persisted_events: list[
+        PersistedEventScore
+    ] = []
+
+    score_ids_by_news_id: dict[
+        int,
+        int,
+    ] = {}
+
+    for item in calculation.calculated_events:
+        event = item.event
+        score = item.score
+        event_key = _event_key(item)
+
+        event_row = await connection.fetchrow(
+            """
+            INSERT INTO top3_news.ranking_events (
+                ranking_run_id,
+                event_key,
+                representative_news_id,
+                event_title,
+                event_time_utc,
+                macro_topic,
+                impact_reason,
+                hook_reason,
+                q_reason,
+                source_weight_sum,
+                event_details
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11::jsonb
+            )
+            RETURNING ranking_event_id
+            """,
+            ranking_run_id,
+            event_key,
+            event.representative_news_id,
+            event.event_title,
+            event.event_time_utc,
+            event.macro_topic,
+            event.impact_reason,
+            event.hook_reason,
+            event.q_reason,
+            event.source_weight_sum,
+            _encode_json(
+                _event_details(item)
+            ),
+        )
+
+        ranking_event_id = int(
+            event_row["ranking_event_id"]
+        )
+
+        for member in event.members:
+            await connection.execute(
+                """
+                INSERT INTO
+                    top3_news.ranking_event_members (
+                        ranking_event_id,
+                        ranking_run_id,
+                        news_id,
+                        is_representative,
+                        is_independent_source,
+                        counts_toward_reach,
+                        source_weight,
+                        source_relation,
+                        membership_reason
+                    )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9
+                )
+                """,
+                ranking_event_id,
+                ranking_run_id,
+                member.news_id,
+                member.is_representative,
+                member.is_independent_source,
+                member.counts_toward_reach,
+                member.source_weight,
+                member.source_relation,
+                member.membership_reason,
+            )
+
+        raw_metrics = item.audience_metrics
+
+        if any(
+            value is not None
+            for value in (
+                raw_metrics.view_count,
+                raw_metrics.comment_count,
+                raw_metrics.share_count,
+            )
+        ):
+            await connection.execute(
+                """
+                INSERT INTO
+                    top3_news.ranking_audience_metrics (
+                        ranking_event_id,
+                        ranking_run_id,
+                        platform_code,
+                        measured_at,
+                        metric_window_hours,
+                        view_count,
+                        comment_count,
+                        share_count,
+                        is_trusted,
+                        raw_payload
+                    )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, true,
+                    $9::jsonb
+                )
+                """,
+                ranking_event_id,
+                ranking_run_id,
+                AUDIENCE_PLATFORM_CODE,
+                calculation.window_end,
+                Decimal("24.000000"),
+                raw_metrics.view_count,
+                raw_metrics.comment_count,
+                raw_metrics.share_count,
+                _encode_json(
+                    {
+                        "resonance_confidence": (
+                            score
+                            .resonance
+                            .confidence
+                        ),
+                        "normalized_scores": {
+                            "v_score": (
+                                None
+                                if score
+                                .resonance
+                                .v_score
+                                is None
+                                else str(
+                                    score
+                                    .resonance
+                                    .v_score
+                                )
+                            ),
+                            "c_score": (
+                                None
+                                if score
+                                .resonance
+                                .c_score
+                                is None
+                                else str(
+                                    score
+                                    .resonance
+                                    .c_score
+                                )
+                            ),
+                            "s_score": (
+                                None
+                                if score
+                                .resonance
+                                .s_score
+                                is None
+                                else str(
+                                    score
+                                    .resonance
+                                    .s_score
+                                )
+                            ),
+                        },
+                    }
+                ),
+            )
+
+        selected_for_top3 = (
+            score.news_id
+            in winner_positions
+        )
+
+        score_row = await connection.fetchrow(
+            """
+            INSERT INTO top3_news.news_scores (
+                ranking_run_id,
+                news_id,
+                ranking_event_id,
+                f_score,
+                m_score,
+                r_score,
+                h_score,
+                q_score,
+                is_eligible,
+                exclusion_reason,
+                rank_position,
+                score_explanation,
+                score_details,
+                age_hours,
+                u_score,
+                i_score,
+                v_score,
+                c_score,
+                s_score,
+                k_score,
+                n_score,
+                e_score,
+                x_score,
+                resonance_confidence,
+                selected_for_top3,
+                top3_position
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13::jsonb, $14,
+                $15, $16, $17, $18, $19,
+                $20, $21, $22, $23, $24,
+                $25, $26
+            )
+            RETURNING
+                score_id,
+                individual_score
+            """,
+            ranking_run_id,
+            score.news_id,
+            ranking_event_id,
+            score.f_score,
+            score.m_score,
+            score.resonance.r_score,
+            score.h_score,
+            score.q_score,
+            score.is_eligible,
+            score.exclusion_reason,
+            rank_positions[
+                score.news_id
+            ],
+            _score_explanation(item),
+            _encode_json(
+                _score_details(
+                    item=item,
+                    request_key=request_key,
+                    metadata=metadata,
+                    event_key=event_key,
+                )
+            ),
+            score.age_hours,
+            score.u_score,
+            score.i_score,
+            score.resonance.v_score,
+            score.resonance.c_score,
+            score.resonance.s_score,
+            score.k_score,
+            score.n_score,
+            score.e_score,
+            score.x_score,
+            score.resonance.confidence,
+            selected_for_top3,
+            winner_positions.get(
+                score.news_id
+            ),
+        )
+
+        postgres_score = (
+            score_row["individual_score"]
+        )
+
+        if (
+            postgres_score
+            != score
+            .individual
+            .individual_score
+        ):
+            raise RuntimeError(
+                "Расчёт PostgreSQL "
+                "не совпал с Python: "
+                f"news_id={score.news_id}."
+            )
+
+        score_id = int(
+            score_row["score_id"]
+        )
+
+        score_ids_by_news_id[
+            score.news_id
+        ] = score_id
+
+        persisted_events.append(
+            PersistedEventScore(
+                ranking_event_id=(
+                    ranking_event_id
+                ),
+                representative_news_id=(
+                    score.news_id
+                ),
+                score_id=score_id,
+            )
+        )
+
+    return (
+        tuple(persisted_events),
+        score_ids_by_news_id,
+    )
+
+
 async def complete_reserved_event_ranking_run(
     pool: asyncpg.Pool,
     *,
@@ -1487,301 +1857,27 @@ async def complete_reserved_event_ranking_run(
                 news_ids=normalized_news_ids,
             )
 
-            rank_positions = _rank_positions(
-                calculation
-            )
-
             winner_positions = (
                 _winner_positions(
                     calculation
                 )
             )
 
-            score_ids_by_news_id: dict[
-                int,
-                int,
-            ] = {}
-
-            for item in (
-                calculation.calculated_events
-            ):
-                event = item.event
-                score = item.score
-                event_key = _event_key(item)
-
-                event_row = await connection.fetchrow(
-                    """
-                    INSERT INTO top3_news.ranking_events (
-                        ranking_run_id,
-                        event_key,
-                        representative_news_id,
-                        event_title,
-                        event_time_utc,
-                        macro_topic,
-                        impact_reason,
-                        hook_reason,
-                        q_reason,
-                        source_weight_sum,
-                        event_details
-                    )
-                    VALUES (
-                        $1, $2, $3, $4, $5,
-                        $6, $7, $8, $9, $10,
-                        $11::jsonb
-                    )
-                    RETURNING ranking_event_id
-                    """,
-                    normalized_ranking_run_id,
-                    event_key,
-                    event.representative_news_id,
-                    event.event_title,
-                    event.event_time_utc,
-                    event.macro_topic,
-                    event.impact_reason,
-                    event.hook_reason,
-                    event.q_reason,
-                    event.source_weight_sum,
-                    _encode_json(
-                        _event_details(item)
-                    ),
-                )
-
-                ranking_event_id = int(
-                    event_row["ranking_event_id"]
-                )
-
-                for member in event.members:
-                    await connection.execute(
-                        """
-                        INSERT INTO
-                            top3_news.ranking_event_members (
-                                ranking_event_id,
-                                ranking_run_id,
-                                news_id,
-                                is_representative,
-                                is_independent_source,
-                                counts_toward_reach,
-                                source_weight,
-                                source_relation,
-                                membership_reason
-                            )
-                        VALUES (
-                            $1, $2, $3, $4, $5,
-                            $6, $7, $8, $9
-                        )
-                        """,
-                        ranking_event_id,
-                        normalized_ranking_run_id,
-                        member.news_id,
-                        member.is_representative,
-                        member.is_independent_source,
-                        member.counts_toward_reach,
-                        member.source_weight,
-                        member.source_relation,
-                        member.membership_reason,
-                    )
-
-                raw_metrics = (
-                    item.audience_metrics
-                )
-
-                if any(
-                    value is not None
-                    for value in (
-                        raw_metrics.view_count,
-                        raw_metrics.comment_count,
-                        raw_metrics.share_count,
-                    )
-                ):
-                    await connection.execute(
-                        """
-                        INSERT INTO
-                            top3_news.ranking_audience_metrics (
-                                ranking_event_id,
-                                ranking_run_id,
-                                platform_code,
-                                measured_at,
-                                metric_window_hours,
-                                view_count,
-                                comment_count,
-                                share_count,
-                                is_trusted,
-                                raw_payload
-                            )
-                        VALUES (
-                            $1, $2, $3, $4, $5,
-                            $6, $7, $8, true,
-                            $9::jsonb
-                        )
-                        """,
-                        ranking_event_id,
-                        normalized_ranking_run_id,
-                        AUDIENCE_PLATFORM_CODE,
-                        calculation.window_end,
-                        Decimal("24.000000"),
-                        raw_metrics.view_count,
-                        raw_metrics.comment_count,
-                        raw_metrics.share_count,
-                        _encode_json(
-                            {
-                                "resonance_confidence": (
-                                    score
-                                    .resonance
-                                    .confidence
-                                ),
-                                "normalized_scores": {
-                                    "v_score": (
-                                        None
-                                        if score
-                                        .resonance
-                                        .v_score
-                                        is None
-                                        else str(
-                                            score
-                                            .resonance
-                                            .v_score
-                                        )
-                                    ),
-                                    "c_score": (
-                                        None
-                                        if score
-                                        .resonance
-                                        .c_score
-                                        is None
-                                        else str(
-                                            score
-                                            .resonance
-                                            .c_score
-                                        )
-                                    ),
-                                    "s_score": (
-                                        None
-                                        if score
-                                        .resonance
-                                        .s_score
-                                        is None
-                                        else str(
-                                            score
-                                            .resonance
-                                            .s_score
-                                        )
-                                    ),
-                                },
-                            }
-                        ),
-                    )
-
-                selected_for_top3 = (
-                    score.news_id
-                    in winner_positions
-                )
-
-                score_row = await connection.fetchrow(
-                    """
-                    INSERT INTO top3_news.news_scores (
-                        ranking_run_id,
-                        news_id,
-                        ranking_event_id,
-                        f_score,
-                        m_score,
-                        r_score,
-                        h_score,
-                        q_score,
-                        is_eligible,
-                        exclusion_reason,
-                        rank_position,
-                        score_explanation,
-                        score_details,
-                        age_hours,
-                        u_score,
-                        i_score,
-                        v_score,
-                        c_score,
-                        s_score,
-                        k_score,
-                        n_score,
-                        e_score,
-                        x_score,
-                        resonance_confidence,
-                        selected_for_top3,
-                        top3_position
-                    )
-                    VALUES (
-                        $1, $2, $3, $4, $5,
-                        $6, $7, $8, $9, $10,
-                        $11, $12, $13::jsonb, $14,
-                        $15, $16, $17, $18, $19,
-                        $20, $21, $22, $23, $24,
-                        $25, $26
-                    )
-                    RETURNING
-                        score_id,
-                        individual_score
-                    """,
-                    normalized_ranking_run_id,
-                    score.news_id,
-                    ranking_event_id,
-                    score.f_score,
-                    score.m_score,
-                    score.resonance.r_score,
-                    score.h_score,
-                    score.q_score,
-                    score.is_eligible,
-                    score.exclusion_reason,
-                    rank_positions[
-                        score.news_id
-                    ],
-                    _score_explanation(item),
-                    _encode_json(
-                        _score_details(
-                            item=item,
-                            request_key=(
-                                normalized_request_key
-                            ),
-                            metadata=(
-                                normalized_metadata
-                            ),
-                            event_key=event_key,
-                        )
-                    ),
-                    score.age_hours,
-                    score.u_score,
-                    score.i_score,
-                    score.resonance.v_score,
-                    score.resonance.c_score,
-                    score.resonance.s_score,
-                    score.k_score,
-                    score.n_score,
-                    score.e_score,
-                    score.x_score,
-                    score.resonance.confidence,
-                    selected_for_top3,
-                    winner_positions.get(
-                        score.news_id
-                    ),
-                )
-
-                postgres_score = (
-                    score_row["individual_score"]
-                )
-
-                if (
-                    postgres_score
-                    != score
-                    .individual
-                    .individual_score
-                ):
-                    raise RuntimeError(
-                        "Расчёт PostgreSQL "
-                        "не совпал с Python: "
-                        f"news_id={score.news_id}."
-                    )
-
-                score_ids_by_news_id[
-                    score.news_id
-                ] = int(
-                    score_row["score_id"]
-                )
+            (
+                _persisted_events,
+                score_ids_by_news_id,
+            ) = await _insert_event_scores(
+                connection,
+                ranking_run_id=(
+                    normalized_ranking_run_id
+                ),
+                request_key=(
+                    normalized_request_key
+                ),
+                metadata=normalized_metadata,
+                calculation=calculation,
+                winner_positions=winner_positions,
+            )
 
             for combination in (
                 calculation
@@ -1966,4 +2062,444 @@ async def complete_reserved_event_ranking_run(
         ),
         already_completed=False,
         persisted_events=persisted_events,
+    )
+
+async def fail_reserved_event_ranking_run(
+    pool: asyncpg.Pool,
+    *,
+    ranking_run_id: int,
+    request_key: str,
+    metadata: RankingEvaluatorMetadata,
+    candidate_news_ids: tuple[int, ...],
+    calculation: EventScoreCalculationResult,
+    usage: OpenAITokenUsage,
+    cost_estimate: OpenAICostEstimate,
+    failure_stage: str,
+    error_message: str,
+    error_type: str | None = None,
+) -> EventRankingRunDiagnosticFailureResult:
+    """
+    Атомарно сохраняет диагностический сбой v2.
+
+    Сохраняет рассчитанные инфоповоды и news_scores,
+    usage, стоимость и этап сбоя. Комбинации TOP-3
+    не создаются, а запуск переводится в failed.
+    """
+
+    normalized_ranking_run_id = (
+        _positive_integer(
+            ranking_run_id,
+            field_name="ranking_run_id",
+        )
+    )
+
+    normalized_request_key = (
+        _normalize_request_key(
+            request_key
+        )
+    )
+
+    normalized_metadata = (
+        _normalize_metadata(
+            metadata
+        )
+    )
+
+    normalized_news_ids = (
+        _normalize_news_ids(
+            candidate_news_ids
+        )
+    )
+
+    _validate_scored_calculation(
+        calculation=calculation,
+        candidate_news_ids=(
+            normalized_news_ids
+        ),
+    )
+
+    _validate_telemetry(
+        metadata=normalized_metadata,
+        usage=usage,
+        cost_estimate=cost_estimate,
+    )
+
+    normalized_failure_stage = (
+        _normalize_required_text(
+            failure_stage,
+            field_name="failure_stage",
+        )[:500]
+    )
+
+    normalized_error_message = (
+        _normalize_required_text(
+            error_message,
+            field_name="error_message",
+        )[:8000]
+    )
+
+    normalized_error_type: str | None
+
+    if error_type is None:
+        normalized_error_type = None
+    else:
+        normalized_error_type = (
+            _normalize_required_text(
+                error_type,
+                field_name="error_type",
+            )[:500]
+        )
+
+    encoded_news_ids = _encode_json(
+        {
+            "news_ids": list(
+                normalized_news_ids
+            )
+        }
+    )
+
+    failure_parameters = _encode_json(
+        {
+            "openai_usage": (
+                _build_usage_payload(
+                    usage
+                )
+            ),
+            "openai_cost": (
+                _build_cost_payload(
+                    cost_estimate
+                )
+            ),
+            "failure": {
+                "error_type": (
+                    normalized_error_type
+                ),
+                "error_message": (
+                    normalized_error_message
+                ),
+                "stage": (
+                    normalized_failure_stage
+                ),
+            },
+            "failure_version": (
+                DIAGNOSTIC_FAILURE_VERSION
+            ),
+            "formula_calculated_in_python": True,
+            "diagnostic_scores_persisted": True,
+            "event_count": len(
+                calculation.calculated_events
+            ),
+            "combination_count": 0,
+            "winner_news_ids": [],
+            "audience_maxima": {
+                "view_count": (
+                    calculation
+                    .audience_maxima
+                    .max_view_count
+                ),
+                "comment_count": (
+                    calculation
+                    .audience_maxima
+                    .max_comment_count
+                ),
+                "share_count": (
+                    calculation
+                    .audience_maxima
+                    .max_share_count
+                ),
+            },
+        }
+    )
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            record = await connection.fetchrow(
+                """
+                SELECT
+                    ranking_run_id,
+                    request_key,
+                    run_status,
+                    formula_version,
+                    model_name,
+                    prompt_version,
+                    window_started_at,
+                    window_finished_at,
+                    candidate_count,
+                    scored_count,
+                    eligible_count,
+                    error_message,
+                    parameters->>'run_mode'
+                        AS run_mode,
+                    parameters->>'evaluator_name'
+                        AS evaluator_name,
+                    parameters->>'evaluator_version'
+                        AS evaluator_version,
+                    parameters->>'failure_version'
+                        AS failure_version,
+                    parameters->'failure'
+                        AS failure,
+                    (
+                        parameters->'news_ids'
+                        =
+                        (
+                            $3::jsonb
+                            -> 'news_ids'
+                        )
+                    ) AS news_ids_match
+                FROM top3_news.ranking_runs
+                WHERE ranking_run_id = $1
+                  AND request_key = $2
+                FOR UPDATE
+                """,
+                normalized_ranking_run_id,
+                normalized_request_key,
+                encoded_news_ids,
+            )
+
+            if record is None:
+                raise LookupError(
+                    "Зарезервированный event "
+                    "ranking_run не найден: "
+                    f"ranking_run_id="
+                    f"{normalized_ranking_run_id}"
+                )
+
+            _validate_reserved_run(
+                record,
+                request_key=(
+                    normalized_request_key
+                ),
+                metadata=normalized_metadata,
+                candidate_news_ids=(
+                    normalized_news_ids
+                ),
+                calculation=calculation,
+            )
+
+            if record["run_status"] == "completed":
+                raise ValueError(
+                    "Нельзя сохранить сбой для "
+                    "completed ranking_run."
+                )
+
+            if record["run_status"] == "failed":
+                existing_rows = await connection.fetch(
+                    """
+                    SELECT
+                        e.ranking_event_id,
+                        e.representative_news_id,
+                        s.score_id
+                    FROM top3_news.ranking_events AS e
+                    JOIN top3_news.news_scores AS s
+                      ON s.ranking_event_id
+                         = e.ranking_event_id
+                     AND s.ranking_run_id
+                         = e.ranking_run_id
+                    WHERE e.ranking_run_id = $1
+                    ORDER BY e.representative_news_id
+                    """,
+                    normalized_ranking_run_id,
+                )
+
+                persisted_events = tuple(
+                    PersistedEventScore(
+                        ranking_event_id=int(
+                            row["ranking_event_id"]
+                        ),
+                        representative_news_id=int(
+                            row[
+                                "representative_news_id"
+                            ]
+                        ),
+                        score_id=int(
+                            row["score_id"]
+                        ),
+                    )
+                    for row in existing_rows
+                )
+
+                return (
+                    EventRankingRunDiagnosticFailureResult(
+                        ranking_run_id=(
+                            normalized_ranking_run_id
+                        ),
+                        request_key=(
+                            normalized_request_key
+                        ),
+                        run_status="failed",
+                        formula_version=(
+                            FULL_FORMULA_VERSION
+                        ),
+                        candidate_count=int(
+                            record[
+                                "candidate_count"
+                            ]
+                        ),
+                        scored_count=int(
+                            record["scored_count"]
+                        ),
+                        eligible_count=int(
+                            record["eligible_count"]
+                        ),
+                        failure_stage=(
+                            normalized_failure_stage
+                        ),
+                        already_failed=True,
+                        error_message=(
+                            record["error_message"]
+                            or normalized_error_message
+                        ),
+                        persisted_events=(
+                            persisted_events
+                        ),
+                    )
+                )
+
+            if record["run_status"] != "running":
+                raise ValueError(
+                    "Неподдерживаемый статус "
+                    "ranking_run: "
+                    f"{record['run_status']}"
+                )
+
+            existing_counts = (
+                await connection.fetchrow(
+                    """
+                    SELECT
+                        (
+                            SELECT count(*)
+                            FROM top3_news.ranking_events
+                            WHERE ranking_run_id = $1
+                        ) AS event_count,
+                        (
+                            SELECT count(*)
+                            FROM top3_news.news_scores
+                            WHERE ranking_run_id = $1
+                        ) AS score_count,
+                        (
+                            SELECT count(*)
+                            FROM top3_news.ranking_combinations
+                            WHERE ranking_run_id = $1
+                        ) AS combination_count
+                    """,
+                    normalized_ranking_run_id,
+                )
+            )
+
+            if any(
+                int(existing_counts[field_name])
+                != 0
+                for field_name in (
+                    "event_count",
+                    "score_count",
+                    "combination_count",
+                )
+            ):
+                raise RuntimeError(
+                    "У running event ranking_run "
+                    "уже есть сохранённые данные."
+                )
+
+            await _validate_news_items(
+                connection,
+                news_ids=normalized_news_ids,
+            )
+
+            (
+                persisted_events,
+                _score_ids_by_news_id,
+            ) = await _insert_event_scores(
+                connection,
+                ranking_run_id=(
+                    normalized_ranking_run_id
+                ),
+                request_key=(
+                    normalized_request_key
+                ),
+                metadata=normalized_metadata,
+                calculation=calculation,
+                winner_positions={},
+            )
+
+            combination_count = (
+                await connection.fetchval(
+                    """
+                    SELECT count(*)
+                    FROM top3_news.ranking_combinations
+                    WHERE ranking_run_id = $1
+                    """,
+                    normalized_ranking_run_id,
+                )
+            )
+
+            if int(combination_count) != 0:
+                raise RuntimeError(
+                    "Диагностический сбой "
+                    "не должен сохранять комбинации."
+                )
+
+            update_result = (
+                await connection.execute(
+                    """
+                    UPDATE top3_news.ranking_runs
+                    SET
+                        run_status = 'failed',
+                        scored_count = $3,
+                        eligible_count = $4,
+                        parameters = (
+                            parameters
+                            || $5::jsonb
+                        ),
+                        error_message = $6,
+                        finished_at = now(),
+                        updated_at = now()
+                    WHERE ranking_run_id = $1
+                      AND request_key = $2
+                      AND run_status = 'running'
+                    """,
+                    normalized_ranking_run_id,
+                    normalized_request_key,
+                    len(
+                        calculation
+                        .calculated_events
+                    ),
+                    calculation.eligible_count,
+                    failure_parameters,
+                    normalized_error_message,
+                )
+            )
+
+            if update_result != "UPDATE 1":
+                raise RuntimeError(
+                    "Не удалось сохранить "
+                    "диагностический сбой v2: "
+                    f"{update_result}"
+                )
+
+    return EventRankingRunDiagnosticFailureResult(
+        ranking_run_id=(
+            normalized_ranking_run_id
+        ),
+        request_key=normalized_request_key,
+        run_status="failed",
+        formula_version=FULL_FORMULA_VERSION,
+        candidate_count=len(
+            normalized_news_ids
+        ),
+        scored_count=len(
+            calculation.calculated_events
+        ),
+        eligible_count=(
+            calculation.eligible_count
+        ),
+        failure_stage=(
+            normalized_failure_stage
+        ),
+        already_failed=False,
+        error_message=(
+            normalized_error_message
+        ),
+        persisted_events=(
+            persisted_events
+        ),
     )

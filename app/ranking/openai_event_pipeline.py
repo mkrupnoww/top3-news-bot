@@ -7,6 +7,7 @@ import asyncpg
 from app.db.event_ranking_run_completion import (
     EventRankingRunCompletionResult,
     complete_reserved_event_ranking_run,
+    fail_reserved_event_ranking_run,
 )
 from app.db.news_candidates import (
     CandidateSelectionResult,
@@ -26,16 +27,25 @@ from app.ranking.event_evaluator import (
 from app.ranking.event_formula_pipeline import (
     EventAudienceMetrics,
     EventFormulaCalculationResult,
-    calculate_event_formula,
+    EventScoreCalculationResult,
+    calculate_event_scores,
+    select_event_top3,
 )
 from app.ranking.event_request_key import (
     create_event_ranking_request_key,
+)
+from app.ranking.evaluator import (
+    RankingEvaluatorMetadata,
 )
 from app.ranking.full_formula import (
     FULL_FORMULA_VERSION,
 )
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
+)
+from app.ranking.openai_usage import (
+    OpenAICostEstimate,
+    OpenAITokenUsage,
 )
 from app.ranking.request_key import (
     RankingRequestKey,
@@ -177,9 +187,58 @@ async def _record_pipeline_failure(
     pool: asyncpg.Pool,
     *,
     reservation: RankingRunReservation,
+    metadata: RankingEvaluatorMetadata,
+    candidate_news_ids: tuple[int, ...],
+    failure_stage: str,
     error: Exception,
+    score_calculation: (
+        EventScoreCalculationResult
+        | None
+    ),
+    usage: OpenAITokenUsage | None,
+    cost_estimate: OpenAICostEstimate | None,
 ) -> None:
-    """Фиксирует ошибку event-конвейера."""
+    """Фиксирует наиболее полную доступную диагностику."""
+
+    if (
+        score_calculation is not None
+        and usage is not None
+        and cost_estimate is not None
+    ):
+        try:
+            await fail_reserved_event_ranking_run(
+                pool,
+                ranking_run_id=(
+                    reservation.ranking_run_id
+                ),
+                request_key=(
+                    reservation.request_key
+                ),
+                metadata=metadata,
+                candidate_news_ids=(
+                    candidate_news_ids
+                ),
+                calculation=(
+                    score_calculation
+                ),
+                usage=usage,
+                cost_estimate=cost_estimate,
+                failure_stage=failure_stage,
+                error_message=str(error),
+                error_type=(
+                    type(error).__name__
+                ),
+            )
+
+            return
+
+        except Exception as diagnostic_error:
+            error.add_note(
+                "Не удалось сохранить полную "
+                "event-диагностику: "
+                f"{type(diagnostic_error).__name__}: "
+                f"{diagnostic_error}"
+            )
 
     try:
         await fail_reserved_ranking_run(
@@ -231,9 +290,11 @@ async def run_reserved_openai_event_ranking(
     4. Резервирует ranking_run.
     5. Блокирует повторный платный запрос.
     6. Получает от OpenAI инфоповоды и оценки.
-    7. Рассчитывает F/U/M/R/H/B и TOP(S).
-    8. Атомарно сохраняет полный результат.
-    9. При ошибке переводит запуск в failed.
+    7. Отдельно рассчитывает F/U/M/R/H/B.
+    8. Отдельно выбирает комбинацию TOP-3.
+    9. Атомарно сохраняет полный результат.
+    10. При сбое после расчёта баллов сохраняет
+        события, баллы, usage, стоимость и этап.
 
     Жизненным циклом PostgreSQL pool и OpenAI
     SDK-клиента управляет вызывающий код.
@@ -313,6 +374,31 @@ async def run_reserved_openai_event_ranking(
             completion=None,
         )
 
+    evaluation: (
+        EventRankingEvaluationResult
+        | None
+    ) = None
+
+    score_calculation: (
+        EventScoreCalculationResult
+        | None
+    ) = None
+
+    calculation: (
+        EventFormulaCalculationResult
+        | None
+    ) = None
+
+    completion: (
+        EventRankingRunCompletionResult
+        | None
+    ) = None
+
+    usage: OpenAITokenUsage | None = None
+    cost_estimate: OpenAICostEstimate | None = None
+
+    failure_stage = "model_evaluation"
+
     try:
         evaluation = (
             await evaluator
@@ -322,14 +408,10 @@ async def run_reserved_openai_event_ranking(
             )
         )
 
+        failure_stage = "telemetry_validation"
+
         _require_evaluation_telemetry(
             evaluation
-        )
-
-        calculation = calculate_event_formula(
-            selection=candidate_selection,
-            events=evaluation.events,
-            audience_metrics=audience_metrics,
         )
 
         usage = (
@@ -354,6 +436,28 @@ async def run_reserved_openai_event_ranking(
                 "отсутствует после проверки."
             )
 
+        failure_stage = "event_score_calculation"
+
+        score_calculation = (
+            calculate_event_scores(
+                selection=(
+                    candidate_selection
+                ),
+                events=evaluation.events,
+                audience_metrics=(
+                    audience_metrics
+                ),
+            )
+        )
+
+        failure_stage = "top3_selection"
+
+        calculation = select_event_top3(
+            score_calculation
+        )
+
+        failure_stage = "database_completion"
+
         completion = (
             await complete_reserved_event_ranking_run(
                 pool,
@@ -375,10 +479,36 @@ async def run_reserved_openai_event_ranking(
         await _record_pipeline_failure(
             pool,
             reservation=reservation,
+            metadata=evaluator.metadata,
+            candidate_news_ids=news_ids,
+            failure_stage=failure_stage,
             error=error,
+            score_calculation=(
+                score_calculation
+            ),
+            usage=usage,
+            cost_estimate=cost_estimate,
         )
 
         raise
+
+    if evaluation is None:
+        raise RuntimeError(
+            "Event evaluation отсутствует "
+            "после успешного выполнения."
+        )
+
+    if calculation is None:
+        raise RuntimeError(
+            "Полный event calculation отсутствует "
+            "после успешного выполнения."
+        )
+
+    if completion is None:
+        raise RuntimeError(
+            "Event completion отсутствует "
+            "после успешного выполнения."
+        )
 
     return ReservedOpenAIEventRankingResult(
         candidate_selection=(
