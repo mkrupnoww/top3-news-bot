@@ -191,11 +191,40 @@ def test_business_industry_signal() -> None:
     )
 
 
+def test_imax_signal() -> None:
+    """IMAX распознаётся как сигнал кинопроката."""
+
+    candidate = build_candidate(
+        news_id=6,
+        title=(
+            "Imax shifts screens between "
+            "two major releases"
+        ),
+        source_url=(
+            "https://example.com/business/story"
+        ),
+        categories=(
+            "Business",
+            "Business News",
+            "imax",
+        ),
+    )
+
+    decision = evaluate_cinema_relevance(
+        candidate
+    )
+
+    assert decision.is_relevant is True
+    assert "category:imax" in (
+        decision.signals
+    )
+
+
 def test_irrelevant_item_is_excluded() -> None:
     """Музыкальная новость без кино-сигналов исключается."""
 
     candidate = build_candidate(
-        news_id=6,
+        news_id=7,
         title=(
             "Singer announces another "
             "world tour"
@@ -300,6 +329,7 @@ def main() -> int:
     test_url_signal()
     test_text_signal()
     test_business_industry_signal()
+    test_imax_signal()
     test_irrelevant_item_is_excluded()
     test_selection_filter()
 
@@ -308,6 +338,7 @@ def main() -> int:
     print("URL relevance signal: OK")
     print("Text relevance signal: OK")
     print("Industry business signal: OK")
+    print("IMAX relevance signal: OK")
     print("Irrelevant item exclusion: OK")
     print("Selection filtering: OK")
     print()

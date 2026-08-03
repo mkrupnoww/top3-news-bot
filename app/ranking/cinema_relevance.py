@@ -25,6 +25,7 @@ _STRONG_CATEGORY_TERMS = (
     "screenwriting",
     "theatrical",
     "film festival",
+    "imax",
 )
 
 _STRONG_URL_PARTS = (
@@ -38,7 +39,7 @@ _STRONG_URL_PARTS = (
 
 _STRONG_TEXT_PATTERN = re.compile(
     r"\b("
-    r"movie|movies|film|films|cinema|cinematic|"
+    r"movie|movies|film|films|cinema|cinematic|imax|"
     r"box[ -]office|feature film|documentary|"
     r"filmmaker|filmmaking|screenplay|screenwriter|"
     r"theatrical release|film festival|"
