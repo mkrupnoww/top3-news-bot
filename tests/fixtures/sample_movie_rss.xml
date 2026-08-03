@@ -18,6 +18,10 @@
             ]]></description>
             <pubDate>Fri, 31 Jul 2026 07:15:00 GMT</pubDate>
             <dc:creator>Alex Reporter</dc:creator>
+            <category>Movies</category>
+            <category>Science Fiction</category>
+            <category> movies </category>
+            <category>   </category>
             <media:content
                 url="https://example.com/images/science-fiction.jpg"
                 medium="image"
@@ -32,6 +36,7 @@
                 Production is expected to begin next year.
             </description>
             <pubDate>Fri, 31 Jul 2026 06:20:00 GMT</pubDate>
+            <category>Production</category>
         </item>
 
         <item>

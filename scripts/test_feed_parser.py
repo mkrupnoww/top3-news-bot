@@ -54,11 +54,29 @@ def test_rss() -> None:
     )
     assert first_entry.summary is not None
     assert "<b>" not in first_entry.summary
+    assert first_entry.categories == (
+        "Movies",
+        "Science Fiction",
+    )
+
+    second_entry = result.entries[1]
+
+    assert second_entry.categories == (
+        "Production",
+    )
 
     print("RSS parser: OK")
     print(f"feed_title={result.feed_title}")
     print(f"entry_count={len(result.entries)}")
     print(f"skipped_count={result.skipped_count}")
+    print(
+        "first_categories="
+        f"{first_entry.categories}"
+    )
+    print(
+        "second_categories="
+        f"{second_entry.categories}"
+    )
 
 
 def test_atom() -> None:
@@ -105,12 +123,30 @@ def test_atom() -> None:
             "thriller.jpg"
         )
     )
+    assert first_entry.categories == (
+        "Movies",
+        "Casting",
+    )
+
+    second_entry = result.entries[1]
+
+    assert second_entry.categories == (
+        "Animation",
+    )
 
     print()
     print("Atom parser: OK")
     print(f"feed_title={result.feed_title}")
     print(f"entry_count={len(result.entries)}")
     print(f"skipped_count={result.skipped_count}")
+    print(
+        "first_categories="
+        f"{first_entry.categories}"
+    )
+    print(
+        "second_categories="
+        f"{second_entry.categories}"
+    )
 
 
 def main() -> int:

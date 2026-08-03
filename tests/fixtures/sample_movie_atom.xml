@@ -21,6 +21,10 @@
         <author>
             <name>Maria Journalist</name>
         </author>
+        <category term="Movies" />
+        <category term="Casting" />
+        <category term=" movies " />
+        <category term=" " />
         <media:thumbnail
             url="https://example.org/images/thriller.jpg"
         />
@@ -37,5 +41,6 @@
             The film will arrive in cinemas next summer.
         </summary>
         <updated>2026-07-31T06:30:00+00:00</updated>
+        <category term="Animation" />
     </entry>
 </feed>

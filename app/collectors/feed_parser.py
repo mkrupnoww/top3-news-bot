@@ -29,6 +29,7 @@ class ParsedFeedEntry:
     author_name: str | None
     source_published_at: datetime | None
     primary_image_url: str | None
+    categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,53 @@ def _clean_summary(
     ).strip()
 
     return normalized_value or None
+
+
+def _normalize_category(
+    value: str | None,
+) -> str | None:
+    """Нормализует одну категорию RSS или Atom."""
+
+    if value is None:
+        return None
+
+    normalized_value = _WHITESPACE_PATTERN.sub(
+        " ",
+        html.unescape(value),
+    ).strip()
+
+    return normalized_value or None
+
+
+def _extract_categories(
+    entry: ElementTree.Element,
+) -> tuple[str, ...]:
+    """Извлекает категории RSS и Atom без дублей."""
+
+    categories: list[str] = []
+    seen_normalized: set[str] = set()
+
+    for child in entry:
+        if _local_name(child.tag) != "category":
+            continue
+
+        category = _normalize_category(
+            child.attrib.get("term")
+            or _element_text(child)
+        )
+
+        if category is None:
+            continue
+
+        duplicate_key = category.casefold()
+
+        if duplicate_key in seen_normalized:
+            continue
+
+        seen_normalized.add(duplicate_key)
+        categories.append(category)
+
+    return tuple(categories)
 
 
 def _is_http_url(value: str | None) -> bool:
@@ -370,6 +418,7 @@ def _extract_rss_entry(
         primary_image_url=(
             _extract_image_url(item)
         ),
+        categories=_extract_categories(item),
     )
 
 
@@ -426,6 +475,7 @@ def _extract_atom_entry(
         primary_image_url=(
             _extract_image_url(entry)
         ),
+        categories=_extract_categories(entry),
     )
 
 

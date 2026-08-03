@@ -143,6 +143,7 @@ def _build_raw_payload(
         "primary_image_url": (
             entry.primary_image_url
         ),
+        "categories": list(entry.categories),
     }
 
 
