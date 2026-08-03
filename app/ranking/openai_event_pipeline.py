@@ -31,6 +31,9 @@ from app.ranking.event_formula_pipeline import (
     calculate_event_scores,
     select_event_top3,
 )
+from app.ranking.cinema_relevance import (
+    filter_cinema_relevance,
+)
 from app.ranking.event_request_key import (
     create_event_ranking_request_key,
 )
@@ -308,6 +311,16 @@ async def run_reserved_openai_event_ranking(
             limit=limit,
             source_codes=source_codes,
         )
+    )
+
+    relevance_filter_result = (
+        filter_cinema_relevance(
+            candidate_selection
+        )
+    )
+
+    candidate_selection = (
+        relevance_filter_result.selection
     )
 
     _validate_candidate_selection(

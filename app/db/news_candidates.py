@@ -21,6 +21,8 @@ class NewsCandidate:
     age_hours: float
     source_url: str
     primary_image_url: str | None
+    categories: tuple[str, ...] = ()
+    requires_cinema_relevance_filter: bool = False
     source_weight: int | None = None
 
 
@@ -63,6 +65,13 @@ async def select_news_candidates(
 
     Вес источника читается из:
     sources.settings.ranking.source_weight.
+
+    Флаг тематической фильтрации читается из:
+    sources.settings.ranking.
+    requires_cinema_relevance_filter.
+
+    Категории читаются из:
+    news_items.raw_payload.categories.
 
     PostgreSQL изменён не будет.
     """
@@ -128,6 +137,35 @@ async def select_news_candidates(
                 )::integer
                 ELSE NULL
             END AS source_weight,
+            CASE lower(
+                COALESCE(
+                    s.settings
+                    #>> (
+                        '{ranking,'
+                        'requires_cinema_relevance_filter}'
+                    ),
+                    'false'
+                )
+            )
+                WHEN 'true' THEN true
+                ELSE false
+            END AS requires_cinema_relevance_filter,
+            ARRAY(
+                SELECT category_value
+                FROM jsonb_array_elements_text(
+                    CASE
+                        WHEN jsonb_typeof(
+                            n.raw_payload
+                            -> 'categories'
+                        ) = 'array'
+                        THEN (
+                            n.raw_payload
+                            -> 'categories'
+                        )
+                        ELSE '[]'::jsonb
+                    END
+                ) AS category_value
+            ) AS categories,
             n.processing_status,
             COALESCE(
                 NULLIF(n.normalized_title, ''),
@@ -208,6 +246,14 @@ async def select_news_candidates(
             source_url=record["source_url"],
             primary_image_url=(
                 record["primary_image_url"]
+            ),
+            categories=tuple(
+                record["categories"] or ()
+            ),
+            requires_cinema_relevance_filter=bool(
+                record[
+                    "requires_cinema_relevance_filter"
+                ]
             ),
             source_weight=record["source_weight"],
         )
