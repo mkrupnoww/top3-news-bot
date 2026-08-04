@@ -358,6 +358,12 @@ def test_build_request() -> None:
         "top3_cinema_v2"
     )
     assert payload["window"]["hours"] == 24.0
+    assert payload["expected_news_count"] == 3
+    assert payload["expected_news_ids"] == [
+        101,
+        102,
+        103,
+    ]
 
     assert [
         candidate["news_id"]
@@ -418,10 +424,10 @@ def test_build_request() -> None:
     )
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v2"
+        "event_ranking_evaluator_v3"
     )
     assert EVENT_PROMPT_VERSION == (
-        "movie_news_event_ranking_prompt_v2"
+        "movie_news_event_ranking_prompt_v3"
     )
 
     print("Request preparation: OK")

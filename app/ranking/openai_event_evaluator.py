@@ -247,7 +247,7 @@ class OpenAIEventRankingPayload(BaseModel):
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v2.txt"
+    "ranking/movie_news_event_ranking_prompt_v3.txt"
 )
 
 
@@ -437,6 +437,14 @@ def _build_input_text(
             "group_and_assess_movie_news_events"
         ),
         "formula_version": "top3_cinema_v2",
+        "expected_news_count": len(
+            selection.candidates
+        ),
+        "expected_news_ids": [
+            candidate.news_id
+            for candidate
+            in selection.candidates
+        ],
         "window": {
             "started_at": (
                 selection.window_start

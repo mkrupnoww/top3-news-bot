@@ -12,11 +12,11 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v2"
+    "event_ranking_evaluator_v3"
 )
 
 EVENT_PROMPT_VERSION = (
-    "movie_news_event_ranking_prompt_v2"
+    "movie_news_event_ranking_prompt_v3"
 )
 
 MACRO_TOPICS = frozenset(
