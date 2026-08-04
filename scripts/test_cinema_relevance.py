@@ -55,12 +55,12 @@ def build_candidate(
 
 
 def test_curated_source_passes() -> None:
-    """Специализированный источник не фильтруется."""
+    """Обычная публикация кинораздела проходит."""
 
     candidate = build_candidate(
         news_id=1,
         source_code="variety_film",
-        title="Unrelated title",
+        title="New production begins filming",
         source_url=(
             "https://example.com/general/story"
         ),
@@ -251,11 +251,124 @@ def test_irrelevant_item_is_excluded() -> None:
     assert decision.signals == ()
 
 
+def test_review_category_is_excluded() -> None:
+    """Рецензия исключается даже из смешанной киноленты."""
+
+    candidate = build_candidate(
+        news_id=8,
+        title=(
+            "‘Soulm8te’ Review: "
+            "Fembot Thriller Comes Up Short"
+        ),
+        source_url=(
+            "https://example.com/movies/"
+            "movie-reviews/soulm8te-review"
+        ),
+        categories=(
+            "Movie Reviews",
+            "Movies",
+        ),
+    )
+
+    decision = evaluate_cinema_relevance(
+        candidate
+    )
+
+    assert decision.is_relevant is False
+    assert (
+        "excluded_format:review_category"
+        in decision.signals
+    )
+    assert (
+        "excluded_format:review_title"
+        in decision.signals
+    )
+
+
+def test_curated_review_is_excluded() -> None:
+    """Рецензия исключается и из curated-источника."""
+
+    candidate = build_candidate(
+        news_id=9,
+        source_code="variety_film",
+        title="New Horror Film Review: Mixed Results",
+        source_url=(
+            "https://example.com/film/review"
+        ),
+        categories=("Film Reviews",),
+        requires_filter=False,
+    )
+
+    decision = evaluate_cinema_relevance(
+        candidate
+    )
+
+    assert decision.is_relevant is False
+    assert (
+        "excluded_format:review_category"
+        in decision.signals
+    )
+
+
+def test_editorial_ranking_is_excluded() -> None:
+    """Редакционный рейтинг фильмов исключается."""
+
+    candidate = build_candidate(
+        news_id=10,
+        source_code="variety_film",
+        title=(
+            "Every ‘Spider-Man’ Movie Ranked "
+            "From Worst to Best"
+        ),
+        source_url=(
+            "https://example.com/film/"
+            "spider-man-movies-ranked"
+        ),
+        requires_filter=False,
+    )
+
+    decision = evaluate_cinema_relevance(
+        candidate
+    )
+
+    assert decision.is_relevant is False
+    assert decision.signals == (
+        "excluded_format:editorial_ranking",
+    )
+
+
+def test_fresh_analysis_is_not_excluded() -> None:
+    """Аналитика свежего события остаётся кандидатом."""
+
+    candidate = build_candidate(
+        news_id=11,
+        title=(
+            "5 Reasons ‘Spider-Man: Brand New Day’ "
+            "Crushed Superhero Fatigue"
+        ),
+        source_url=(
+            "https://example.com/movies/"
+            "spider-man-opening-analysis"
+        ),
+        categories=("Movies",),
+    )
+
+    decision = evaluate_cinema_relevance(
+        candidate
+    )
+
+    assert decision.is_relevant is True
+    assert (
+        "excluded_format:editorial_ranking"
+        not in decision.signals
+    )
+
+
 def test_selection_filter() -> None:
     """Фильтр сохраняет порядок и границы окна."""
 
     curated = build_candidate(
-        news_id=10,
+        news_id=20,
         source_code="deadline_film",
         title="Curated publication",
         source_url=(
@@ -265,7 +378,7 @@ def test_selection_filter() -> None:
     )
 
     movie = build_candidate(
-        news_id=11,
+        news_id=21,
         title="Film festival reveals lineup",
         source_url=(
             "https://example.com/news/"
@@ -274,13 +387,39 @@ def test_selection_filter() -> None:
     )
 
     music = build_candidate(
-        news_id=12,
+        news_id=22,
         title="Singer releases a new album",
         source_url=(
             "https://example.com/music/"
             "new-album"
         ),
         categories=("Music",),
+    )
+
+    review = build_candidate(
+        news_id=23,
+        title="‘Example’ Review: A Familiar Drama",
+        source_url=(
+            "https://example.com/movies/"
+            "example-review"
+        ),
+        categories=(
+            "Movie Reviews",
+            "Movies",
+        ),
+    )
+
+    ranking = build_candidate(
+        news_id=24,
+        source_code="variety_film",
+        title=(
+            "Every Example Movie Ranked "
+            "From Worst to Best"
+        ),
+        source_url=(
+            "https://example.com/film/ranking"
+        ),
+        requires_filter=False,
     )
 
     selection = CandidateSelectionResult(
@@ -291,6 +430,8 @@ def test_selection_filter() -> None:
             curated,
             movie,
             music,
+            review,
+            ranking,
         ),
     )
 
@@ -298,15 +439,19 @@ def test_selection_filter() -> None:
         selection
     )
 
-    assert result.input_count == 3
+    assert result.input_count == 5
     assert result.included_count == 2
-    assert result.excluded_count == 1
-    assert result.excluded_news_ids == (12,)
+    assert result.excluded_count == 3
+    assert result.excluded_news_ids == (
+        22,
+        23,
+        24,
+    )
     assert tuple(
         candidate.news_id
         for candidate
         in result.selection.candidates
-    ) == (10, 11)
+    ) == (20, 21)
     assert (
         result.selection.window_start
         == selection.window_start
@@ -331,6 +476,10 @@ def main() -> int:
     test_business_industry_signal()
     test_imax_signal()
     test_irrelevant_item_is_excluded()
+    test_review_category_is_excluded()
+    test_curated_review_is_excluded()
+    test_editorial_ranking_is_excluded()
+    test_fresh_analysis_is_not_excluded()
     test_selection_filter()
 
     print("Curated source pass-through: OK")
@@ -340,6 +489,10 @@ def main() -> int:
     print("Industry business signal: OK")
     print("IMAX relevance signal: OK")
     print("Irrelevant item exclusion: OK")
+    print("Review category exclusion: OK")
+    print("Curated review exclusion: OK")
+    print("Editorial ranking exclusion: OK")
+    print("Fresh event analysis inclusion: OK")
     print("Selection filtering: OK")
     print()
     print("Network requests: not performed")

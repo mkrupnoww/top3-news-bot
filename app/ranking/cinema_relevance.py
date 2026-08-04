@@ -50,6 +50,34 @@ _STRONG_TEXT_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+_REVIEW_CATEGORY_NAMES = frozenset(
+    {
+        "movie review",
+        "movie reviews",
+        "film review",
+        "film reviews",
+        "reviews",
+    }
+)
+
+_REVIEW_TITLE_PATTERN = re.compile(
+    r"\breview\b\s*[:—–-]",
+    flags=re.IGNORECASE,
+)
+
+_EDITORIAL_RANKING_PATTERNS = (
+    re.compile(
+        r"\branked\s+from\s+"
+        r"(?:worst|best)\s+to\s+"
+        r"(?:best|worst)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bevery\b.{0,160}\branked\b",
+        flags=re.IGNORECASE,
+    ),
+)
+
 _FILM_INDUSTRY_ENTITIES = (
     "paramount",
     "warner bros",
@@ -145,6 +173,53 @@ def _normalize_text(value: str | None) -> str:
         " ",
         value,
     ).strip().casefold()
+
+
+def _editorial_exclusion_signals(
+    candidate: NewsCandidate,
+) -> tuple[str, ...]:
+    """
+    Находит явные редакционные форматы без
+    самостоятельного новостного инфоповода.
+
+    Проверка применяется ко всем источникам,
+    включая специализированные киноразделы.
+    """
+
+    signals: list[str] = []
+
+    normalized_categories = tuple(
+        _normalize_text(category)
+        for category in candidate.categories
+        if _normalize_text(category)
+    )
+
+    if any(
+        category in _REVIEW_CATEGORY_NAMES
+        for category in normalized_categories
+    ):
+        signals.append(
+            "excluded_format:review_category"
+        )
+
+    if _REVIEW_TITLE_PATTERN.search(
+        candidate.title
+    ):
+        signals.append(
+            "excluded_format:review_title"
+        )
+
+    if any(
+        pattern.search(candidate.title)
+        for pattern in _EDITORIAL_RANKING_PATTERNS
+    ):
+        signals.append(
+            "excluded_format:editorial_ranking"
+        )
+
+    return tuple(
+        dict.fromkeys(signals)
+    )
 
 
 def _category_signals(
@@ -263,6 +338,25 @@ def evaluate_cinema_relevance(
 ) -> CinemaRelevanceDecision:
     """Оценивает одну публикацию без модели."""
 
+    editorial_signals = (
+        _editorial_exclusion_signals(
+            candidate
+        )
+    )
+
+    if editorial_signals:
+        return CinemaRelevanceDecision(
+            news_id=candidate.news_id,
+            source_code=candidate.source_code,
+            is_relevant=False,
+            signals=editorial_signals,
+            reason=(
+                "Исключён явный редакционный "
+                "формат без самостоятельного "
+                "новостного инфоповода."
+            ),
+        )
+
     if not candidate.requires_cinema_relevance_filter:
         return CinemaRelevanceDecision(
             news_id=candidate.news_id,
@@ -314,7 +408,7 @@ def evaluate_cinema_relevance(
 def filter_cinema_relevance(
     selection: CandidateSelectionResult,
 ) -> CinemaRelevanceFilterResult:
-    """Фильтрует смешанные ленты до OpenAI."""
+    """Фильтрует выборку до OpenAI."""
 
     decisions = tuple(
         evaluate_cinema_relevance(candidate)
