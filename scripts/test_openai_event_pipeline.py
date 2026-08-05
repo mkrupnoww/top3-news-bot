@@ -741,7 +741,7 @@ async def test_failed_pipeline(
     print()
     print("Persisted event pipeline failure: OK")
     print("run_status=failed")
-    print("stored_v2_entities=0")
+    print("stored_event_entities=0")
     print("repeated_model_call=false")
 
 
@@ -862,7 +862,7 @@ async def cleanup_test_runs(
             else "none"
         )
     )
-    print("temporary_v2_data_deleted=true")
+    print("temporary_event_data_deleted=true")
 
 
 async def main() -> int:
@@ -908,7 +908,7 @@ async def main() -> int:
     print()
     print("OpenAI requests: not performed")
     print(
-        "Database changes: temporary v2 data "
+        "Database changes: temporary event data "
         "inserted and deleted"
     )
     print("Telegram publication: not performed")
