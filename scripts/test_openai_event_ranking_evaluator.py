@@ -14,6 +14,9 @@ from app.ranking.event_evaluator import (
     EventRankingModelRequest,
     EventRankingModelResponse,
 )
+from app.ranking.full_formula import (
+    FULL_FORMULA_VERSION,
+)
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
     SYSTEM_INSTRUCTIONS,
@@ -355,7 +358,10 @@ def test_build_request() -> None:
         "group_and_assess_movie_news_events"
     )
     assert payload["formula_version"] == (
-        "top3_cinema_v2"
+        FULL_FORMULA_VERSION
+    )
+    assert FULL_FORMULA_VERSION == (
+        "top3_cinema_v3"
     )
     assert payload["window"]["hours"] == 24.0
     assert payload["expected_news_count"] == 3
@@ -979,7 +985,7 @@ def test_empty_selection() -> None:
 
 
 async def main() -> int:
-    """Запускает fake-client тест v2."""
+    """Запускает fake-client тест v3."""
 
     test_build_request()
     await test_prepared_request()

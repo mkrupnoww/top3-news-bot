@@ -13,7 +13,7 @@ from app.ranking.score_formula import (
 ScoreInput: TypeAlias = Decimal | int | float | str
 OptionalScoreInput: TypeAlias = ScoreInput | None
 
-FULL_FORMULA_VERSION = "top3_cinema_v2"
+FULL_FORMULA_VERSION = "top3_cinema_v3"
 SCORE_QUANTUM = Decimal("0.000001")
 SCORE_MIN = Decimal("0")
 SCORE_MAX = Decimal("10")

@@ -15,7 +15,7 @@ ScoreInput: TypeAlias = (
 )
 
 
-FORMULA_VERSION = "individual_score_v1"
+FORMULA_VERSION = "individual_score_v2"
 
 SCORE_QUANTUM = Decimal("0.000001")
 
@@ -193,6 +193,9 @@ def calculate_individual_score(
         + 0.30M
         + 0.20R
         + 0.15(H × Q)
+
+    Итог округляется один раз после вычисления
+    всей формулы, как generated-колонка PostgreSQL.
     """
 
     freshness_component = _quantize_result(
@@ -219,10 +222,17 @@ def calculate_individual_score(
     )
 
     individual_score = _quantize_result(
-        freshness_component
-        + magnitude_component
-        + resonance_component
-        + hook_quality_component
+        F_WEIGHT
+        * components.f_score
+        + M_WEIGHT
+        * components.m_score
+        + R_WEIGHT
+        * components.r_score
+        + HQ_WEIGHT
+        * (
+            components.h_score
+            * components.q_score
+        )
     )
 
     return CalculatedScore(

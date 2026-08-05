@@ -273,7 +273,7 @@ def _validate_selection(
 
     if window_hours != FORMULA_WINDOW_HOURS:
         raise ValueError(
-            "Полная формула top3_cinema_v2 "
+            "Полная формула top3_cinema_v3 "
             "требует окно ровно 24 часа: "
             f"window_hours={window_hours}"
         )
@@ -795,7 +795,7 @@ def calculate_event_formula(
     ] = (),
 ) -> EventFormulaCalculationResult:
     """
-    Выполняет полный детерминированный расчёт v2.
+    Выполняет полный детерминированный расчёт v3.
 
     Сохраняет прежний публичный интерфейс:
     рассчитывает все баллы и сразу выбирает TOP-3.

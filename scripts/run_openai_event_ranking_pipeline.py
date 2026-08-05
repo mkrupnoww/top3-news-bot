@@ -58,14 +58,14 @@ def parse_as_of(
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Разбирает параметры защищённого запуска v2."""
+    """Разбирает параметры защищённого запуска v3."""
 
     parser = argparse.ArgumentParser(
         description=(
             "Выполняет защищённое event-level "
             "ранжирование киноновостей через OpenAI, "
             "рассчитывает полную формулу "
-            "top3_cinema_v2 и сохраняет результат "
+            "top3_cinema_v3 и сохраняет результат "
             "в PostgreSQL."
         ),
     )
@@ -95,7 +95,7 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=24.0,
         help=(
-            "Размер окна. Для полной формулы v2 "
+            "Размер окна. Для полной формулы v3 "
             "допускается только 24."
         ),
     )
@@ -130,7 +130,7 @@ def validate_arguments(
 
     if arguments.window_hours != 24.0:
         raise ValueError(
-            "--window-hours для top3_cinema_v2 "
+            "--window-hours для top3_cinema_v3 "
             "должен быть равен 24."
         )
 
@@ -683,7 +683,7 @@ def print_openai_telemetry(
 async def main(
     arguments: argparse.Namespace,
 ) -> int:
-    """Выполняет управляемый защищённый запуск v2."""
+    """Выполняет управляемый защищённый запуск v3."""
 
     try:
         validate_arguments(arguments)

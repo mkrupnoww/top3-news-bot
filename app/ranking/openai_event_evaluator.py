@@ -18,6 +18,9 @@ from app.db.news_candidates import (
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
+from app.ranking.full_formula import (
+    FULL_FORMULA_VERSION,
+)
 from app.ranking.event_evaluator import (
     EVENT_EVALUATOR_VERSION,
     EVENT_PROMPT_VERSION,
@@ -436,7 +439,7 @@ def _build_input_text(
         "task": (
             "group_and_assess_movie_news_events"
         ),
-        "formula_version": "top3_cinema_v2",
+        "formula_version": FULL_FORMULA_VERSION,
         "expected_news_count": len(
             selection.candidates
         ),

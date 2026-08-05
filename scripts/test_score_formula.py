@@ -129,6 +129,57 @@ def test_regular_score() -> None:
     )
 
 
+def test_single_final_rounding() -> None:
+    """
+    Проверяет округление только итогового B.
+
+    Сумма отдельно округлённых диагностических
+    компонентов отличается от результата полной
+    формулы на последнем знаке.
+    """
+
+    result = calculate_individual_score(
+        create_score_components(
+            f_score="0.310791",
+            m_score="0.387246",
+            r_score="4.723361",
+            h_score="1.729807",
+            q_score="0.678077",
+        )
+    )
+
+    rounded_component_sum = (
+        result.freshness_component
+        + result.magnitude_component
+        + result.resonance_component
+        + result.hook_quality_component
+    )
+
+    assert rounded_component_sum == (
+        Decimal("1.298945")
+    )
+
+    assert result.individual_score == (
+        Decimal("1.298946")
+    )
+
+    assert (
+        result.individual_score
+        != rounded_component_sum
+    )
+
+    print()
+    print("Single final rounding: OK")
+    print(
+        f"rounded_component_sum="
+        f"{rounded_component_sum}"
+    )
+    print(
+        f"individual_score="
+        f"{result.individual_score}"
+    )
+
+
 def test_invalid_values() -> None:
     """Проверяет блокировку недопустимых значений."""
 
@@ -184,6 +235,10 @@ def test_invalid_values() -> None:
 def main() -> int:
     """Запускает тесты математической формулы."""
 
+    assert FORMULA_VERSION == (
+        "individual_score_v2"
+    )
+
     print(
         f"formula_version={FORMULA_VERSION}"
     )
@@ -200,6 +255,7 @@ def main() -> int:
     test_maximum_score()
     test_quality_modifier()
     test_regular_score()
+    test_single_final_rounding()
     test_invalid_values()
 
     print()
