@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -29,12 +29,14 @@ from app.ranking.event_evaluator import (
     SOURCE_RELATIONS,
     STORY_CLUSTER_KEY_MAX_LENGTH,
     STORY_CLUSTER_KEY_PATTERN,
+    STORY_CLUSTER_VERIFIER_PROMPT_VERSION,
     EventAssessment,
     EventMemberAssessment,
     EventRankingCoverageDiagnostics,
     EventRankingEvaluationResult,
     EventRankingModelRequest,
     EventRankingModelResponse,
+    StoryClusterVerificationChange,
     StructuredEventRankingClient,
 )
 from app.ranking.openai_usage import (
@@ -329,6 +331,11 @@ REPAIR_INSTRUCTIONS = (
     + "в одну сюжетную семью. Не добавляй "
     + "посторонние ID."
 )
+
+STORY_CLUSTER_VERIFIER_INSTRUCTIONS = load_prompt(
+    "ranking/movie_news_story_cluster_verifier_v1.txt"
+)
+
 
 
 def _validate_selection(
@@ -698,6 +705,243 @@ def _build_repair_request(
             separators=(",", ":"),
         ),
     )
+
+class StoryClusterVerificationError(ValueError):
+    """Некорректный ответ узкого cluster verifier."""
+
+
+def _story_clusters_by_key(
+    events: tuple[EventAssessment, ...],
+) -> dict[str, tuple[EventAssessment, ...]]:
+    """Группирует события по сохранённому story_cluster_key."""
+
+    grouped: dict[str, list[EventAssessment]] = {}
+
+    for event in events:
+        grouped.setdefault(
+            event.story_cluster_key,
+            [],
+        ).append(event)
+
+    return {
+        key: tuple(cluster_events)
+        for key, cluster_events in grouped.items()
+    }
+
+
+def _multi_event_story_clusters(
+    events: tuple[EventAssessment, ...],
+) -> dict[str, tuple[EventAssessment, ...]]:
+    """Возвращает только кластеры с двумя и более events."""
+
+    return {
+        key: cluster_events
+        for key, cluster_events in _story_clusters_by_key(
+            events
+        ).items()
+        if len(cluster_events) > 1
+    }
+
+
+def _build_story_cluster_verifier_request(
+    *,
+    model_name: str,
+    selection: CandidateSelectionResult,
+    validated: _ValidatedPayload,
+) -> tuple[EventRankingModelRequest, tuple[int, ...]]:
+    """Формирует один узкий запрос для multi-event clusters."""
+
+    multi_clusters = _multi_event_story_clusters(
+        validated.events
+    )
+
+    if not multi_clusters:
+        raise ValueError(
+            "Нет многособытийных кластеров для verifier."
+        )
+
+    target_representative_ids = tuple(
+        event.representative_news_id
+        for event in validated.events
+        if event.story_cluster_key in multi_clusters
+    )
+    target_id_set = set(target_representative_ids)
+    target_member_ids = {
+        member.news_id
+        for event in validated.events
+        if event.representative_news_id in target_id_set
+        for member in event.members
+    }
+
+    original_events = [
+        event.model_dump(mode="json")
+        for event in validated.payload.events
+        if event.representative_news_id in target_id_set
+    ]
+
+    payload = {
+        "task": "verify_and_split_multi_event_story_clusters",
+        "formula_version": FULL_FORMULA_VERSION,
+        "verifier_prompt_version": (
+            STORY_CLUSTER_VERIFIER_PROMPT_VERSION
+        ),
+        "maximum_total_model_calls": 2,
+        "target_representative_news_ids": list(
+            target_representative_ids
+        ),
+        "current_multi_event_clusters": [
+            {
+                "story_cluster_key": key,
+                "representative_news_ids": [
+                    event.representative_news_id
+                    for event in cluster_events
+                ],
+            }
+            for key, cluster_events in multi_clusters.items()
+        ],
+        "events_to_echo_unchanged": original_events,
+        "supporting_candidates": [
+            _candidate_payload(candidate)
+            for candidate in selection.candidates
+            if candidate.news_id in target_member_ids
+        ],
+        "requirements": {
+            "return_full_schema": True,
+            "echo_events_unchanged": True,
+            "rebuild_story_clusters_only_for_target_events": True,
+            "every_target_representative_id_exactly_once": True,
+            "unexpected_representative_ids_forbidden": True,
+            "split_overbroad_clusters": True,
+            "never_merge_different_original_clusters": True,
+            "same_person_or_company_is_not_enough": True,
+            "earnings_are_separate_from_merger_story": True,
+            "interview_context_is_not_automatically_one_story": True,
+        },
+    }
+
+    return (
+        EventRankingModelRequest(
+            model=model_name,
+            instructions=(
+                STORY_CLUSTER_VERIFIER_INSTRUCTIONS
+            ),
+            input_text=json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ),
+        target_representative_ids,
+    )
+
+
+def _validate_story_cluster_verifier_response(
+    *,
+    response: EventRankingModelResponse,
+    original_events: tuple[EventAssessment, ...],
+    target_representative_ids: tuple[int, ...],
+) -> tuple[
+    tuple[EventAssessment, ...],
+    tuple[StoryClusterVerificationChange, ...],
+]:
+    """Валидирует verifier и применяет только безопасное split."""
+
+    payload = _parse_response(response.output_text)
+    target_id_set = set(target_representative_ids)
+    returned_ids = tuple(
+        event.representative_news_id
+        for event in payload.events
+    )
+
+    if len(set(returned_ids)) != len(returned_ids):
+        raise StoryClusterVerificationError(
+            "Verifier вернул повторяющиеся representative_news_id."
+        )
+
+    returned_id_set = set(returned_ids)
+    missing_ids = sorted(target_id_set - returned_id_set)
+    unexpected_ids = sorted(returned_id_set - target_id_set)
+
+    if missing_ids or unexpected_ids:
+        raise StoryClusterVerificationError(
+            "Verifier не покрывает target events: "
+            f"missing={missing_ids}, unexpected={unexpected_ids}"
+        )
+
+    verified_keys = _story_cluster_keys_by_representative(
+        payload
+    )
+    original_key_by_id = {
+        event.representative_news_id: event.story_cluster_key
+        for event in original_events
+        if event.representative_news_id in target_id_set
+    }
+
+    for cluster in payload.story_clusters:
+        original_keys = {
+            original_key_by_id[news_id]
+            for news_id in cluster.representative_news_ids
+        }
+
+        if len(original_keys) != 1:
+            raise StoryClusterVerificationError(
+                "Verifier попытался объединить разные исходные "
+                "story clusters."
+            )
+
+    untouched_keys = {
+        event.story_cluster_key
+        for event in original_events
+        if event.representative_news_id not in target_id_set
+    }
+    conflicting_keys = sorted(
+        set(verified_keys.values()) & untouched_keys
+    )
+
+    if conflicting_keys:
+        raise StoryClusterVerificationError(
+            "Verifier создал ключ, совпадающий с нетронутым "
+            "cluster: " + ",".join(conflicting_keys)
+        )
+
+    final_events = tuple(
+        replace(
+            event,
+            story_cluster_key=verified_keys[
+                event.representative_news_id
+            ],
+        )
+        if event.representative_news_id in target_id_set
+        else event
+        for event in original_events
+    )
+
+    changes: list[StoryClusterVerificationChange] = []
+    original_clusters = _multi_event_story_clusters(
+        original_events
+    )
+
+    for original_key, cluster_events in original_clusters.items():
+        representative_ids = tuple(
+            event.representative_news_id
+            for event in cluster_events
+        )
+        resulting_keys = tuple(
+            dict.fromkeys(
+                verified_keys[news_id]
+                for news_id in representative_ids
+            )
+        )
+        changes.append(
+            StoryClusterVerificationChange(
+                original_story_cluster_key=original_key,
+                representative_news_ids=representative_ids,
+                resulting_story_cluster_keys=resulting_keys,
+            )
+        )
+
+    return final_events, tuple(changes)
+
 
 def _parse_response(
     response_text: str,
@@ -1220,6 +1464,7 @@ def _payload_quality(
 def _combine_usage(
     responses: tuple[
         EventRankingModelResponse,
+    StoryClusterVerificationChange,
         ...,
     ],
 ) -> OpenAITokenUsage | None:
@@ -1275,6 +1520,7 @@ def _combine_usage(
 def _combine_cost(
     responses: tuple[
         EventRankingModelResponse,
+    StoryClusterVerificationChange,
         ...,
     ],
 ) -> OpenAICostEstimate | None:
@@ -1358,6 +1604,7 @@ def _aggregate_response(
     chosen_response: EventRankingModelResponse,
     successful_responses: tuple[
         EventRankingModelResponse,
+    StoryClusterVerificationChange,
         ...,
     ],
 ) -> EventRankingModelResponse:
@@ -1564,6 +1811,96 @@ class OpenAIEventRankingEvaluator:
                 chosen.story_cluster_error_message
             )
 
+        final_events = chosen.events
+        clusters_before = _story_clusters_by_key(
+            final_events
+        )
+        multi_clusters_before = (
+            _multi_event_story_clusters(
+                final_events
+            )
+        )
+        verification_attempted = False
+        verification_succeeded = False
+        verification_skipped_reason: str | None = None
+        verification_error_type: str | None = None
+        verification_error_message: str | None = None
+        verification_changes: tuple[
+            StoryClusterVerificationChange,
+            ...,
+        ] = ()
+        verifier_event_count = sum(
+            len(cluster_events)
+            for cluster_events in multi_clusters_before.values()
+        )
+
+        if repair_attempted:
+            verification_skipped_reason = (
+                "repair_consumed_second_model_call"
+            )
+        elif not chosen.story_cluster_valid:
+            verification_skipped_reason = (
+                "invalid_story_cluster_registry"
+            )
+        elif not multi_clusters_before:
+            verification_skipped_reason = (
+                "no_multi_event_story_clusters"
+            )
+        else:
+            verification_attempted = True
+
+            try:
+                model_name = self._metadata.model_name
+
+                if model_name is None:
+                    raise RuntimeError(
+                        "В метаданных отсутствует model_name."
+                    )
+
+                verifier_request, target_ids = (
+                    _build_story_cluster_verifier_request(
+                        model_name=model_name,
+                        selection=selection,
+                        validated=chosen,
+                    )
+                )
+
+                verifier_response = (
+                    await self._client.create_response(
+                        verifier_request
+                    )
+                )
+                successful_responses.append(
+                    verifier_response
+                )
+                (
+                    final_events,
+                    verification_changes,
+                ) = (
+                    _validate_story_cluster_verifier_response(
+                        response=verifier_response,
+                        original_events=chosen.events,
+                        target_representative_ids=target_ids,
+                    )
+                )
+                verification_succeeded = True
+            except Exception as error:
+                verification_error_type = (
+                    type(error).__name__
+                )
+                verification_error_message = str(error)
+                final_events = chosen.events
+                verification_changes = ()
+
+        clusters_after = _story_clusters_by_key(
+            final_events
+        )
+        multi_clusters_after = (
+            _multi_event_story_clusters(
+                final_events
+            )
+        )
+
         final_responses = tuple(
             successful_responses
         )
@@ -1593,14 +1930,55 @@ class OpenAIEventRankingEvaluator:
                 repair_error_message=(
                     repair_error_message
                 ),
+                story_cluster_verification_attempted=(
+                    verification_attempted
+                ),
+                story_cluster_verification_succeeded=(
+                    verification_succeeded
+                ),
+                story_cluster_verification_skipped_reason=(
+                    verification_skipped_reason
+                ),
+                story_cluster_verification_error_type=(
+                    verification_error_type
+                ),
+                story_cluster_verification_error_message=(
+                    verification_error_message
+                ),
+                story_cluster_verification_prompt_version=(
+                    STORY_CLUSTER_VERIFIER_PROMPT_VERSION
+                ),
+                story_cluster_count_before=len(
+                    clusters_before
+                ),
+                story_cluster_count_after=len(
+                    clusters_after
+                ),
+                story_cluster_multi_event_count_before=len(
+                    multi_clusters_before
+                ),
+                story_cluster_multi_event_count_after=len(
+                    multi_clusters_after
+                ),
+                story_cluster_verifier_event_count=(
+                    verifier_event_count
+                ),
+                story_cluster_verification_changes=(
+                    verification_changes
+                ),
                 model_call_count=(
-                    2 if repair_attempted else 1
+                    2
+                    if (
+                        repair_attempted
+                        or verification_attempted
+                    )
+                    else 1
                 ),
             )
         )
 
         return EventRankingEvaluationResult(
-            events=chosen.events,
+            events=final_events,
             model_response=_aggregate_response(
                 chosen_response=chosen_response,
                 successful_responses=(

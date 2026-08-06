@@ -38,6 +38,7 @@ from app.ranking.event_evaluator import (
     EventAssessment,
     EventMemberAssessment,
     EventRankingCoverageDiagnostics,
+    StoryClusterVerificationChange,
 )
 from app.ranking.event_formula_pipeline import (
     EventAudienceMetrics,
@@ -471,6 +472,39 @@ def build_degraded_calculation(
     )
 
 
+def build_verified_diagnostics(
+) -> EventRankingCoverageDiagnostics:
+    """Создаёт диагностику успешного cluster verifier."""
+
+    return EventRankingCoverageDiagnostics(
+        expected_news_ids=TEST_NEWS_IDS,
+        processed_news_ids=TEST_NEWS_IDS,
+        story_cluster_verification_attempted=True,
+        story_cluster_verification_succeeded=True,
+        story_cluster_verification_prompt_version=(
+            "movie_news_story_cluster_verifier_v1"
+        ),
+        story_cluster_count_before=3,
+        story_cluster_count_after=4,
+        story_cluster_multi_event_count_before=1,
+        story_cluster_multi_event_count_after=0,
+        story_cluster_verifier_event_count=2,
+        story_cluster_verification_changes=(
+            StoryClusterVerificationChange(
+                original_story_cluster_key=(
+                    "synthetic_broad_cluster"
+                ),
+                representative_news_ids=(7, 9),
+                resulting_story_cluster_keys=(
+                    "international_production",
+                    "film_company_business_decision",
+                ),
+            ),
+        ),
+        model_call_count=2,
+    )
+
+
 def build_degraded_diagnostics(
 ) -> EventRankingCoverageDiagnostics:
     """Создаёт coverage после неудачного repair."""
@@ -689,6 +723,9 @@ async def test_successful_completion(
             calculation=calculation,
             usage=usage,
             cost_estimate=cost_estimate,
+            coverage_diagnostics=(
+                build_verified_diagnostics()
+            ),
         )
     )
 
@@ -763,7 +800,9 @@ async def test_successful_completion(
                 parameters->'missing_news_ids'
                     AS missing_news_ids,
                 parameters->'coverage'
-                    AS coverage
+                    AS coverage,
+                parameters->'story_cluster_verification'
+                    AS story_cluster_verification
             FROM top3_news.ranking_runs
             WHERE ranking_run_id = $1
             """,
@@ -912,6 +951,10 @@ async def test_successful_completion(
         run_record["coverage"]
     )
 
+    story_cluster_verification = decode_jsonb(
+        run_record["story_cluster_verification"]
+    )
+
     assert run_record["run_status"] == (
         "completed"
     )
@@ -944,6 +987,21 @@ async def test_successful_completion(
         "processed_news_ids"
     ] == list(TEST_NEWS_IDS)
     assert coverage["missing_news_ids"] == []
+    assert story_cluster_verification["attempted"] is True
+    assert story_cluster_verification["succeeded"] is True
+    assert story_cluster_verification["degraded"] is False
+    assert story_cluster_verification[
+        "cluster_count_before"
+    ] == 3
+    assert story_cluster_verification[
+        "cluster_count_after"
+    ] == 4
+    assert story_cluster_verification[
+        "verifier_event_count"
+    ] == 2
+    assert story_cluster_verification["changes"][0][
+        "original_story_cluster_key"
+    ] == "synthetic_broad_cluster"
     assert top3_selection["policy_version"] == (
         "story_cluster_diversity_v1"
     )

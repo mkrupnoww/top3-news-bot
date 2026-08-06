@@ -444,7 +444,9 @@ async def load_run_by_model(
                 parameters->'coverage'
                     AS coverage,
                 parameters->'top3_selection'
-                    AS top3_selection
+                    AS top3_selection,
+                parameters->'story_cluster_verification'
+                    AS story_cluster_verification
             FROM top3_news.ranking_runs
             WHERE model_name = $1
             ORDER BY ranking_run_id
@@ -677,6 +679,9 @@ async def test_successful_pipeline(
     top3_selection = decode_jsonb(
         record["top3_selection"]
     )
+    story_cluster_verification = decode_jsonb(
+        record["story_cluster_verification"]
+    )
 
     assert record["ranking_run_id"] == (
         first.ranking_run_id
@@ -737,6 +742,15 @@ async def test_successful_pipeline(
             "winner_story_cluster_keys"
         ]
     ) == 3
+    assert story_cluster_verification[
+        "attempted"
+    ] is False
+    assert story_cluster_verification[
+        "skipped_reason"
+    ] == "no_multi_event_story_clusters"
+    assert story_cluster_verification[
+        "verifier_event_count"
+    ] == 0
 
     counts = await load_v2_counts(
         pool,
@@ -990,6 +1004,9 @@ async def test_degraded_pipeline(
     top3_selection = decode_jsonb(
         record["top3_selection"]
     )
+    story_cluster_verification = decode_jsonb(
+        record["story_cluster_verification"]
+    )
 
     assert record["run_status"] == "completed"
     assert record["candidate_count"] == 5
@@ -1008,6 +1025,12 @@ async def test_degraded_pipeline(
     assert coverage["repair_attempted"] is True
     assert coverage["repair_succeeded"] is False
     assert coverage["model_call_count"] == 2
+    assert story_cluster_verification[
+        "attempted"
+    ] is False
+    assert story_cluster_verification[
+        "skipped_reason"
+    ] == "repair_consumed_second_model_call"
     assert usage["total_tokens"] == 2600
     assert cost["total_cost_usd"] == (
         "0.01084000"

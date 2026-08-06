@@ -32,7 +32,7 @@ from app.ranking.request_key import (
 
 
 COMPLETION_VERSION = (
-    "reserved_event_ranking_completion_v3"
+    "reserved_event_ranking_completion_v4"
 )
 
 DIAGNOSTIC_FAILURE_VERSION = (
@@ -360,6 +360,78 @@ def _build_coverage_payload(
         "model_call_count": (
             diagnostics.model_call_count
         ),
+        "story_cluster_verification": {
+            "attempted": (
+                diagnostics
+                .story_cluster_verification_attempted
+            ),
+            "succeeded": (
+                diagnostics
+                .story_cluster_verification_succeeded
+            ),
+            "degraded": (
+                diagnostics
+                .story_cluster_verification_degraded
+            ),
+            "skipped_reason": (
+                diagnostics
+                .story_cluster_verification_skipped_reason
+            ),
+            "error_type": (
+                None
+                if diagnostics
+                .story_cluster_verification_error_type
+                is None
+                else diagnostics
+                .story_cluster_verification_error_type[:500]
+            ),
+            "error_message": (
+                None
+                if diagnostics
+                .story_cluster_verification_error_message
+                is None
+                else diagnostics
+                .story_cluster_verification_error_message[:8000]
+            ),
+            "prompt_version": (
+                diagnostics
+                .story_cluster_verification_prompt_version
+            ),
+            "cluster_count_before": (
+                diagnostics.story_cluster_count_before
+            ),
+            "cluster_count_after": (
+                diagnostics.story_cluster_count_after
+            ),
+            "multi_event_cluster_count_before": (
+                diagnostics
+                .story_cluster_multi_event_count_before
+            ),
+            "multi_event_cluster_count_after": (
+                diagnostics
+                .story_cluster_multi_event_count_after
+            ),
+            "verifier_event_count": (
+                diagnostics.story_cluster_verifier_event_count
+            ),
+            "changes": [
+                {
+                    "original_story_cluster_key": (
+                        change.original_story_cluster_key
+                    ),
+                    "representative_news_ids": list(
+                        change.representative_news_ids
+                    ),
+                    "resulting_story_cluster_keys": list(
+                        change.resulting_story_cluster_keys
+                    ),
+                }
+                for change in (
+                    diagnostics
+                    .story_cluster_verification_changes
+                )
+            ],
+        },
     }
 
 
@@ -1927,6 +1999,11 @@ async def complete_reserved_event_ranking_run(
                 .repair_succeeded
             ),
             "coverage": coverage_payload,
+            "story_cluster_verification": (
+                coverage_payload[
+                    "story_cluster_verification"
+                ]
+            ),
             "audience_maxima": {
                 "view_count": (
                     calculation

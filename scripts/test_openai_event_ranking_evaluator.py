@@ -11,6 +11,7 @@ from app.db.news_candidates import (
 from app.ranking.event_evaluator import (
     EVENT_EVALUATOR_VERSION,
     EVENT_PROMPT_VERSION,
+    STORY_CLUSTER_VERIFIER_PROMPT_VERSION,
     EventRankingEvaluator,
     EventRankingModelRequest,
     EventRankingModelResponse,
@@ -21,6 +22,7 @@ from app.ranking.full_formula import (
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
     REPAIR_INSTRUCTIONS,
+    STORY_CLUSTER_VERIFIER_INSTRUCTIONS,
     SYSTEM_INSTRUCTIONS,
 )
 from app.ranking.openai_usage import (
@@ -507,10 +509,13 @@ def test_build_request() -> None:
     ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v6"
+        "event_ranking_evaluator_v7"
     )
     assert EVENT_PROMPT_VERSION == (
         "movie_news_event_ranking_prompt_v6"
+    )
+    assert STORY_CLUSTER_VERIFIER_PROMPT_VERSION == (
+        "movie_news_story_cluster_verifier_v1"
     )
     assert evaluator.metadata.evaluator_version == (
         EVENT_EVALUATOR_VERSION
@@ -519,7 +524,7 @@ def test_build_request() -> None:
         EVENT_PROMPT_VERSION
     )
 
-    print("Request preparation v6: OK")
+    print("Request preparation v7: OK")
     print("client_call_count=0")
 
 
@@ -540,6 +545,16 @@ async def test_complete_response() -> None:
     assert result.diagnostics.repair_attempted is False
     assert result.diagnostics.repair_succeeded is False
     assert result.diagnostics.model_call_count == 1
+    assert (
+        result.diagnostics
+        .story_cluster_verification_attempted
+        is False
+    )
+    assert (
+        result.diagnostics
+        .story_cluster_verification_skipped_reason
+        == "no_multi_event_story_clusters"
+    )
     assert result.diagnostics.processed_news_ids == (
         101,
         102,
@@ -796,30 +811,134 @@ def build_invalid_story_cluster_payload(
 
 
 async def test_global_story_cluster_assignment() -> None:
-    """Один глобальный ключ назначается нескольким events."""
+    """Verifier разделяет чрезмерно широкий cluster."""
 
     evaluator, client = build_evaluator(
         build_response(
-            build_shared_story_payload()
-        )
+            build_shared_story_payload(),
+            with_telemetry=True,
+        ),
+        build_response(
+            build_valid_payload(),
+            with_telemetry=True,
+        ),
     )
     result = await evaluator.evaluate_detailed(
         build_selection()
     )
 
-    assert len(client.requests) == 1
-    assert result.diagnostics is not None
-    assert result.diagnostics.repair_attempted is False
+    assert len(client.requests) == 2
+    assert client.requests[1].instructions == (
+        STORY_CLUSTER_VERIFIER_INSTRUCTIONS
+    )
+    verifier_payload = json.loads(
+        client.requests[1].input_text
+    )
+    assert verifier_payload["task"] == (
+        "verify_and_split_multi_event_story_clusters"
+    )
+    assert verifier_payload[
+        "target_representative_news_ids"
+    ] == [101, 103]
+    assert verifier_payload["requirements"][
+        "never_merge_different_original_clusters"
+    ] is True
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.repair_attempted is False
+    assert (
+        diagnostics.story_cluster_verification_attempted
+        is True
+    )
+    assert (
+        diagnostics.story_cluster_verification_succeeded
+        is True
+    )
+    assert (
+        diagnostics.story_cluster_verification_degraded
+        is False
+    )
+    assert diagnostics.model_call_count == 2
+    assert diagnostics.story_cluster_count_before == 1
+    assert diagnostics.story_cluster_count_after == 2
+    assert (
+        diagnostics.story_cluster_multi_event_count_before
+        == 1
+    )
+    assert (
+        diagnostics.story_cluster_multi_event_count_after
+        == 0
+    )
+    assert diagnostics.story_cluster_verifier_event_count == 2
+    assert len(
+        diagnostics.story_cluster_verification_changes
+    ) == 1
     assert {
         event.story_cluster_key
         for event in result.events
     } == {
-        "paramount_warner_merger"
+        "festival_new_competition",
+        "international_film_project",
     }
 
+    usage = result.model_response.usage
+    assert usage is not None
+    assert usage.total_tokens == 2600
+
     print()
-    print("Global story cluster assignment: OK")
-    print("shared_story_cluster_key=true")
+    print("Story cluster verifier split: OK")
+    print("client_call_count=2")
+    print("cluster_count=1->2")
+
+
+async def test_story_cluster_verifier_failure() -> None:
+    """Некорректный verifier сохраняет исходные clusters."""
+
+    evaluator, client = build_evaluator(
+        build_response(
+            build_shared_story_payload(),
+            with_telemetry=True,
+        ),
+        build_response(
+            build_invalid_story_cluster_payload(),
+            with_telemetry=True,
+        ),
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 2
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.repair_attempted is False
+    assert (
+        diagnostics.story_cluster_verification_attempted
+        is True
+    )
+    assert (
+        diagnostics.story_cluster_verification_succeeded
+        is False
+    )
+    assert (
+        diagnostics.story_cluster_verification_degraded
+        is True
+    )
+    assert diagnostics.model_call_count == 2
+    assert diagnostics.story_cluster_count_before == 1
+    assert diagnostics.story_cluster_count_after == 1
+    assert diagnostics.story_cluster_verification_error_type == (
+        "StoryClusterCoverageError"
+    )
+    assert {
+        event.story_cluster_key
+        for event in result.events
+    } == {"paramount_warner_merger"}
+
+    print()
+    print("Story cluster verifier safe retention: OK")
+    print("original_clusters_preserved=true")
 
 
 async def test_story_cluster_repair_success() -> None:
@@ -863,6 +982,14 @@ async def test_story_cluster_repair_success() -> None:
     assert diagnostics.repair_succeeded is True
     assert diagnostics.missing_news_ids == ()
     assert diagnostics.model_call_count == 2
+    assert (
+        diagnostics.story_cluster_verification_attempted
+        is False
+    )
+    assert (
+        diagnostics.story_cluster_verification_skipped_reason
+        == "repair_consumed_second_model_call"
+    )
     assert {
         event.story_cluster_key
         for event in result.events
@@ -1233,7 +1360,7 @@ async def test_common_interface() -> None:
 
 
 async def main() -> int:
-    """Запускает изолированный тест v6."""
+    """Запускает изолированный тест v7."""
 
     test_build_request()
     await test_complete_response()
@@ -1241,6 +1368,7 @@ async def main() -> int:
     await test_degraded_after_unsuccessful_repair()
     await test_degraded_after_repair_error()
     await test_global_story_cluster_assignment()
+    await test_story_cluster_verifier_failure()
     await test_story_cluster_repair_success()
     await test_story_cluster_fallback()
     await test_initial_unexpected_candidate()
@@ -1260,7 +1388,7 @@ async def main() -> int:
     print("Telegram publication: not performed")
     print(
         "OpenAI event ranking repair/degraded/"
-        "global-story-cluster test: OK"
+        "global-story-cluster-verifier test: OK"
     )
 
     return 0

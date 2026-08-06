@@ -13,11 +13,15 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v6"
+    "event_ranking_evaluator_v7"
 )
 
 EVENT_PROMPT_VERSION = (
     "movie_news_event_ranking_prompt_v6"
+)
+
+STORY_CLUSTER_VERIFIER_PROMPT_VERSION = (
+    "movie_news_story_cluster_verifier_v1"
 )
 
 MACRO_TOPICS = frozenset(
@@ -585,8 +589,98 @@ class EventRankingModelResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class StoryClusterVerificationChange:
+    """Изменение одного многособытийного story cluster."""
+
+    original_story_cluster_key: str
+    representative_news_ids: tuple[int, ...]
+    resulting_story_cluster_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Проверяет структурированное описание изменения."""
+
+        original_key = _normalize_required_text(
+            self.original_story_cluster_key,
+            field_name="original_story_cluster_key",
+        ).lower()
+        representative_news_ids = _normalize_news_ids(
+            self.representative_news_ids,
+            field_name="representative_news_ids",
+            allow_empty=False,
+        )
+
+        if not isinstance(
+            self.resulting_story_cluster_keys,
+            tuple,
+        ):
+            raise TypeError(
+                "resulting_story_cluster_keys должен быть tuple."
+            )
+
+        resulting_keys = tuple(
+            _normalize_required_text(
+                key,
+                field_name=(
+                    "resulting_story_cluster_keys item"
+                ),
+            ).lower()
+            for key in self.resulting_story_cluster_keys
+        )
+
+        if not resulting_keys:
+            raise ValueError(
+                "resulting_story_cluster_keys не может быть пустым."
+            )
+
+        for field_name, key in (
+            ("original_story_cluster_key", original_key),
+            *(
+                (
+                    "resulting_story_cluster_keys item",
+                    key,
+                )
+                for key in resulting_keys
+            ),
+        ):
+            if len(key) > STORY_CLUSTER_KEY_MAX_LENGTH:
+                raise ValueError(
+                    f"{field_name} не может быть длиннее "
+                    f"{STORY_CLUSTER_KEY_MAX_LENGTH} символов."
+                )
+
+            if re.fullmatch(
+                STORY_CLUSTER_KEY_PATTERN,
+                key,
+            ) is None:
+                raise ValueError(
+                    f"{field_name} должен быть lower_snake_case."
+                )
+
+        if len(set(resulting_keys)) != len(resulting_keys):
+            raise ValueError(
+                "resulting_story_cluster_keys содержит повторы."
+            )
+
+        object.__setattr__(
+            self,
+            "original_story_cluster_key",
+            original_key,
+        )
+        object.__setattr__(
+            self,
+            "representative_news_ids",
+            representative_news_ids,
+        )
+        object.__setattr__(
+            self,
+            "resulting_story_cluster_keys",
+            resulting_keys,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EventRankingCoverageDiagnostics:
-    """Диагностика покрытия и единственного repair-запроса."""
+    """Диагностика coverage, repair и cluster verifier."""
 
     expected_news_ids: tuple[int, ...]
     processed_news_ids: tuple[int, ...]
@@ -596,6 +690,21 @@ class EventRankingCoverageDiagnostics:
     repair_succeeded: bool = False
     repair_error_type: str | None = None
     repair_error_message: str | None = None
+    story_cluster_verification_attempted: bool = False
+    story_cluster_verification_succeeded: bool = False
+    story_cluster_verification_skipped_reason: str | None = None
+    story_cluster_verification_error_type: str | None = None
+    story_cluster_verification_error_message: str | None = None
+    story_cluster_verification_prompt_version: str | None = None
+    story_cluster_count_before: int = 0
+    story_cluster_count_after: int = 0
+    story_cluster_multi_event_count_before: int = 0
+    story_cluster_multi_event_count_after: int = 0
+    story_cluster_verifier_event_count: int = 0
+    story_cluster_verification_changes: tuple[
+        StoryClusterVerificationChange,
+        ...,
+    ] = ()
     model_call_count: int = 1
 
     def __post_init__(self) -> None:
@@ -628,20 +737,17 @@ class EventRankingCoverageDiagnostics:
 
         if not processed_set.issubset(expected_set):
             raise ValueError(
-                "processed_news_ids содержит "
-                "неожиданные news_id."
+                "processed_news_ids содержит неожиданные news_id."
             )
 
         if not set(initial_missing).issubset(expected_set):
             raise ValueError(
-                "initial_missing_news_ids содержит "
-                "неожиданные news_id."
+                "initial_missing_news_ids содержит неожиданные news_id."
             )
 
         if not missing_set.issubset(expected_set):
             raise ValueError(
-                "missing_news_ids содержит "
-                "неожиданные news_id."
+                "missing_news_ids содержит неожиданные news_id."
             )
 
         if processed_set & missing_set:
@@ -659,29 +765,103 @@ class EventRankingCoverageDiagnostics:
         for field_name, value in (
             ("repair_attempted", self.repair_attempted),
             ("repair_succeeded", self.repair_succeeded),
+            (
+                "story_cluster_verification_attempted",
+                self.story_cluster_verification_attempted,
+            ),
+            (
+                "story_cluster_verification_succeeded",
+                self.story_cluster_verification_succeeded,
+            ),
         ):
             if not isinstance(value, bool):
                 raise TypeError(
                     f"{field_name} должен быть bool."
                 )
 
+        if self.repair_attempted and (
+            self.story_cluster_verification_attempted
+        ):
+            raise ValueError(
+                "Repair и story-cluster verifier не могут "
+                "использоваться в одном запуске: максимум два "
+                "вызова модели."
+            )
+
         if self.repair_succeeded and not self.repair_attempted:
             raise ValueError(
-                "repair_succeeded требует "
-                "repair_attempted=true."
+                "repair_succeeded требует repair_attempted=true."
             )
 
         if self.repair_succeeded and missing:
             raise ValueError(
-                "Успешный repair не может оставлять "
-                "missing_news_ids."
+                "Успешный repair не может оставлять missing_news_ids."
             )
 
         if initial_missing and not self.repair_attempted:
             raise ValueError(
-                "Пропуск в первом ответе требует "
-                "repair_attempted=true."
+                "Пропуск в первом ответе требует repair_attempted=true."
             )
+
+        if (
+            self.story_cluster_verification_succeeded
+            and not self.story_cluster_verification_attempted
+        ):
+            raise ValueError(
+                "Успешная cluster verification требует attempted=true."
+            )
+
+        if (
+            self.story_cluster_verification_skipped_reason
+            is not None
+            and self.story_cluster_verification_attempted
+        ):
+            raise ValueError(
+                "Запущенный verifier не может иметь skipped_reason."
+            )
+
+        if not isinstance(
+            self.story_cluster_verification_changes,
+            tuple,
+        ):
+            raise TypeError(
+                "story_cluster_verification_changes должен быть tuple."
+            )
+
+        for change in self.story_cluster_verification_changes:
+            if not isinstance(
+                change,
+                StoryClusterVerificationChange,
+            ):
+                raise TypeError(
+                    "story_cluster_verification_changes содержит "
+                    "неподдерживаемый объект."
+                )
+
+        for field_name, value in (
+            ("story_cluster_count_before", self.story_cluster_count_before),
+            ("story_cluster_count_after", self.story_cluster_count_after),
+            (
+                "story_cluster_multi_event_count_before",
+                self.story_cluster_multi_event_count_before,
+            ),
+            (
+                "story_cluster_multi_event_count_after",
+                self.story_cluster_multi_event_count_after,
+            ),
+            (
+                "story_cluster_verifier_event_count",
+                self.story_cluster_verifier_event_count,
+            ),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    f"{field_name} должен быть int."
+                )
+            if value < 0:
+                raise ValueError(
+                    f"{field_name} не может быть отрицательным."
+                )
 
         if not isinstance(self.model_call_count, int):
             raise TypeError(
@@ -693,68 +873,59 @@ class EventRankingCoverageDiagnostics:
                 "model_call_count должен быть 1 или 2."
             )
 
-        if self.repair_attempted and self.model_call_count != 2:
+        second_call_attempted = (
+            self.repair_attempted
+            or self.story_cluster_verification_attempted
+        )
+        expected_model_call_count = (
+            2 if second_call_attempted else 1
+        )
+
+        if self.model_call_count != expected_model_call_count:
             raise ValueError(
-                "repair_attempted требует "
-                "model_call_count=2."
+                "model_call_count не соответствует repair/verifier."
             )
 
-        if not self.repair_attempted and self.model_call_count != 1:
-            raise ValueError(
-                "Без repair model_call_count должен быть 1."
-            )
-
-        normalized_error_type: str | None = None
-        normalized_error_message: str | None = None
-
-        if self.repair_error_type is not None:
-            normalized_error_type = _normalize_required_text(
-                self.repair_error_type,
-                field_name="repair_error_type",
-            )
-
-        if self.repair_error_message is not None:
-            normalized_error_message = _normalize_required_text(
-                self.repair_error_message,
-                field_name="repair_error_message",
-            )
-
-        object.__setattr__(
-            self,
-            "expected_news_ids",
-            expected,
-        )
-        object.__setattr__(
-            self,
-            "processed_news_ids",
-            processed,
-        )
-        object.__setattr__(
-            self,
-            "initial_missing_news_ids",
-            initial_missing,
-        )
-        object.__setattr__(
-            self,
-            "missing_news_ids",
-            missing,
-        )
-        object.__setattr__(
-            self,
+        normalized_optional_text: dict[str, str | None] = {}
+        for field_name in (
             "repair_error_type",
-            normalized_error_type,
-        )
-        object.__setattr__(
-            self,
             "repair_error_message",
-            normalized_error_message,
-        )
+            "story_cluster_verification_skipped_reason",
+            "story_cluster_verification_error_type",
+            "story_cluster_verification_error_message",
+            "story_cluster_verification_prompt_version",
+        ):
+            value = getattr(self, field_name)
+            normalized_optional_text[field_name] = (
+                None
+                if value is None
+                else _normalize_required_text(
+                    value,
+                    field_name=field_name,
+                )
+            )
+
+        object.__setattr__(self, "expected_news_ids", expected)
+        object.__setattr__(self, "processed_news_ids", processed)
+        object.__setattr__(self, "initial_missing_news_ids", initial_missing)
+        object.__setattr__(self, "missing_news_ids", missing)
+        for field_name, value in normalized_optional_text.items():
+            object.__setattr__(self, field_name, value)
 
     @property
     def degraded(self) -> bool:
         """Показывает неполное итоговое покрытие."""
 
         return bool(self.missing_news_ids)
+
+    @property
+    def story_cluster_verification_degraded(self) -> bool:
+        """Показывает неуспешный запущенный verifier."""
+
+        return (
+            self.story_cluster_verification_attempted
+            and not self.story_cluster_verification_succeeded
+        )
 
 
 @dataclass(frozen=True, slots=True)

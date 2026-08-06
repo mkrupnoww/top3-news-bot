@@ -229,7 +229,9 @@ async def load_persisted_run(
                 parameters->>'combination_count'
                     AS combination_count,
                 parameters->'audience_maxima'
-                    AS audience_maxima
+                    AS audience_maxima,
+                parameters->'story_cluster_verification'
+                    AS story_cluster_verification
             FROM top3_news.ranking_runs
             WHERE ranking_run_id = $1
             """,
@@ -283,6 +285,8 @@ async def load_persisted_events(
                 re.event_title,
                 re.event_time_utc,
                 re.macro_topic,
+                re.event_details->>'story_cluster_key'
+                    AS story_cluster_key,
                 re.source_weight_sum,
                 COALESCE(
                     NULLIF(n.normalized_title, ''),
@@ -450,6 +454,42 @@ def print_run_summary(
         "R=0, confidence=unavailable"
     )
 
+    verification = decode_jsonb(
+        run_record["story_cluster_verification"]
+    )
+
+    if isinstance(verification, dict):
+        print(
+            "story_cluster_verification_attempted="
+            f"{str(verification.get('attempted')).lower()}"
+        )
+        print(
+            "story_cluster_verification_succeeded="
+            f"{str(verification.get('succeeded')).lower()}"
+        )
+        print(
+            "story_cluster_verification_degraded="
+            f"{str(verification.get('degraded')).lower()}"
+        )
+        print(
+            "story_cluster_verification_skipped_reason="
+            f"{verification.get('skipped_reason')}"
+        )
+        print(
+            "story_cluster_counts="
+            f"{verification.get('cluster_count_before')}->"
+            f"{verification.get('cluster_count_after')}"
+        )
+        print(
+            "story_cluster_multi_event_counts="
+            f"{verification.get('multi_event_cluster_count_before')}->"
+            f"{verification.get('multi_event_cluster_count_after')}"
+        )
+        print(
+            "story_cluster_verifier_event_count="
+            f"{verification.get('verifier_event_count')}"
+        )
+
 
 def print_persisted_events(
     records: tuple[asyncpg.Record, ...],
@@ -486,6 +526,10 @@ def print_persisted_events(
         print(
             "   macro_topic="
             f"{record['macro_topic']}"
+        )
+        print(
+            "   story_cluster_key="
+            f"{record['story_cluster_key']}"
         )
         print(
             "   event_time_utc="
