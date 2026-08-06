@@ -61,15 +61,6 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                             "other",
                         ],
                     },
-                    "story_cluster_key": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 120,
-                        "pattern": (
-                            "^[a-z0-9]+"
-                            "(?:_[a-z0-9]+)*$"
-                        ),
-                    },
                     "i_score": {
                         "type": "number",
                         "minimum": 0,
@@ -167,7 +158,6 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                     "event_title",
                     "event_time_utc",
                     "macro_topic",
-                    "story_cluster_key",
                     "i_score",
                     "k_score",
                     "n_score",
@@ -182,9 +172,49 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                 "additionalProperties": False,
             },
         },
+        "story_clusters": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "story_cluster_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120,
+                        "pattern": (
+                            "^[a-z0-9]+"
+                            "(?:_[a-z0-9]+)*$"
+                        ),
+                    },
+                    "representative_news_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 500,
+                        "items": {
+                            "type": "integer",
+                            "minimum": 1,
+                        },
+                    },
+                    "cluster_reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000,
+                    },
+                },
+                "required": [
+                    "story_cluster_key",
+                    "representative_news_ids",
+                    "cluster_reason",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": [
         "events",
+        "story_clusters",
     ],
     "additionalProperties": False,
 }

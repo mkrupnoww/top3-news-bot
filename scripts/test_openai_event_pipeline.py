@@ -120,7 +120,7 @@ class FakeStructuredEventRankingClient:
         task = input_payload.get("task")
 
         if task == (
-            "repair_movie_news_event_coverage"
+            "repair_movie_news_event_payload"
         ):
             if not self._preserve_missing_on_repair:
                 raise AssertionError(
@@ -216,10 +216,6 @@ class FakeStructuredEventRankingClient:
                             % len(MACRO_TOPICS)
                         ]
                     ),
-                    "story_cluster_key": (
-                        "synthetic_movie_event_"
-                        f"{news_id}"
-                    ),
                     "i_score": 10,
                     "k_score": 10,
                     "n_score": 10,
@@ -260,10 +256,30 @@ class FakeStructuredEventRankingClient:
             model_name=request.model
         )
 
+        story_clusters = [
+            {
+                "story_cluster_key": (
+                    "synthetic_movie_event_"
+                    f"{event['representative_news_id']}"
+                ),
+                "representative_news_ids": [
+                    event["representative_news_id"]
+                ],
+                "cluster_reason": (
+                    "Synthetic standalone "
+                    "story cluster."
+                ),
+            }
+            for event in events
+        ]
+
         return EventRankingModelResponse(
             output_text=json.dumps(
                 {
                     "events": events,
+                    "story_clusters": (
+                        story_clusters
+                    ),
                 },
                 ensure_ascii=False,
             ),

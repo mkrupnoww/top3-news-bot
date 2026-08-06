@@ -118,13 +118,6 @@ class OpenAIEventPayload(BaseModel):
         min_length=1,
         max_length=100,
     )
-    story_cluster_key: str = Field(
-        min_length=1,
-        max_length=(
-            STORY_CLUSTER_KEY_MAX_LENGTH
-        ),
-        pattern=STORY_CLUSTER_KEY_PATTERN,
-    )
     i_score: Decimal = Field(
         ge=Decimal("0"),
         le=Decimal("10"),
@@ -210,16 +203,6 @@ class OpenAIEventPayload(BaseModel):
 
         return value.astimezone(timezone.utc)
 
-    @field_validator("story_cluster_key")
-    @classmethod
-    def validate_story_cluster_key(
-        cls,
-        value: str,
-    ) -> str:
-        """Нормализует ключ сюжетной семьи."""
-
-        return value.strip().lower()
-
     @field_validator("macro_topic")
     @classmethod
     def validate_macro_topic(
@@ -238,6 +221,58 @@ class OpenAIEventPayload(BaseModel):
         return normalized_value
 
 
+class OpenAIStoryClusterPayload(BaseModel):
+    """Глобальная сюжетная семья нескольких events."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+
+    story_cluster_key: str = Field(
+        min_length=1,
+        max_length=(
+            STORY_CLUSTER_KEY_MAX_LENGTH
+        ),
+        pattern=STORY_CLUSTER_KEY_PATTERN,
+    )
+    representative_news_ids: list[int] = Field(
+        min_length=1,
+        max_length=500,
+    )
+    cluster_reason: str = Field(
+        min_length=1,
+        max_length=2000,
+    )
+
+    @field_validator("story_cluster_key")
+    @classmethod
+    def validate_story_cluster_key(
+        cls,
+        value: str,
+    ) -> str:
+        """Нормализует ключ сюжетной семьи."""
+
+        return value.strip().lower()
+
+    @field_validator("cluster_reason")
+    @classmethod
+    def normalize_cluster_reason(
+        cls,
+        value: str,
+    ) -> str:
+        """Удаляет пробелы по краям."""
+
+        normalized_value = value.strip()
+
+        if not normalized_value:
+            raise ValueError(
+                "cluster_reason не может "
+                "быть пустым."
+            )
+
+        return normalized_value
+
+
 class OpenAIEventRankingPayload(BaseModel):
     """Полный структурированный ответ модели."""
 
@@ -247,6 +282,12 @@ class OpenAIEventRankingPayload(BaseModel):
 
     events: list[
         OpenAIEventPayload
+    ] = Field(
+        min_length=1,
+        max_length=500,
+    )
+    story_clusters: list[
+        OpenAIStoryClusterPayload
     ] = Field(
         min_length=1,
         max_length=500,
@@ -261,10 +302,14 @@ class _ValidatedPayload:
     events: tuple[EventAssessment, ...]
     processed_news_ids: tuple[int, ...]
     missing_news_ids: tuple[int, ...]
+    story_cluster_valid: bool
+    story_cluster_fallback_used: bool
+    story_cluster_error_type: str | None = None
+    story_cluster_error_message: str | None = None
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v5.txt"
+    "ranking/movie_news_event_ranking_prompt_v6.txt"
 )
 
 REPAIR_INSTRUCTIONS = (
@@ -272,12 +317,17 @@ REPAIR_INSTRUCTIONS = (
     + "\n\n"
     + "Это единственный корректирующий запрос. "
     + "Верни полный исправленный JSON по исходной "
-    + "схеме events. Не возвращай только добавленный "
-    + "фрагмент. Каждый expected_news_id должен "
+    + "схеме events и story_clusters. "
+    + "Не возвращай только добавленный фрагмент. "
+    + "Каждый expected_news_id должен "
     + "встречаться ровно один раз. Пропущенную "
     + "публикацию присоедини к существующему "
     + "инфоповоду, если это тот же факт, иначе создай "
-    + "отдельный инфоповод. Не добавляй посторонние ID."
+    + "отдельный инфоповод. Полностью перестрой "
+    + "глобальный реестр story_clusters так, чтобы "
+    + "каждый representative_news_id входил ровно "
+    + "в одну сюжетную семью. Не добавляй "
+    + "посторонние ID."
 )
 
 
@@ -482,7 +532,8 @@ def _build_input_text(
 
     payload = {
         "task": (
-            "group_and_assess_movie_news_events"
+            "group_assess_and_cluster_"
+            "movie_news_events"
         ),
         "formula_version": FULL_FORMULA_VERSION,
         "expected_news_count": len(
@@ -515,6 +566,14 @@ def _build_input_text(
         },
         "macro_topics": sorted(MACRO_TOPICS),
         "story_cluster_policy": {
+            "output_location": (
+                "top_level_story_clusters"
+            ),
+            "assignment_target": (
+                "events.representative_news_id"
+            ),
+            "coverage": "exactly_once",
+            "global_comparison_required": True,
             "format": "lower_snake_case",
             "maximum_length": (
                 STORY_CLUSTER_KEY_MAX_LENGTH
@@ -523,6 +582,7 @@ def _build_input_text(
                 "group_distinct_events_from_the_"
                 "same_overarching_story"
             ),
+            "stable_core_not_development_suffix": True,
         },
         "source_relations": sorted(
             SOURCE_RELATIONS
@@ -560,14 +620,16 @@ def _build_repair_request(
     expected_news_ids: tuple[int, ...],
     missing_news_ids: tuple[int, ...],
     original_payload: OpenAIEventRankingPayload,
+    story_cluster_error_type: str | None,
+    story_cluster_error_message: str | None,
 ) -> EventRankingModelRequest:
-    """Формирует единственный запрос исправления покрытия."""
+    """Формирует единственный запрос исправления payload."""
 
     missing_set = set(missing_news_ids)
 
     payload = {
         "task": (
-            "repair_movie_news_event_coverage"
+            "repair_movie_news_event_payload"
         ),
         "formula_version": FULL_FORMULA_VERSION,
         "expected_news_count": len(
@@ -579,6 +641,17 @@ def _build_repair_request(
         "missing_news_ids": list(
             missing_news_ids
         ),
+        "story_cluster_validation": {
+            "valid": (
+                story_cluster_error_type is None
+            ),
+            "error_type": (
+                story_cluster_error_type
+            ),
+            "error_message": (
+                story_cluster_error_message
+            ),
+        },
         "window": {
             "started_at": (
                 selection.window_start
@@ -609,6 +682,10 @@ def _build_repair_request(
             "preserve_or_improve_valid_grouping": True,
             "attach_to_existing_event_when_same_fact": True,
             "otherwise_create_singleton_event": True,
+            "rebuild_global_story_cluster_registry": True,
+            "every_representative_news_id_exactly_once": True,
+            "duplicate_story_cluster_keys_forbidden": True,
+            "stable_overarching_story_keys": True,
         },
     }
 
@@ -621,7 +698,6 @@ def _build_repair_request(
             separators=(",", ":"),
         ),
     )
-
 
 def _parse_response(
     response_text: str,
@@ -754,12 +830,124 @@ def _effective_source_weight(
     return source_weight
 
 
+class StoryClusterCoverageError(ValueError):
+    """Некорректное глобальное покрытие сюжетных семей."""
+
+
+def _fallback_story_cluster_keys(
+    payload: OpenAIEventRankingPayload,
+) -> dict[int, str]:
+    """Создаёт безопасные уникальные ключи для каждого event."""
+
+    return {
+        event.representative_news_id: (
+            "event_"
+            f"{event.representative_news_id}"
+        )
+        for event in payload.events
+    }
+
+
+def _story_cluster_keys_by_representative(
+    payload: OpenAIEventRankingPayload,
+) -> dict[int, str]:
+    """Проверяет глобальный реестр и возвращает ключи events."""
+
+    event_representative_news_ids = tuple(
+        event.representative_news_id
+        for event in payload.events
+    )
+    event_id_set = set(
+        event_representative_news_ids
+    )
+
+    cluster_keys = tuple(
+        cluster.story_cluster_key
+        for cluster in payload.story_clusters
+    )
+
+    duplicate_cluster_keys = sorted(
+        {
+            cluster_key
+            for cluster_key in cluster_keys
+            if cluster_keys.count(cluster_key) > 1
+        }
+    )
+
+    if duplicate_cluster_keys:
+        raise StoryClusterCoverageError(
+            "story_clusters содержит повторяющиеся "
+            "story_cluster_key: "
+            + ",".join(duplicate_cluster_keys)
+        )
+
+    assigned_ids: list[int] = []
+    result: dict[int, str] = {}
+
+    for cluster in payload.story_clusters:
+        representative_news_ids = tuple(
+            cluster.representative_news_ids
+        )
+
+        duplicate_ids = sorted(
+            {
+                news_id
+                for news_id in representative_news_ids
+                if representative_news_ids.count(news_id) > 1
+            }
+        )
+
+        if duplicate_ids:
+            raise StoryClusterCoverageError(
+                "Одна сюжетная семья содержит "
+                "повторяющиеся representative_news_id: "
+                + ",".join(
+                    str(news_id)
+                    for news_id in duplicate_ids
+                )
+            )
+
+        for news_id in representative_news_ids:
+            assigned_ids.append(news_id)
+
+            if news_id in result:
+                raise StoryClusterCoverageError(
+                    "representative_news_id входит "
+                    "в несколько сюжетных семей: "
+                    f"{news_id}"
+                )
+
+            result[news_id] = (
+                cluster.story_cluster_key
+            )
+
+    assigned_id_set = set(assigned_ids)
+    missing_ids = sorted(
+        event_id_set - assigned_id_set
+    )
+    unexpected_ids = sorted(
+        assigned_id_set - event_id_set
+    )
+
+    if missing_ids or unexpected_ids:
+        raise StoryClusterCoverageError(
+            "story_clusters не покрывает events: "
+            f"missing={missing_ids}, "
+            f"unexpected={unexpected_ids}"
+        )
+
+    return result
+
+
 def _build_events(
     *,
     payload: OpenAIEventRankingPayload,
     selection: CandidateSelectionResult,
+    story_cluster_keys_by_representative: (
+        dict[int, str]
+    ),
 ) -> tuple[EventAssessment, ...]:
-    """Преобразует payload, подставляя веса из БД."""
+    """Преобразует payload, подставляя веса и глобальные ключи."""
 
     candidates_by_news_id = {
         candidate.news_id: candidate
@@ -775,7 +963,9 @@ def _build_events(
             event_time_utc=event.event_time_utc,
             macro_topic=event.macro_topic,
             story_cluster_key=(
-                event.story_cluster_key
+                story_cluster_keys_by_representative[
+                    event.representative_news_id
+                ]
             ),
             i_score=event.i_score,
             k_score=event.k_score,
@@ -941,7 +1131,7 @@ def _validate_payload(
     selection: CandidateSelectionResult,
     expected_news_ids: tuple[int, ...],
 ) -> _ValidatedPayload:
-    """Разбирает и полностью проверяет один ответ."""
+    """Разбирает ответ, валидирует coverage и сюжетные семьи."""
 
     payload = _parse_response(
         response.output_text
@@ -953,9 +1143,37 @@ def _validate_payload(
         expected_news_ids=expected_news_ids,
         payload=payload,
     )
+
+    story_cluster_valid = True
+    story_cluster_fallback_used = False
+    story_cluster_error_type: str | None = None
+    story_cluster_error_message: str | None = None
+
+    try:
+        story_cluster_keys = (
+            _story_cluster_keys_by_representative(
+                payload
+            )
+        )
+    except StoryClusterCoverageError as error:
+        story_cluster_valid = False
+        story_cluster_fallback_used = True
+        story_cluster_error_type = (
+            type(error).__name__
+        )
+        story_cluster_error_message = str(error)
+        story_cluster_keys = (
+            _fallback_story_cluster_keys(
+                payload
+            )
+        )
+
     events = _build_events(
         payload=payload,
         selection=selection,
+        story_cluster_keys_by_representative=(
+            story_cluster_keys
+        ),
     )
     _validate_event_coverage(
         expected_news_ids=processed_news_ids,
@@ -974,8 +1192,30 @@ def _validate_payload(
         ),
         processed_news_ids=processed_news_ids,
         missing_news_ids=missing_news_ids,
+        story_cluster_valid=(
+            story_cluster_valid
+        ),
+        story_cluster_fallback_used=(
+            story_cluster_fallback_used
+        ),
+        story_cluster_error_type=(
+            story_cluster_error_type
+        ),
+        story_cluster_error_message=(
+            story_cluster_error_message
+        ),
     )
 
+
+def _payload_quality(
+    payload: _ValidatedPayload,
+) -> tuple[int, int]:
+    """Сравнивает ответы: coverage важнее cluster-registry."""
+
+    return (
+        len(payload.missing_news_ids),
+        0 if payload.story_cluster_valid else 1,
+    )
 
 def _combine_usage(
     responses: tuple[
@@ -1237,7 +1477,11 @@ class OpenAIEventRankingEvaluator:
         repair_error_type: str | None = None
         repair_error_message: str | None = None
 
-        if primary.missing_news_ids:
+        repair_required = bool(
+            primary.missing_news_ids
+        ) or not primary.story_cluster_valid
+
+        if repair_required:
             repair_attempted = True
             model_name = self._metadata.model_name
 
@@ -1259,6 +1503,12 @@ class OpenAIEventRankingEvaluator:
                 original_payload=(
                     primary.payload
                 ),
+                story_cluster_error_type=(
+                    primary.story_cluster_error_type
+                ),
+                story_cluster_error_message=(
+                    primary.story_cluster_error_message
+                ),
             )
 
             try:
@@ -1279,15 +1529,18 @@ class OpenAIEventRankingEvaluator:
                 )
 
                 if (
-                    len(repaired.missing_news_ids)
-                    < len(primary.missing_news_ids)
+                    _payload_quality(repaired)
+                    < _payload_quality(chosen)
                 ):
                     chosen = repaired
                     chosen_response = (
                         repair_response
                     )
 
-                if not repaired.missing_news_ids:
+                if (
+                    not repaired.missing_news_ids
+                    and repaired.story_cluster_valid
+                ):
                     chosen = repaired
                     chosen_response = (
                         repair_response
@@ -1299,6 +1552,17 @@ class OpenAIEventRankingEvaluator:
                     type(error).__name__
                 )
                 repair_error_message = str(error)
+
+        if (
+            not chosen.story_cluster_valid
+            and repair_error_type is None
+        ):
+            repair_error_type = (
+                chosen.story_cluster_error_type
+            )
+            repair_error_message = (
+                chosen.story_cluster_error_message
+            )
 
         final_responses = tuple(
             successful_responses

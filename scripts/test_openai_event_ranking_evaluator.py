@@ -197,7 +197,7 @@ def build_selection() -> CandidateSelectionResult:
 
 
 def build_valid_payload() -> dict[str, object]:
-    """Возвращает два корректных инфоповода."""
+    """Возвращает два события и глобальный cluster-registry."""
 
     return {
         "events": [
@@ -211,9 +211,6 @@ def build_valid_payload() -> dict[str, object]:
                 ),
                 "macro_topic": (
                     "festivals_awards_criticism"
-                ),
-                "story_cluster_key": (
-                    "festival_new_competition"
                 ),
                 "i_score": "4.5",
                 "k_score": "1.0",
@@ -259,9 +256,6 @@ def build_valid_payload() -> dict[str, object]:
                 "macro_topic": (
                     "creative_cast_production"
                 ),
-                "story_cluster_key": (
-                    "international_film_project"
-                ),
                 "i_score": "7.5",
                 "k_score": "2.0",
                 "n_score": "6.5",
@@ -305,9 +299,30 @@ def build_valid_payload() -> dict[str, object]:
                     },
                 ],
             },
-        ]
+        ],
+        "story_clusters": [
+            {
+                "story_cluster_key": (
+                    "festival_new_competition"
+                ),
+                "representative_news_ids": [103],
+                "cluster_reason": (
+                    "Самостоятельное фестивальное "
+                    "объявление."
+                ),
+            },
+            {
+                "story_cluster_key": (
+                    "international_film_project"
+                ),
+                "representative_news_ids": [101],
+                "cluster_reason": (
+                    "Самостоятельный международный "
+                    "кинопроект."
+                ),
+            },
+        ],
     }
-
 
 def encode_payload(
     payload: dict[str, object],
@@ -442,7 +457,7 @@ def build_evaluator(
 
 
 def test_build_request() -> None:
-    """Проверяет основной запрос v5."""
+    """Проверяет основной запрос v6."""
 
     evaluator, client = build_evaluator()
     request = evaluator.build_request(
@@ -463,7 +478,7 @@ def test_build_request() -> None:
     )
 
     assert payload["task"] == (
-        "group_and_assess_movie_news_events"
+        "group_assess_and_cluster_movie_news_events"
     )
     assert payload["formula_version"] == (
         FULL_FORMULA_VERSION
@@ -477,16 +492,25 @@ def test_build_request() -> None:
     assert payload["story_cluster_policy"][
         "format"
     ] == "lower_snake_case"
+    assert payload["story_cluster_policy"][
+        "output_location"
+    ] == "top_level_story_clusters"
+    assert payload["story_cluster_policy"][
+        "global_comparison_required"
+    ] is True
+    assert payload["story_cluster_policy"][
+        "coverage"
+    ] == "exactly_once"
     assert [
         candidate["configured_source_weight"]
         for candidate in payload["candidates"]
     ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v5"
+        "event_ranking_evaluator_v6"
     )
     assert EVENT_PROMPT_VERSION == (
-        "movie_news_event_ranking_prompt_v5"
+        "movie_news_event_ranking_prompt_v6"
     )
     assert evaluator.metadata.evaluator_version == (
         EVENT_EVALUATOR_VERSION
@@ -495,7 +519,7 @@ def test_build_request() -> None:
         EVENT_PROMPT_VERSION
     )
 
-    print("Request preparation v5: OK")
+    print("Request preparation v6: OK")
     print("client_call_count=0")
 
 
@@ -572,7 +596,7 @@ async def test_successful_repair() -> None:
         client.requests[1].input_text
     )
     assert repair_payload["task"] == (
-        "repair_movie_news_event_coverage"
+        "repair_movie_news_event_payload"
     )
     assert repair_payload["missing_news_ids"] == [
         102,
@@ -726,6 +750,176 @@ async def test_degraded_after_repair_error() -> None:
     print("Repair transport failure degraded mode: OK")
     print("client_call_count=2")
     print("successful_response_count=1")
+
+
+def build_shared_story_payload() -> dict[str, object]:
+    """Объединяет два разных events в одну мегатему."""
+
+    payload = build_valid_payload()
+    payload["story_clusters"] = [
+        {
+            "story_cluster_key": (
+                "paramount_warner_merger"
+            ),
+            "representative_news_ids": [
+                101,
+                103,
+            ],
+            "cluster_reason": (
+                "Два отдельных развития одной "
+                "сделки Paramount-Warner."
+            ),
+        }
+    ]
+
+    return payload
+
+
+def build_invalid_story_cluster_payload(
+) -> dict[str, object]:
+    """Оставляет один event без cluster-assignment."""
+
+    payload = build_valid_payload()
+    payload["story_clusters"] = [
+        {
+            "story_cluster_key": (
+                "international_film_project"
+            ),
+            "representative_news_ids": [101],
+            "cluster_reason": (
+                "Намеренно неполный реестр."
+            ),
+        }
+    ]
+
+    return payload
+
+
+async def test_global_story_cluster_assignment() -> None:
+    """Один глобальный ключ назначается нескольким events."""
+
+    evaluator, client = build_evaluator(
+        build_response(
+            build_shared_story_payload()
+        )
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 1
+    assert result.diagnostics is not None
+    assert result.diagnostics.repair_attempted is False
+    assert {
+        event.story_cluster_key
+        for event in result.events
+    } == {
+        "paramount_warner_merger"
+    }
+
+    print()
+    print("Global story cluster assignment: OK")
+    print("shared_story_cluster_key=true")
+
+
+async def test_story_cluster_repair_success() -> None:
+    """Исправляет неполный глобальный cluster-registry."""
+
+    evaluator, client = build_evaluator(
+        build_response(
+            build_invalid_story_cluster_payload(),
+            with_telemetry=True,
+        ),
+        build_response(
+            build_shared_story_payload(),
+            with_telemetry=True,
+        ),
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 2
+    repair_payload = json.loads(
+        client.requests[1].input_text
+    )
+    assert repair_payload["missing_news_ids"] == []
+    assert repair_payload[
+        "story_cluster_validation"
+    ]["valid"] is False
+    assert repair_payload[
+        "story_cluster_validation"
+    ]["error_type"] == (
+        "StoryClusterCoverageError"
+    )
+    assert repair_payload["requirements"][
+        "rebuild_global_story_cluster_registry"
+    ] is True
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.degraded is False
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is True
+    assert diagnostics.missing_news_ids == ()
+    assert diagnostics.model_call_count == 2
+    assert {
+        event.story_cluster_key
+        for event in result.events
+    } == {
+        "paramount_warner_merger"
+    }
+
+    print()
+    print("Story cluster repair success: OK")
+    print("client_call_count=2")
+
+
+async def test_story_cluster_fallback() -> None:
+    """После неудачного repair применяет уникальные safe keys."""
+
+    invalid_payload = (
+        build_invalid_story_cluster_payload()
+    )
+    evaluator, client = build_evaluator(
+        build_response(
+            invalid_payload,
+            with_telemetry=True,
+        ),
+        build_response(
+            invalid_payload,
+            with_telemetry=True,
+        ),
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 2
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.degraded is False
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+    assert diagnostics.repair_error_type == (
+        "StoryClusterCoverageError"
+    )
+    assert diagnostics.missing_news_ids == ()
+    assert {
+        event.story_cluster_key
+        for event in result.events
+    } == {
+        "event_101",
+        "event_103",
+    }
+
+    usage = result.model_response.usage
+    assert usage is not None
+    assert usage.total_tokens == 2600
+
+    print()
+    print("Story cluster safe fallback: OK")
+    print("fallback_preserves_events=true")
 
 
 async def test_initial_unexpected_candidate() -> None:
@@ -1039,13 +1233,16 @@ async def test_common_interface() -> None:
 
 
 async def main() -> int:
-    """Запускает изолированный тест v5."""
+    """Запускает изолированный тест v6."""
 
     test_build_request()
     await test_complete_response()
     await test_successful_repair()
     await test_degraded_after_unsuccessful_repair()
     await test_degraded_after_repair_error()
+    await test_global_story_cluster_assignment()
+    await test_story_cluster_repair_success()
+    await test_story_cluster_fallback()
     await test_initial_unexpected_candidate()
     await test_initial_cross_event_duplicate()
     await test_model_source_weight_rejected()
@@ -1063,7 +1260,7 @@ async def main() -> int:
     print("Telegram publication: not performed")
     print(
         "OpenAI event ranking repair/degraded/"
-        "story-cluster test: OK"
+        "global-story-cluster test: OK"
     )
 
     return 0
