@@ -25,6 +25,7 @@ from app.ranking.event_evaluator import (
 )
 from app.ranking.full_formula import (
     FULL_FORMULA_VERSION,
+    TOP3_SELECTION_POLICY_VERSION,
 )
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
@@ -214,6 +215,10 @@ class FakeStructuredEventRankingClient:
                             index
                             % len(MACRO_TOPICS)
                         ]
+                    ),
+                    "story_cluster_key": (
+                        "synthetic_movie_event_"
+                        f"{news_id}"
                     ),
                     "i_score": 10,
                     "k_score": 10,
@@ -421,7 +426,9 @@ async def load_run_by_model(
                 parameters->'missing_news_ids'
                     AS missing_news_ids,
                 parameters->'coverage'
-                    AS coverage
+                    AS coverage,
+                parameters->'top3_selection'
+                    AS top3_selection
             FROM top3_news.ranking_runs
             WHERE model_name = $1
             ORDER BY ranking_run_id
@@ -562,12 +569,47 @@ async def test_successful_pipeline(
         3,
     )
 
-    assert len(
+    selection_result = (
         first
         .calculation
         .top3_selection
-        .combinations
+    )
+
+    assert len(
+        selection_result.combinations
     ) == expected_combination_count
+    assert (
+        selection_result
+        .selection_policy_version
+        == TOP3_SELECTION_POLICY_VERSION
+    )
+    assert (
+        selection_result
+        .story_cluster_filter_applied
+        is True
+    )
+    assert (
+        selection_result
+        .story_cluster_fallback_used
+        is False
+    )
+    assert (
+        selection_result
+        .story_cluster_diverse_combination_count
+        == expected_combination_count
+    )
+    assert (
+        selection_result
+        .winner
+        .distinct_story_cluster_count
+        == 3
+    )
+    assert (
+        selection_result
+        .winner
+        .passes_story_cluster_filter
+        is True
+    )
 
     assert (
         first.completion.candidate_count
@@ -616,6 +658,9 @@ async def test_successful_pipeline(
     cost = decode_jsonb(
         record["openai_cost"]
     )
+    top3_selection = decode_jsonb(
+        record["top3_selection"]
+    )
 
     assert record["ranking_run_id"] == (
         first.ranking_run_id
@@ -653,6 +698,29 @@ async def test_successful_pipeline(
     assert cost["total_cost_usd"] == (
         "0.00542000"
     )
+    assert top3_selection["policy_version"] == (
+        TOP3_SELECTION_POLICY_VERSION
+    )
+    assert (
+        top3_selection[
+            "story_cluster_filter_applied"
+        ]
+        is True
+    )
+    assert (
+        top3_selection[
+            "story_cluster_fallback_used"
+        ]
+        is False
+    )
+    assert top3_selection[
+        "diverse_combination_count"
+    ] == expected_combination_count
+    assert len(
+        top3_selection[
+            "winner_story_cluster_keys"
+        ]
+    ) == 3
 
     counts = await load_v2_counts(
         pool,
@@ -858,6 +926,38 @@ async def test_degraded_pipeline(
     assert result.completion.missing_news_ids == (11,)
     assert result.completion.combination_count == 4
 
+    selection_result = (
+        result
+        .calculation
+        .top3_selection
+    )
+    assert (
+        selection_result
+        .selection_policy_version
+        == TOP3_SELECTION_POLICY_VERSION
+    )
+    assert (
+        selection_result
+        .story_cluster_filter_applied
+        is True
+    )
+    assert (
+        selection_result
+        .story_cluster_fallback_used
+        is False
+    )
+    assert (
+        selection_result
+        .story_cluster_diverse_combination_count
+        == 4
+    )
+    assert (
+        selection_result
+        .winner
+        .distinct_story_cluster_count
+        == 3
+    )
+
     record = await load_run_by_model(
         pool,
         model_name=model_name,
@@ -871,6 +971,9 @@ async def test_degraded_pipeline(
         record["missing_news_ids"]
     )
     coverage = decode_jsonb(record["coverage"])
+    top3_selection = decode_jsonb(
+        record["top3_selection"]
+    )
 
     assert record["run_status"] == "completed"
     assert record["candidate_count"] == 5
@@ -893,6 +996,29 @@ async def test_degraded_pipeline(
     assert cost["total_cost_usd"] == (
         "0.01084000"
     )
+    assert top3_selection["policy_version"] == (
+        TOP3_SELECTION_POLICY_VERSION
+    )
+    assert (
+        top3_selection[
+            "story_cluster_filter_applied"
+        ]
+        is True
+    )
+    assert (
+        top3_selection[
+            "story_cluster_fallback_used"
+        ]
+        is False
+    )
+    assert top3_selection[
+        "diverse_combination_count"
+    ] == 4
+    assert len(
+        top3_selection[
+            "winner_story_cluster_keys"
+        ]
+    ) == 3
 
     counts = await load_v2_counts(
         pool,
