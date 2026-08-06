@@ -333,11 +333,11 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v2"
+        "openai_telegram_post_generator_v3"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v2"
+        "movie_news_telegram_post_prompt_v3"
     )
 
     request = generator.build_request(
@@ -358,6 +358,21 @@ def test_metadata_and_request() -> None:
 
     assert (
         "Прогнозы погоды"
+        in request.instructions
+    )
+
+    assert (
+        "Имена людей передавай кириллицей"
+        in request.instructions
+    )
+
+    assert (
+        "Фактическое содержание headline и body"
+        in request.instructions
+    )
+
+    assert (
+        "только из полей title и summary"
         in request.instructions
     )
 
@@ -390,6 +405,18 @@ def test_metadata_and_request() -> None:
         202,
         203,
     ]
+
+    expected_news_fields = {
+        "position",
+        "news_id",
+        "title",
+        "summary",
+    }
+
+    assert all(
+        set(item) == expected_news_fields
+        for item in payload["news"]
+    )
 
     assert len(client.requests) == 0
 
