@@ -9,9 +9,10 @@ User=michael
 Group=michael
 WorkingDirectory=/opt/top3-news-bot
 
-ExecStart=/opt/top3-news-bot/.venv/bin/python scripts/cleanup_old_data.py --execute
+ExecStart=/opt/top3-news-bot/.venv/bin/python /opt/top3-news-bot/scripts/cleanup_old_data.py --execute
 
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/top3-news-bot
 
 TimeoutStartSec=10min
 
