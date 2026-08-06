@@ -32,7 +32,7 @@ from app.ranking.request_key import (
 
 
 COMPLETION_VERSION = (
-    "reserved_event_ranking_completion_v2"
+    "reserved_event_ranking_completion_v3"
 )
 
 DIAGNOSTIC_FAILURE_VERSION = (
@@ -80,7 +80,7 @@ class EventRankingRunCompletionResult:
 
 @dataclass(frozen=True, slots=True)
 class EventRankingRunDiagnosticFailureResult:
-    """Результат сохранения диагностического сбоя v2."""
+    """Результат сохранения event-level диагностического сбоя."""
 
     ranking_run_id: int
     request_key: str
@@ -664,6 +664,9 @@ def _event_key(
             .isoformat()
         ),
         "macro_topic": event.macro_topic,
+        "story_cluster_key": (
+            event.story_cluster_key
+        ),
         "expert_scores": {
             "i": str(event.i_score),
             "k": str(event.k_score),
@@ -722,6 +725,12 @@ def _combination_key(
             ),
             "news_ids": list(
                 item.news_ids
+            ),
+            "selection_policy_version": (
+                item.selection_policy_version
+            ),
+            "story_cluster_keys": list(
+                item.story_cluster_keys
             ),
         },
         ensure_ascii=False,
@@ -793,6 +802,9 @@ def _event_details(
         ),
         "member_news_ids": list(
             event.member_news_ids
+        ),
+        "story_cluster_key": (
+            event.story_cluster_key
         ),
         "expert_scores": {
             "i_score": str(event.i_score),
@@ -921,7 +933,30 @@ def _combination_details(
         "python_final_top_score": str(
             item.final_top_score
         ),
-        "tie_break_order": [
+        "selection_policy_version": (
+            item.selection_policy_version
+        ),
+        "story_cluster_keys": list(
+            item.story_cluster_keys
+        ),
+        "distinct_story_cluster_count": (
+            item.distinct_story_cluster_count
+        ),
+        "passes_story_cluster_filter": (
+            item.passes_story_cluster_filter
+        ),
+        "story_cluster_filter_applied": (
+            item.story_cluster_filter_applied
+        ),
+        "story_cluster_fallback_used": (
+            item.story_cluster_fallback_used
+        ),
+        "tie_break_order": (
+            ["passes_story_cluster_filter"]
+            if item.story_cluster_filter_applied
+            else []
+        )
+        + [
             "final_top_score",
             "mean_m_score",
             "mean_q_score",
@@ -936,18 +971,33 @@ def _selection_reason(
 ) -> str:
     """Формирует объяснение ранга комбинации."""
 
-    prefix = (
-        "Победившая комбинация"
-        if item.is_winner
-        else "Допустимая комбинация"
-    )
+    if item.is_winner:
+        prefix = "Победившая комбинация"
+    elif (
+        item.story_cluster_filter_applied
+        and not item.passes_story_cluster_filter
+    ):
+        prefix = (
+            "Отфильтрованная комбинация "
+            "одной сюжетной семьи"
+        )
+    else:
+        prefix = "Допустимая комбинация"
 
     return (
         f"{prefix}: rank={item.combination_rank}; "
         f"TOP(S)={item.final_top_score}; "
         f"mean_M={item.mean_m_score}; "
         f"mean_Q={item.mean_q_score}; "
-        f"mean_F={item.mean_f_score}."
+        f"mean_F={item.mean_f_score}; "
+        "story_clusters="
+        f"{item.distinct_story_cluster_count}; "
+        "passes_story_cluster_filter="
+        f"{str(item.passes_story_cluster_filter).lower()}; "
+        "story_cluster_filter_applied="
+        f"{str(item.story_cluster_filter_applied).lower()}; "
+        "story_cluster_fallback_used="
+        f"{str(item.story_cluster_fallback_used).lower()}."
     )
 
 
@@ -1091,7 +1141,7 @@ async def _load_and_verify_completed(
     tuple[PersistedEventScore, ...],
     int,
 ]:
-    """Загружает и сверяет сохранённый v2 результат."""
+    """Загружает и сверяет сохранённый event-level результат."""
 
     rows = await connection.fetch(
         """
@@ -1709,7 +1759,7 @@ async def complete_reserved_event_ranking_run(
     ) = None,
 ) -> EventRankingRunCompletionResult:
     """
-    Атомарно сохраняет event-level v2.
+    Атомарно сохраняет event-level результат.
 
     Полный и degraded-результат получают статус
     completed. Reservation остаётся привязанным к
@@ -1807,6 +1857,34 @@ async def complete_reserved_event_ranking_run(
                 .winner
                 .ordered_news_ids
             ),
+            "top3_selection": {
+                "policy_version": (
+                    calculation
+                    .top3_selection
+                    .selection_policy_version
+                ),
+                "story_cluster_filter_applied": (
+                    calculation
+                    .top3_selection
+                    .story_cluster_filter_applied
+                ),
+                "story_cluster_fallback_used": (
+                    calculation
+                    .top3_selection
+                    .story_cluster_fallback_used
+                ),
+                "diverse_combination_count": (
+                    calculation
+                    .top3_selection
+                    .story_cluster_diverse_combination_count
+                ),
+                "winner_story_cluster_keys": list(
+                    calculation
+                    .top3_selection
+                    .winner
+                    .story_cluster_keys
+                ),
+            },
             "degraded": (
                 normalized_coverage.degraded
             ),
@@ -2305,7 +2383,7 @@ async def fail_reserved_event_ranking_run(
     error_type: str | None = None,
 ) -> EventRankingRunDiagnosticFailureResult:
     """
-    Атомарно сохраняет диагностический сбой v2.
+    Атомарно сохраняет event-level диагностический сбой.
 
     Сохраняет рассчитанные инфоповоды и news_scores,
     usage, стоимость и этап сбоя. Комбинации TOP-3
@@ -2698,7 +2776,7 @@ async def fail_reserved_event_ranking_run(
             if update_result != "UPDATE 1":
                 raise RuntimeError(
                     "Не удалось сохранить "
-                    "диагностический сбой v2: "
+                    "event-level диагностический сбой: "
                     f"{update_result}"
                 )
 

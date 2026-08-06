@@ -27,6 +27,8 @@ from app.ranking.event_evaluator import (
     EVENT_PROMPT_VERSION,
     MACRO_TOPICS,
     SOURCE_RELATIONS,
+    STORY_CLUSTER_KEY_MAX_LENGTH,
+    STORY_CLUSTER_KEY_PATTERN,
     EventAssessment,
     EventMemberAssessment,
     EventRankingCoverageDiagnostics,
@@ -116,6 +118,13 @@ class OpenAIEventPayload(BaseModel):
         min_length=1,
         max_length=100,
     )
+    story_cluster_key: str = Field(
+        min_length=1,
+        max_length=(
+            STORY_CLUSTER_KEY_MAX_LENGTH
+        ),
+        pattern=STORY_CLUSTER_KEY_PATTERN,
+    )
     i_score: Decimal = Field(
         ge=Decimal("0"),
         le=Decimal("10"),
@@ -201,6 +210,16 @@ class OpenAIEventPayload(BaseModel):
 
         return value.astimezone(timezone.utc)
 
+    @field_validator("story_cluster_key")
+    @classmethod
+    def validate_story_cluster_key(
+        cls,
+        value: str,
+    ) -> str:
+        """Нормализует ключ сюжетной семьи."""
+
+        return value.strip().lower()
+
     @field_validator("macro_topic")
     @classmethod
     def validate_macro_topic(
@@ -245,7 +264,7 @@ class _ValidatedPayload:
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v4.txt"
+    "ranking/movie_news_event_ranking_prompt_v5.txt"
 )
 
 REPAIR_INSTRUCTIONS = (
@@ -399,7 +418,7 @@ def _validate_candidate(
 
     if source_weight is None:
         raise ValueError(
-            "Для event-level v2 не настроен "
+            "Для event-level ranking не настроен "
             "вес источника: "
             f"news_id={candidate.news_id}, "
             f"source_code={candidate.source_code!r}"
@@ -495,6 +514,16 @@ def _build_input_text(
             "q_score": "0..1",
         },
         "macro_topics": sorted(MACRO_TOPICS),
+        "story_cluster_policy": {
+            "format": "lower_snake_case",
+            "maximum_length": (
+                STORY_CLUSTER_KEY_MAX_LENGTH
+            ),
+            "purpose": (
+                "group_distinct_events_from_the_"
+                "same_overarching_story"
+            ),
+        },
         "source_relations": sorted(
             SOURCE_RELATIONS
         ),
@@ -745,6 +774,9 @@ def _build_events(
             event_title=event.event_title,
             event_time_utc=event.event_time_utc,
             macro_topic=event.macro_topic,
+            story_cluster_key=(
+                event.story_cluster_key
+            ),
             i_score=event.i_score,
             k_score=event.k_score,
             n_score=event.n_score,
@@ -1103,7 +1135,7 @@ def _aggregate_response(
 
 
 class OpenAIEventRankingEvaluator:
-    """Event-level оценщик полной формулы v2."""
+    """Event-level оценщик полной формулы v3."""
 
     def __init__(
         self,

@@ -134,6 +134,8 @@ def build_output() -> str:
         '"2026-08-02T10:00:00Z",'
         '"macro_topic":'
         '"creative_cast_production",'
+        '"story_cluster_key":'
+        '"test_movie_event",'
         '"i_score":7.5,'
         '"k_score":2.0,'
         '"n_score":6.5,'
@@ -320,6 +322,7 @@ async def test_successful_request() -> None:
         "event_title",
         "event_time_utc",
         "macro_topic",
+        "story_cluster_key",
         "i_score",
         "k_score",
         "n_score",
@@ -374,6 +377,16 @@ async def test_successful_request() -> None:
             "format"
         ]
         == "date-time"
+    )
+    assert (
+        event_item_schema[
+            "properties"
+        ][
+            "story_cluster_key"
+        ][
+            "pattern"
+        ]
+        == "^[a-z0-9]+(?:_[a-z0-9]+)*$"
     )
 
     print(

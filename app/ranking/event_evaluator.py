@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Protocol, runtime_checkable
 
 from app.db.news_candidates import CandidateSelectionResult
@@ -12,11 +13,11 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v4"
+    "event_ranking_evaluator_v5"
 )
 
 EVENT_PROMPT_VERSION = (
-    "movie_news_event_ranking_prompt_v4"
+    "movie_news_event_ranking_prompt_v5"
 )
 
 MACRO_TOPICS = frozenset(
@@ -30,6 +31,12 @@ MACRO_TOPICS = frozenset(
         "other",
     }
 )
+
+STORY_CLUSTER_KEY_PATTERN = (
+    r"[a-z0-9]+(?:_[a-z0-9]+)*"
+)
+STORY_CLUSTER_KEY_MAX_LENGTH = 120
+
 
 SOURCE_RELATIONS = frozenset(
     {
@@ -316,6 +323,7 @@ class EventAssessment:
     event_title: str
     event_time_utc: datetime
     macro_topic: str
+    story_cluster_key: str
 
     i_score: Decimal
     k_score: Decimal
@@ -358,6 +366,33 @@ class EventAssessment:
                 "macro_topic имеет "
                 "неподдерживаемое значение: "
                 f"{macro_topic!r}"
+            )
+
+        story_cluster_key = (
+            _normalize_required_text(
+                self.story_cluster_key,
+                field_name="story_cluster_key",
+            )
+            .lower()
+        )
+
+        if len(story_cluster_key) > (
+            STORY_CLUSTER_KEY_MAX_LENGTH
+        ):
+            raise ValueError(
+                "story_cluster_key не может быть "
+                f"длиннее {STORY_CLUSTER_KEY_MAX_LENGTH} "
+                "символов."
+            )
+
+        if re.fullmatch(
+            STORY_CLUSTER_KEY_PATTERN,
+            story_cluster_key,
+        ) is None:
+            raise ValueError(
+                "story_cluster_key должен быть "
+                "lower_snake_case из латинских "
+                "букв и цифр."
             )
 
         normalized_scores = {
@@ -481,6 +516,11 @@ class EventAssessment:
             self,
             "macro_topic",
             macro_topic,
+        )
+        object.__setattr__(
+            self,
+            "story_cluster_key",
+            story_cluster_key,
         )
 
         for field_name, value in normalized_scores.items():
@@ -751,7 +791,7 @@ class StructuredEventRankingClient(Protocol):
 
 @runtime_checkable
 class EventRankingEvaluator(Protocol):
-    """Интерфейс оценщика полной формулы v2."""
+    """Интерфейс оценщика полной формулы v3."""
 
     @property
     def metadata(self) -> RankingEvaluatorMetadata:

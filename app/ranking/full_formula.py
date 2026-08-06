@@ -1,6 +1,8 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import combinations
+import re
 from typing import TypeAlias
 
 from app.ranking.score_formula import (
@@ -14,6 +16,16 @@ ScoreInput: TypeAlias = Decimal | int | float | str
 OptionalScoreInput: TypeAlias = ScoreInput | None
 
 FULL_FORMULA_VERSION = "top3_cinema_v3"
+LEGACY_TOP3_SELECTION_POLICY_VERSION = (
+    "macro_topic_diversity_v1"
+)
+TOP3_SELECTION_POLICY_VERSION = (
+    "story_cluster_diversity_v1"
+)
+STORY_CLUSTER_KEY_PATTERN = (
+    r"[a-z0-9]+(?:_[a-z0-9]+)*"
+)
+STORY_CLUSTER_KEY_MAX_LENGTH = 120
 SCORE_QUANTUM = Decimal("0.000001")
 SCORE_MIN = Decimal("0")
 SCORE_MAX = Decimal("10")
@@ -101,6 +113,12 @@ class Top3CombinationScore:
     mean_q_score: Decimal
     mean_f_score: Decimal
     distinct_macro_topic_count: int
+    story_cluster_keys: tuple[str, ...]
+    distinct_story_cluster_count: int
+    passes_story_cluster_filter: bool
+    selection_policy_version: str
+    story_cluster_filter_applied: bool
+    story_cluster_fallback_used: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +127,10 @@ class Top3SelectionResult:
     eligible_count: int
     combinations: tuple[Top3CombinationScore, ...]
     winner: Top3CombinationScore
+    selection_policy_version: str
+    story_cluster_filter_applied: bool
+    story_cluster_fallback_used: bool
+    story_cluster_diverse_combination_count: int
 
 
 def _decimal(value: ScoreInput, field_name: str) -> Decimal:
@@ -167,6 +189,41 @@ def _macro_topic(value: str) -> str:
     result = value.strip()
     if result not in MACRO_TOPICS:
         raise ValueError(f"Неподдерживаемая macro_topic: {result!r}")
+    return result
+
+
+def _story_cluster_key(value: str) -> str:
+    """Проверяет ключ общей сюжетной семьи."""
+
+    if not isinstance(value, str):
+        raise TypeError(
+            "story_cluster_key должен быть str."
+        )
+
+    result = value.strip().lower()
+
+    if not result:
+        raise ValueError(
+            "story_cluster_key не может быть пустым."
+        )
+
+    if len(result) > STORY_CLUSTER_KEY_MAX_LENGTH:
+        raise ValueError(
+            "story_cluster_key не может быть "
+            f"длиннее {STORY_CLUSTER_KEY_MAX_LENGTH} "
+            "символов."
+        )
+
+    if re.fullmatch(
+        STORY_CLUSTER_KEY_PATTERN,
+        result,
+    ) is None:
+        raise ValueError(
+            "story_cluster_key должен быть "
+            "lower_snake_case из латинских "
+            "букв и цифр."
+        )
+
     return result
 
 
@@ -434,60 +491,252 @@ def _mean(values: tuple[Decimal, Decimal, Decimal]) -> Decimal:
     return _quantize(sum(values, Decimal("0")) / Decimal("3"))
 
 
+def _normalize_story_cluster_mapping(
+    *,
+    news_ids: tuple[int, ...],
+    story_cluster_keys_by_news_id: (
+        Mapping[int, str] | None
+    ),
+) -> dict[int, str] | None:
+    """Проверяет полную карту сюжетных семей."""
+
+    if story_cluster_keys_by_news_id is None:
+        return None
+
+    if not isinstance(
+        story_cluster_keys_by_news_id,
+        Mapping,
+    ):
+        raise TypeError(
+            "story_cluster_keys_by_news_id "
+            "должен быть Mapping."
+        )
+
+    normalized: dict[int, str] = {}
+
+    for raw_news_id, raw_key in (
+        story_cluster_keys_by_news_id.items()
+    ):
+        news_id = _news_id(raw_news_id)
+
+        if news_id in normalized:
+            raise ValueError(
+                "story_cluster_keys_by_news_id "
+                "содержит повторяющийся news_id."
+            )
+
+        normalized[news_id] = (
+            _story_cluster_key(raw_key)
+        )
+
+    expected = set(news_ids)
+    actual = set(normalized)
+
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise ValueError(
+            "Некорректное покрытие "
+            "story_cluster_keys_by_news_id: "
+            f"missing={missing}, "
+            f"unexpected={unexpected}"
+        )
+
+    return normalized
+
+
 def _combination(
-    items: tuple[FullNewsScore, FullNewsScore, FullNewsScore],
+    items: tuple[
+        FullNewsScore,
+        FullNewsScore,
+        FullNewsScore,
+    ],
+    *,
+    story_cluster_keys_by_news_id: (
+        Mapping[int, str] | None
+    ),
 ) -> Top3CombinationScore:
     ordered = tuple(
         sorted(
             items,
-            key=lambda item: (-item.individual.individual_score, item.news_id),
+            key=lambda item: (
+                -item.individual.individual_score,
+                item.news_id,
+            ),
         )
     )
-    news_ids = tuple(sorted(item.news_id for item in items))
-    ordered_news_ids = tuple(item.news_id for item in ordered)
-    mean_b = _mean(tuple(item.individual.individual_score for item in items))
-    diversity = calculate_diversity_score(tuple(item.macro_topic for item in items))
+    news_ids = tuple(
+        sorted(item.news_id for item in items)
+    )
+    ordered_news_ids = tuple(
+        item.news_id for item in ordered
+    )
+    mean_b = _mean(
+        tuple(
+            item.individual.individual_score
+            for item in items
+        )
+    )
+    diversity = calculate_diversity_score(
+        tuple(
+            item.macro_topic
+            for item in items
+        )
+    )
+
+    if story_cluster_keys_by_news_id is None:
+        story_cluster_keys: tuple[str, ...] = ()
+        distinct_story_cluster_count = 0
+        passes_story_cluster_filter = True
+    else:
+        story_cluster_keys = tuple(
+            story_cluster_keys_by_news_id[news_id]
+            for news_id in news_ids
+        )
+        distinct_story_cluster_count = len(
+            set(story_cluster_keys)
+        )
+        passes_story_cluster_filter = (
+            distinct_story_cluster_count == 3
+        )
 
     return Top3CombinationScore(
         combination_rank=0,
         is_winner=False,
-        news_ids=(news_ids[0], news_ids[1], news_ids[2]),
-        ordered_news_ids=(ordered_news_ids[0], ordered_news_ids[1], ordered_news_ids[2]),
+        news_ids=(
+            news_ids[0],
+            news_ids[1],
+            news_ids[2],
+        ),
+        ordered_news_ids=(
+            ordered_news_ids[0],
+            ordered_news_ids[1],
+            ordered_news_ids[2],
+        ),
         mean_individual_score=mean_b,
         diversity_score=diversity,
-        final_top_score=_quantize(mean_b + D_WEIGHT * diversity),
-        mean_m_score=_mean(tuple(item.m_score for item in items)),
-        mean_q_score=_mean(tuple(item.q_score for item in items)),
-        mean_f_score=_mean(tuple(item.f_score for item in items)),
-        distinct_macro_topic_count=len({item.macro_topic for item in items}),
+        final_top_score=_quantize(
+            mean_b + D_WEIGHT * diversity
+        ),
+        mean_m_score=_mean(
+            tuple(
+                item.m_score for item in items
+            )
+        ),
+        mean_q_score=_mean(
+            tuple(
+                item.q_score for item in items
+            )
+        ),
+        mean_f_score=_mean(
+            tuple(
+                item.f_score for item in items
+            )
+        ),
+        distinct_macro_topic_count=len(
+            {item.macro_topic for item in items}
+        ),
+        story_cluster_keys=story_cluster_keys,
+        distinct_story_cluster_count=(
+            distinct_story_cluster_count
+        ),
+        passes_story_cluster_filter=(
+            passes_story_cluster_filter
+        ),
+        selection_policy_version=(
+            TOP3_SELECTION_POLICY_VERSION
+            if story_cluster_keys_by_news_id
+            is not None
+            else (
+                LEGACY_TOP3_SELECTION_POLICY_VERSION
+            )
+        ),
+        story_cluster_filter_applied=False,
+        story_cluster_fallback_used=False,
     )
 
 
 def select_top3_combination(
     scores: tuple[FullNewsScore, ...],
+    *,
+    story_cluster_keys_by_news_id: (
+        Mapping[int, str] | None
+    ) = None,
 ) -> Top3SelectionResult:
-    """Перебирает все допустимые тройки и выбирает победителя."""
+    """Перебирает тройки с безопасным сюжетным фильтром."""
 
     if not scores:
-        raise ValueError("Список полных оценок не может быть пустым.")
+        raise ValueError(
+            "Список полных оценок не может быть пустым."
+        )
 
-    news_ids = tuple(item.news_id for item in scores)
+    news_ids = tuple(
+        item.news_id for item in scores
+    )
     if len(news_ids) != len(set(news_ids)):
-        raise ValueError("Каждый news_id должен встречаться один раз.")
+        raise ValueError(
+            "Каждый news_id должен встречаться один раз."
+        )
 
-    eligible = tuple(item for item in scores if item.is_eligible)
+    story_clusters = (
+        _normalize_story_cluster_mapping(
+            news_ids=news_ids,
+            story_cluster_keys_by_news_id=(
+                story_cluster_keys_by_news_id
+            ),
+        )
+    )
+
+    eligible = tuple(
+        item for item in scores
+        if item.is_eligible
+    )
     if len(eligible) < 3:
         raise ValueError(
-            "Для выбора TOP-3 требуется минимум три допустимых инфоповода: "
+            "Для выбора TOP-3 требуется минимум "
+            "три допустимых инфоповода: "
             f"eligible_count={len(eligible)}"
         )
 
     calculated = [
-        _combination((items[0], items[1], items[2]))
+        _combination(
+            (items[0], items[1], items[2]),
+            story_cluster_keys_by_news_id=(
+                story_clusters
+            ),
+        )
         for items in combinations(eligible, 3)
     ]
+
+    diverse_combination_count = (
+        sum(
+            1
+            for item in calculated
+            if item.passes_story_cluster_filter
+        )
+        if story_clusters is not None
+        else 0
+    )
+
+    story_cluster_filter_applied = (
+        story_clusters is not None
+        and diverse_combination_count > 0
+    )
+    story_cluster_fallback_used = (
+        story_clusters is not None
+        and diverse_combination_count == 0
+    )
+
     calculated.sort(
         key=lambda item: (
+            (
+                0
+                if (
+                    not story_cluster_filter_applied
+                    or item.passes_story_cluster_filter
+                )
+                else 1
+            ),
             -item.final_top_score,
             -item.mean_m_score,
             -item.mean_q_score,
@@ -498,24 +747,73 @@ def select_top3_combination(
 
     ranked = tuple(
         Top3CombinationScore(
-            rank,
-            rank == 1,
-            item.news_ids,
-            item.ordered_news_ids,
-            item.mean_individual_score,
-            item.diversity_score,
-            item.final_top_score,
-            item.mean_m_score,
-            item.mean_q_score,
-            item.mean_f_score,
-            item.distinct_macro_topic_count,
+            combination_rank=rank,
+            is_winner=(rank == 1),
+            news_ids=item.news_ids,
+            ordered_news_ids=(
+                item.ordered_news_ids
+            ),
+            mean_individual_score=(
+                item.mean_individual_score
+            ),
+            diversity_score=(
+                item.diversity_score
+            ),
+            final_top_score=(
+                item.final_top_score
+            ),
+            mean_m_score=item.mean_m_score,
+            mean_q_score=item.mean_q_score,
+            mean_f_score=item.mean_f_score,
+            distinct_macro_topic_count=(
+                item.distinct_macro_topic_count
+            ),
+            story_cluster_keys=(
+                item.story_cluster_keys
+            ),
+            distinct_story_cluster_count=(
+                item.distinct_story_cluster_count
+            ),
+            passes_story_cluster_filter=(
+                item.passes_story_cluster_filter
+            ),
+            selection_policy_version=(
+                TOP3_SELECTION_POLICY_VERSION
+                if story_clusters is not None
+                else (
+                    LEGACY_TOP3_SELECTION_POLICY_VERSION
+                )
+            ),
+            story_cluster_filter_applied=(
+                story_cluster_filter_applied
+            ),
+            story_cluster_fallback_used=(
+                story_cluster_fallback_used
+            ),
         )
-        for rank, item in enumerate(calculated, start=1)
+        for rank, item
+        in enumerate(calculated, start=1)
     )
 
     return Top3SelectionResult(
-        FULL_FORMULA_VERSION,
-        len(eligible),
-        ranked,
-        ranked[0],
+        formula_version=FULL_FORMULA_VERSION,
+        eligible_count=len(eligible),
+        combinations=ranked,
+        winner=ranked[0],
+        selection_policy_version=(
+            TOP3_SELECTION_POLICY_VERSION
+            if story_clusters is not None
+            else (
+                LEGACY_TOP3_SELECTION_POLICY_VERSION
+            )
+        ),
+        story_cluster_filter_applied=(
+            story_cluster_filter_applied
+        ),
+        story_cluster_fallback_used=(
+            story_cluster_fallback_used
+        ),
+        story_cluster_diverse_combination_count=(
+            diverse_combination_count
+        ),
     )

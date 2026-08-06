@@ -762,7 +762,14 @@ def select_event_top3(
 
     top3_selection = (
         select_top3_combination(
-            calculation.scores
+            calculation.scores,
+            story_cluster_keys_by_news_id={
+                item.event.representative_news_id: (
+                    item.event.story_cluster_key
+                )
+                for item
+                in calculation.calculated_events
+            },
         )
     )
 

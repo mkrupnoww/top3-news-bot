@@ -212,6 +212,9 @@ def build_valid_payload() -> dict[str, object]:
                 "macro_topic": (
                     "festivals_awards_criticism"
                 ),
+                "story_cluster_key": (
+                    "festival_new_competition"
+                ),
                 "i_score": "4.5",
                 "k_score": "1.0",
                 "n_score": "5.5",
@@ -255,6 +258,9 @@ def build_valid_payload() -> dict[str, object]:
                 ),
                 "macro_topic": (
                     "creative_cast_production"
+                ),
+                "story_cluster_key": (
+                    "international_film_project"
                 ),
                 "i_score": "7.5",
                 "k_score": "2.0",
@@ -436,7 +442,7 @@ def build_evaluator(
 
 
 def test_build_request() -> None:
-    """Проверяет основной запрос v4."""
+    """Проверяет основной запрос v5."""
 
     evaluator, client = build_evaluator()
     request = evaluator.build_request(
@@ -468,16 +474,19 @@ def test_build_request() -> None:
         102,
         103,
     ]
+    assert payload["story_cluster_policy"][
+        "format"
+    ] == "lower_snake_case"
     assert [
         candidate["configured_source_weight"]
         for candidate in payload["candidates"]
     ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v4"
+        "event_ranking_evaluator_v5"
     )
     assert EVENT_PROMPT_VERSION == (
-        "movie_news_event_ranking_prompt_v4"
+        "movie_news_event_ranking_prompt_v5"
     )
     assert evaluator.metadata.evaluator_version == (
         EVENT_EVALUATOR_VERSION
@@ -486,7 +495,7 @@ def test_build_request() -> None:
         EVENT_PROMPT_VERSION
     )
 
-    print("Request preparation v4: OK")
+    print("Request preparation v5: OK")
     print("client_call_count=0")
 
 
@@ -520,6 +529,12 @@ async def test_complete_response() -> None:
     ) == (101, 103)
     assert result.events[0].source_weight_sum == 3
     assert result.events[1].source_weight_sum == 1
+    assert result.events[0].story_cluster_key == (
+        "international_film_project"
+    )
+    assert result.events[1].story_cluster_key == (
+        "festival_new_competition"
+    )
 
     print()
     print("Complete response without repair: OK")
@@ -1024,7 +1039,7 @@ async def test_common_interface() -> None:
 
 
 async def main() -> int:
-    """Запускает изолированный тест v4."""
+    """Запускает изолированный тест v5."""
 
     test_build_request()
     await test_complete_response()
@@ -1047,8 +1062,8 @@ async def main() -> int:
     print("Database changes: not performed")
     print("Telegram publication: not performed")
     print(
-        "OpenAI event ranking repair/degraded "
-        "test: OK"
+        "OpenAI event ranking repair/degraded/"
+        "story-cluster test: OK"
     )
 
     return 0

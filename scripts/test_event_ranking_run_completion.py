@@ -260,6 +260,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "creative_cast_production"
             ),
+            story_cluster_key="international_production",
             i_score="8.0",
             k_score="6.0",
             n_score="7.0",
@@ -304,6 +305,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "business_economy_law"
             ),
+            story_cluster_key="film_company_business_decision",
             i_score="8.0",
             k_score="4.0",
             n_score="6.0",
@@ -340,6 +342,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "festivals_awards_criticism"
             ),
+            story_cluster_key="festival_programme_expansion",
             i_score="8.5",
             k_score="6.0",
             n_score="8.0",
@@ -374,6 +377,7 @@ def build_events() -> tuple[
                 - timedelta(hours=2)
             ),
             macro_topic="other",
+            story_cluster_key="unverified_film_rumour",
             i_score="9.0",
             k_score="9.0",
             n_score="9.0",
@@ -425,7 +429,7 @@ def build_audience_metrics() -> tuple[
 
 def build_calculation(
 ) -> EventFormulaCalculationResult:
-    """Выполняет тестовый расчёт v2."""
+    """Выполняет тестовый event-level расчёт."""
 
     return calculate_event_formula(
         selection=build_selection(),
@@ -579,7 +583,7 @@ async def assert_test_run_deleted(
     *,
     ranking_run_id: int,
 ) -> None:
-    """Проверяет каскадное удаление всех v2 данных."""
+    """Проверяет каскадное удаление event-level данных."""
 
     async with pool.acquire() as connection:
         counts = await connection.fetchrow(
@@ -645,7 +649,7 @@ async def test_successful_completion(
     *,
     created_run_ids: set[int],
 ) -> None:
-    """Проверяет полное сохранение event-level v2."""
+    """Проверяет полное сохранение event-level результата."""
 
     metadata = build_metadata()
 
@@ -750,6 +754,8 @@ async def test_successful_completion(
                     AS combination_count,
                 parameters->'winner_news_ids'
                     AS winner_news_ids,
+                parameters->'top3_selection'
+                    AS top3_selection,
                 parameters->>'degraded'
                     AS degraded,
                 parameters->>'processed_candidate_count'
@@ -819,6 +825,18 @@ async def test_successful_completion(
             reservation.ranking_run_id,
         )
 
+        event_detail_records = await connection.fetch(
+            """
+            SELECT
+                representative_news_id,
+                event_details
+            FROM top3_news.ranking_events
+            WHERE ranking_run_id = $1
+            ORDER BY representative_news_id
+            """,
+            reservation.ranking_run_id,
+        )
+
         winner_record = await connection.fetchrow(
             """
             SELECT
@@ -827,7 +845,8 @@ async def test_successful_completion(
                 final_top_score,
                 diversity_score,
                 distinct_macro_topic_count,
-                is_winner
+                is_winner,
+                combination_details
             FROM top3_news.ranking_combinations
             WHERE ranking_run_id = $1
               AND is_winner = true
@@ -861,7 +880,7 @@ async def test_successful_completion(
 
     if counts is None:
         raise AssertionError(
-            "Не удалось получить v2 counts."
+            "Не удалось получить event-level counts."
         )
 
     if winner_record is None:
@@ -883,6 +902,10 @@ async def test_successful_completion(
 
     missing_news_ids = decode_jsonb(
         run_record["missing_news_ids"]
+    )
+
+    top3_selection = decode_jsonb(
+        run_record["top3_selection"]
     )
 
     coverage = decode_jsonb(
@@ -921,6 +944,23 @@ async def test_successful_completion(
         "processed_news_ids"
     ] == list(TEST_NEWS_IDS)
     assert coverage["missing_news_ids"] == []
+    assert top3_selection["policy_version"] == (
+        "story_cluster_diversity_v1"
+    )
+    assert top3_selection[
+        "story_cluster_filter_applied"
+    ] is True
+    assert top3_selection[
+        "story_cluster_fallback_used"
+    ] is False
+    assert top3_selection[
+        "winner_story_cluster_keys"
+    ] == list(
+        calculation
+        .top3_selection
+        .winner
+        .story_cluster_keys
+    )
 
     assert openai_usage["input_tokens"] == 1570
     assert openai_usage["output_tokens"] == 521
@@ -976,6 +1016,35 @@ async def test_successful_completion(
         2,
         3,
     ]
+
+    event_details_by_news_id = {
+        int(record["representative_news_id"]): (
+            decode_jsonb(record["event_details"])
+        )
+        for record in event_detail_records
+    }
+    assert event_details_by_news_id[7][
+        "story_cluster_key"
+    ] == "international_production"
+    assert event_details_by_news_id[9][
+        "story_cluster_key"
+    ] == "film_company_business_decision"
+
+    combination_details = decode_jsonb(
+        winner_record["combination_details"]
+    )
+    assert combination_details[
+        "selection_policy_version"
+    ] == "story_cluster_diversity_v1"
+    assert combination_details[
+        "story_cluster_filter_applied"
+    ] is True
+    assert combination_details[
+        "story_cluster_fallback_used"
+    ] is False
+    assert combination_details[
+        "distinct_story_cluster_count"
+    ] == 3
 
     assert winner_record["combination_rank"] == 1
     assert winner_record["is_winner"] is True
@@ -1496,7 +1565,7 @@ async def cleanup_test_runs(
             f"{ranking_run_id}"
         )
         print(
-            "temporary_v2_data_deleted=true"
+            "temporary_event_data_deleted=true"
         )
 
 
@@ -1543,7 +1612,7 @@ async def main() -> int:
     print()
     print("OpenAI requests: not performed")
     print(
-        "Database changes: temporary v2 data "
+        "Database changes: temporary event data "
         "inserted and deleted"
     )
     print("Telegram publication: not performed")

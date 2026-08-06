@@ -75,6 +75,7 @@ def build_valid_event() -> EventAssessment:
             ),
         ),
         macro_topic="creative_cast_production",
+        story_cluster_key="test_story",
         i_score="7.5",
         k_score="2.0",
         n_score="6.5",
@@ -119,6 +120,9 @@ def test_valid_event() -> None:
 
     assert event.macro_topic == (
         "creative_cast_production"
+    )
+    assert event.story_cluster_key == (
+        "test_story"
     )
 
     assert event.i_score == Decimal("7.5")
@@ -229,6 +233,7 @@ def test_duplicate_member_ids() -> None:
                 timezone.utc
             ),
             macro_topic="other",
+            story_cluster_key="test_story",
             i_score=5,
             k_score=5,
             n_score=5,
@@ -287,6 +292,7 @@ def test_representative_rules() -> None:
                 timezone.utc
             ),
             macro_topic="other",
+            story_cluster_key="test_story",
             i_score=5,
             k_score=5,
             n_score=5,
@@ -326,6 +332,7 @@ def test_invalid_macro_topic() -> None:
             event_title=valid.event_title,
             event_time_utc=valid.event_time_utc,
             macro_topic="unknown_topic",
+            story_cluster_key="test_story",
             i_score=valid.i_score,
             k_score=valid.k_score,
             n_score=valid.n_score,
@@ -350,6 +357,46 @@ def test_invalid_macro_topic() -> None:
     )
 
 
+def test_invalid_story_cluster_key() -> None:
+    """Блокирует некорректный ключ сюжетной семьи."""
+
+    valid = build_valid_event()
+
+    try:
+        EventAssessment(
+            representative_news_id=(
+                valid.representative_news_id
+            ),
+            event_title=valid.event_title,
+            event_time_utc=valid.event_time_utc,
+            macro_topic=valid.macro_topic,
+            story_cluster_key="Paramount Warner",
+            i_score=valid.i_score,
+            k_score=valid.k_score,
+            n_score=valid.n_score,
+            e_score=valid.e_score,
+            x_score=valid.x_score,
+            q_score=valid.q_score,
+            impact_reason=valid.impact_reason,
+            hook_reason=valid.hook_reason,
+            q_reason=valid.q_reason,
+            members=valid.members,
+        )
+    except ValueError as error:
+        assert "story_cluster_key" in str(error)
+
+        print()
+        print(
+            "Invalid story cluster key blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Некорректный story_cluster_key "
+        "не был заблокирован."
+    )
+
+
 def test_invalid_score_range() -> None:
     """Блокирует экспертную оценку вне шкалы."""
 
@@ -363,6 +410,7 @@ def test_invalid_score_range() -> None:
             event_title=valid.event_title,
             event_time_utc=valid.event_time_utc,
             macro_topic=valid.macro_topic,
+            story_cluster_key="test_story",
             i_score=11,
             k_score=valid.k_score,
             n_score=valid.n_score,
@@ -392,7 +440,7 @@ def main() -> int:
 
     print(
         "event_evaluator_version="
-        "event_ranking_evaluator_v1"
+        "event_ranking_evaluator_v5"
     )
     print(
         "openai_requests=not_performed"
@@ -411,6 +459,7 @@ def main() -> int:
     test_duplicate_member_ids()
     test_representative_rules()
     test_invalid_macro_topic()
+    test_invalid_story_cluster_key()
     test_invalid_score_range()
 
     print()

@@ -152,6 +152,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "creative_cast_production"
             ),
+            story_cluster_key="international_production",
             i_score="8.0",
             k_score="6.0",
             n_score="7.0",
@@ -196,6 +197,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "business_economy_law"
             ),
+            story_cluster_key="film_company_business_decision",
             i_score="7.5",
             k_score="4.0",
             n_score="6.0",
@@ -232,6 +234,7 @@ def build_events() -> tuple[
             macro_topic=(
                 "festivals_awards_criticism"
             ),
+            story_cluster_key="festival_programme_expansion",
             i_score="8.5",
             k_score="6.0",
             n_score="8.0",
@@ -266,6 +269,7 @@ def build_events() -> tuple[
                 - timedelta(hours=2)
             ),
             macro_topic="other",
+            story_cluster_key="unverified_film_rumour",
             i_score="9.0",
             k_score="9.0",
             n_score="9.0",
@@ -459,6 +463,21 @@ def test_complete_calculation() -> None:
         winner.diversity_score
         == Decimal("10.000000")
     )
+    assert (
+        result.top3_selection
+        .selection_policy_version
+        == "story_cluster_diversity_v1"
+    )
+    assert (
+        result.top3_selection
+        .story_cluster_filter_applied
+        is True
+    )
+    assert (
+        winner.distinct_story_cluster_count
+        == 3
+    )
+    assert winner.passes_story_cluster_filter is True
 
     assert set(
         winner.ordered_news_ids
@@ -492,6 +511,85 @@ def test_complete_calculation() -> None:
         "diversity_score="
         f"{winner.diversity_score}"
     )
+
+
+def test_story_cluster_diversity_policy() -> None:
+    """Проверяет фильтр одной мегатемы и fallback."""
+
+    events = list(build_events())
+    events[1] = replace(
+        events[1],
+        story_cluster_key=(
+            events[0].story_cluster_key
+        ),
+    )
+    events[3] = replace(
+        events[3],
+        story_cluster_key="confirmed_rumour_event",
+        q_score=Decimal("1.0"),
+    )
+
+    filtered = calculate_event_formula(
+        selection=build_selection(),
+        events=tuple(events),
+    )
+
+    assert (
+        filtered.top3_selection
+        .story_cluster_filter_applied
+        is True
+    )
+    assert (
+        filtered.top3_selection
+        .story_cluster_fallback_used
+        is False
+    )
+    assert (
+        filtered.top3_selection.winner
+        .distinct_story_cluster_count
+        == 3
+    )
+    assert not {
+        101,
+        103,
+    }.issubset(
+        set(
+            filtered.top3_selection
+            .winner.news_ids
+        )
+    )
+
+    fallback_events = tuple(
+        replace(
+            event,
+            story_cluster_key="single_megastory",
+        )
+        for event in build_events()
+    )
+    fallback = calculate_event_formula(
+        selection=build_selection(),
+        events=fallback_events,
+    )
+
+    assert (
+        fallback.top3_selection
+        .story_cluster_filter_applied
+        is False
+    )
+    assert (
+        fallback.top3_selection
+        .story_cluster_fallback_used
+        is True
+    )
+    assert (
+        fallback.top3_selection.winner
+        .distinct_story_cluster_count
+        == 1
+    )
+
+    print()
+    print("Story cluster diversity policy: OK")
+    print("fallback_preserves_top3=true")
 
 
 def test_no_audience_metrics() -> None:
@@ -801,6 +899,7 @@ def main() -> int:
     print()
 
     test_complete_calculation()
+    test_story_cluster_diversity_policy()
     test_no_audience_metrics()
     test_intermediate_scores_survive_insufficient_top3()
     test_invalid_window()

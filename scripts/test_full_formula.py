@@ -4,6 +4,7 @@ from app.ranking.full_formula import (
     EXCLUSION_REASON_QUALITY_ZERO,
     EXCLUSION_REASON_SCORE_BELOW_THRESHOLD,
     FULL_FORMULA_VERSION,
+    TOP3_SELECTION_POLICY_VERSION,
     RESONANCE_CONFIDENCE_FULL,
     RESONANCE_CONFIDENCE_PARTIAL,
     RESONANCE_CONFIDENCE_UNAVAILABLE,
@@ -505,6 +506,56 @@ def test_tie_break_rules() -> None:
     print("Combination tie-break rules: OK")
 
 
+def test_story_cluster_selection_policy() -> None:
+    """Приоритизирует три разные сюжетные семьи."""
+
+    fixture = _selection_fixture()
+    legacy = select_top3_combination(fixture)
+
+    filtered = select_top3_combination(
+        fixture,
+        story_cluster_keys_by_news_id={
+            1: "independent_story",
+            2: "paramount_warner_merger",
+            3: "spider_man_box_office",
+            4: "paramount_warner_merger",
+        },
+    )
+
+    assert (
+        filtered.selection_policy_version
+        == TOP3_SELECTION_POLICY_VERSION
+    )
+    assert filtered.story_cluster_filter_applied is True
+    assert filtered.story_cluster_fallback_used is False
+    assert (
+        filtered.winner.distinct_story_cluster_count
+        == 3
+    )
+    assert filtered.winner.passes_story_cluster_filter is True
+    assert not {2, 4}.issubset(
+        set(filtered.winner.news_ids)
+    )
+
+    fallback = select_top3_combination(
+        fixture,
+        story_cluster_keys_by_news_id={
+            news_id: "single_megastory"
+            for news_id in range(1, 5)
+        },
+    )
+
+    assert fallback.story_cluster_filter_applied is False
+    assert fallback.story_cluster_fallback_used is True
+    assert fallback.winner.news_ids == legacy.winner.news_ids
+    assert (
+        fallback.winner.distinct_story_cluster_count
+        == 1
+    )
+
+    print("Story cluster selection policy: OK")
+
+
 def test_invalid_combination_inputs() -> None:
     """Проверяет блокировку недостаточного числа и дублей."""
 
@@ -552,6 +603,7 @@ def main() -> int:
     test_full_news_score_and_eligibility()
     test_diversity_and_combination_selection()
     test_tie_break_rules()
+    test_story_cluster_selection_policy()
     test_invalid_combination_inputs()
 
     print()
