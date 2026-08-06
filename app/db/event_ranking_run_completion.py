@@ -10,6 +10,9 @@ import asyncpg
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
+from app.ranking.event_evaluator import (
+    EventRankingCoverageDiagnostics,
+)
 from app.ranking.event_formula_pipeline import (
     CalculatedEventScore,
     EventFormulaCalculationResult,
@@ -29,7 +32,7 @@ from app.ranking.request_key import (
 
 
 COMPLETION_VERSION = (
-    "reserved_event_ranking_completion_v1"
+    "reserved_event_ranking_completion_v2"
 )
 
 DIAGNOSTIC_FAILURE_VERSION = (
@@ -70,6 +73,9 @@ class EventRankingRunCompletionResult:
         PersistedEventScore,
         ...,
     ]
+    degraded: bool
+    processed_candidate_count: int
+    missing_news_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +264,125 @@ def _normalize_news_ids(
     return normalized
 
 
+def _normalize_completion_coverage(
+    *,
+    candidate_news_ids: tuple[int, ...],
+    diagnostics: (
+        EventRankingCoverageDiagnostics
+        | None
+    ),
+) -> EventRankingCoverageDiagnostics:
+    """Проверяет coverage относительно reservation."""
+
+    if diagnostics is None:
+        return EventRankingCoverageDiagnostics(
+            expected_news_ids=candidate_news_ids,
+            processed_news_ids=candidate_news_ids,
+        )
+
+    if not isinstance(
+        diagnostics,
+        EventRankingCoverageDiagnostics,
+    ):
+        raise TypeError(
+            "coverage_diagnostics должен быть "
+            "EventRankingCoverageDiagnostics."
+        )
+
+    if (
+        diagnostics.expected_news_ids
+        != candidate_news_ids
+    ):
+        raise ValueError(
+            "coverage expected_news_ids не совпадает "
+            "с candidate_news_ids reservation."
+        )
+
+    return diagnostics
+
+
+def _build_coverage_payload(
+    diagnostics: EventRankingCoverageDiagnostics,
+) -> dict[str, Any]:
+    """Формирует JSON-диагностику полного или degraded run."""
+
+    degraded_reason = (
+        "incomplete_model_coverage_after_repair"
+        if diagnostics.degraded
+        else None
+    )
+
+    repair_error_type = diagnostics.repair_error_type
+    repair_error_message = (
+        diagnostics.repair_error_message
+    )
+
+    return {
+        "degraded": diagnostics.degraded,
+        "degraded_reason": degraded_reason,
+        "original_candidate_count": len(
+            diagnostics.expected_news_ids
+        ),
+        "processed_candidate_count": len(
+            diagnostics.processed_news_ids
+        ),
+        "missing_candidate_count": len(
+            diagnostics.missing_news_ids
+        ),
+        "expected_news_ids": list(
+            diagnostics.expected_news_ids
+        ),
+        "processed_news_ids": list(
+            diagnostics.processed_news_ids
+        ),
+        "initial_missing_news_ids": list(
+            diagnostics.initial_missing_news_ids
+        ),
+        "missing_news_ids": list(
+            diagnostics.missing_news_ids
+        ),
+        "repair_attempted": (
+            diagnostics.repair_attempted
+        ),
+        "repair_succeeded": (
+            diagnostics.repair_succeeded
+        ),
+        "repair_error_type": (
+            None
+            if repair_error_type is None
+            else repair_error_type[:500]
+        ),
+        "repair_error_message": (
+            None
+            if repair_error_message is None
+            else repair_error_message[:8000]
+        ),
+        "model_call_count": (
+            diagnostics.model_call_count
+        ),
+    }
+
+
+def _decode_json_object(
+    value: object,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    """Декодирует jsonb-объект asyncpg."""
+
+    decoded = value
+
+    if isinstance(decoded, str):
+        decoded = json.loads(decoded)
+
+    if not isinstance(decoded, dict):
+        raise ValueError(
+            f"{field_name} должен быть JSON-объектом."
+        )
+
+    return decoded
+
+
 def _normalize_datetime(
     value: datetime,
     *,
@@ -413,7 +538,7 @@ def _validate_scored_calculation(
         EventScoreCalculationResult
         | EventFormulaCalculationResult
     ),
-    candidate_news_ids: tuple[int, ...],
+    coverage_news_ids: tuple[int, ...],
 ) -> None:
     """Проверяет общий результат расчёта баллов."""
 
@@ -447,21 +572,21 @@ def _validate_scored_calculation(
         )
 
     if set(member_news_ids) != set(
-        candidate_news_ids
+        coverage_news_ids
     ):
         missing = sorted(
-            set(candidate_news_ids)
+            set(coverage_news_ids)
             - set(member_news_ids)
         )
 
         unexpected = sorted(
             set(member_news_ids)
-            - set(candidate_news_ids)
+            - set(coverage_news_ids)
         )
 
         raise ValueError(
             "Инфоповоды не покрывают "
-            "зарезервированных кандидатов: "
+            "обрабатываемых кандидатов: "
             f"missing={missing}, "
             f"unexpected={unexpected}"
         )
@@ -488,13 +613,13 @@ def _validate_scored_calculation(
 def _validate_calculation(
     *,
     calculation: EventFormulaCalculationResult,
-    candidate_news_ids: tuple[int, ...],
+    processed_news_ids: tuple[int, ...],
 ) -> None:
     """Проверяет согласованность полного расчёта."""
 
     _validate_scored_calculation(
         calculation=calculation,
-        candidate_news_ids=candidate_news_ids,
+        coverage_news_ids=processed_news_ids,
     )
 
     winner = calculation.top3_selection.winner
@@ -1578,13 +1703,18 @@ async def complete_reserved_event_ranking_run(
     calculation: EventFormulaCalculationResult,
     usage: OpenAITokenUsage,
     cost_estimate: OpenAICostEstimate,
+    coverage_diagnostics: (
+        EventRankingCoverageDiagnostics
+        | None
+    ) = None,
 ) -> EventRankingRunCompletionResult:
     """
-    Атомарно сохраняет полный event-level v2.
+    Атомарно сохраняет event-level v2.
 
-    Записывает инфоповоды, публикации, доступные
-    audience-метрики, news_scores, все комбинации
-    и победивший TOP-3.
+    Полный и degraded-результат получают статус
+    completed. Reservation остаётся привязанным к
+    исходному набору, а расчёт покрывает только
+    processed_news_ids из coverage-диагностики.
     """
 
     normalized_ranking_run_id = (
@@ -1612,10 +1742,20 @@ async def complete_reserved_event_ranking_run(
         )
     )
 
+    normalized_coverage = (
+        _normalize_completion_coverage(
+            candidate_news_ids=(
+                normalized_news_ids
+            ),
+            diagnostics=coverage_diagnostics,
+        )
+    )
+
     _validate_calculation(
         calculation=calculation,
-        candidate_news_ids=(
-            normalized_news_ids
+        processed_news_ids=(
+            normalized_coverage
+            .processed_news_ids
         ),
     )
 
@@ -1631,6 +1771,10 @@ async def complete_reserved_event_ranking_run(
                 normalized_news_ids
             )
         }
+    )
+
+    coverage_payload = _build_coverage_payload(
+        normalized_coverage
     )
 
     telemetry_parameters = _encode_json(
@@ -1663,6 +1807,48 @@ async def complete_reserved_event_ranking_run(
                 .winner
                 .ordered_news_ids
             ),
+            "degraded": (
+                normalized_coverage.degraded
+            ),
+            "degraded_reason": (
+                coverage_payload[
+                    "degraded_reason"
+                ]
+            ),
+            "original_candidate_count": (
+                coverage_payload[
+                    "original_candidate_count"
+                ]
+            ),
+            "processed_candidate_count": (
+                coverage_payload[
+                    "processed_candidate_count"
+                ]
+            ),
+            "missing_candidate_count": (
+                coverage_payload[
+                    "missing_candidate_count"
+                ]
+            ),
+            "processed_news_ids": (
+                coverage_payload[
+                    "processed_news_ids"
+                ]
+            ),
+            "missing_news_ids": (
+                coverage_payload[
+                    "missing_news_ids"
+                ]
+            ),
+            "repair_attempted": (
+                normalized_coverage
+                .repair_attempted
+            ),
+            "repair_succeeded": (
+                normalized_coverage
+                .repair_succeeded
+            ),
+            "coverage": coverage_payload,
             "audience_maxima": {
                 "view_count": (
                     calculation
@@ -1705,6 +1891,8 @@ async def complete_reserved_event_ranking_run(
                         AS evaluator_name,
                     parameters->>'evaluator_version'
                         AS evaluator_version,
+                    parameters->'coverage'
+                        AS stored_coverage,
                     (
                         parameters->'news_ids'
                         =
@@ -1752,6 +1940,23 @@ async def complete_reserved_event_ranking_run(
             if record["run_status"] == (
                 "completed"
             ):
+                stored_coverage = (
+                    _decode_json_object(
+                        record[
+                            "stored_coverage"
+                        ],
+                        field_name=(
+                            "parameters.coverage"
+                        ),
+                    )
+                )
+
+                if stored_coverage != coverage_payload:
+                    raise ValueError(
+                        "Повторный completion содержит "
+                        "другую coverage-диагностику."
+                    )
+
                 (
                     persisted_events,
                     winner_combination_id,
@@ -1803,6 +2008,20 @@ async def complete_reserved_event_ranking_run(
                         already_completed=True,
                         persisted_events=(
                             persisted_events
+                        ),
+                        degraded=(
+                            normalized_coverage
+                            .degraded
+                        ),
+                        processed_candidate_count=(
+                            len(
+                                normalized_coverage
+                                .processed_news_ids
+                            )
+                        ),
+                        missing_news_ids=(
+                            normalized_coverage
+                            .missing_news_ids
                         ),
                     )
                 )
@@ -2062,6 +2281,13 @@ async def complete_reserved_event_ranking_run(
         ),
         already_completed=False,
         persisted_events=persisted_events,
+        degraded=normalized_coverage.degraded,
+        processed_candidate_count=len(
+            normalized_coverage.processed_news_ids
+        ),
+        missing_news_ids=(
+            normalized_coverage.missing_news_ids
+        ),
     )
 
 async def fail_reserved_event_ranking_run(
@@ -2113,7 +2339,7 @@ async def fail_reserved_event_ranking_run(
 
     _validate_scored_calculation(
         calculation=calculation,
-        candidate_news_ids=(
+        coverage_news_ids=(
             normalized_news_ids
         ),
     )

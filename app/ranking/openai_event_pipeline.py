@@ -21,6 +21,7 @@ from app.db.ranking_run_reservation import (
     reserve_ranking_run,
 )
 from app.ranking.event_evaluator import (
+    EventRankingCoverageDiagnostics,
     EventRankingEvaluationResult,
     EventRankingModelRequest,
 )
@@ -122,6 +123,21 @@ class ReservedOpenAIEventRankingResult:
             == "completed"
         )
 
+    @property
+    def degraded(self) -> bool:
+        """Показывает завершение с неполным coverage."""
+
+        if self.completion is not None:
+            return self.completion.degraded
+
+        if (
+            self.evaluation is None
+            or self.evaluation.diagnostics is None
+        ):
+            return False
+
+        return self.evaluation.diagnostics.degraded
+
 
 def _validate_candidate_selection(
     selection: CandidateSelectionResult,
@@ -161,6 +177,92 @@ def _validate_candidate_selection(
             "строгое окно 24 часа: "
             f"window_hours={selection.window_hours}"
         )
+
+
+def _build_processed_selection(
+    *,
+    selection: CandidateSelectionResult,
+    evaluation: EventRankingEvaluationResult,
+) -> tuple[
+    CandidateSelectionResult,
+    EventRankingCoverageDiagnostics | None,
+]:
+    """Ограничивает расчёт валидно обработанными news_id."""
+
+    diagnostics = evaluation.diagnostics
+
+    if diagnostics is None:
+        return selection, None
+
+    expected_news_ids = tuple(
+        candidate.news_id
+        for candidate in selection.candidates
+    )
+
+    if diagnostics.expected_news_ids != expected_news_ids:
+        raise ValueError(
+            "Диагностика покрытия не соответствует "
+            "исходной выборке кандидатов."
+        )
+
+    processed_set = set(
+        diagnostics.processed_news_ids
+    )
+
+    processed_candidates = tuple(
+        candidate
+        for candidate in selection.candidates
+        if candidate.news_id in processed_set
+    )
+
+    processed_news_ids = tuple(
+        candidate.news_id
+        for candidate in processed_candidates
+    )
+
+    if (
+        processed_news_ids
+        != diagnostics.processed_news_ids
+    ):
+        raise ValueError(
+            "Порядок processed_news_ids не совпадает "
+            "с исходной выборкой."
+        )
+
+    processed_selection = CandidateSelectionResult(
+        window_start=selection.window_start,
+        window_end=selection.window_end,
+        window_hours=selection.window_hours,
+        candidates=processed_candidates,
+    )
+
+    _validate_candidate_selection(
+        processed_selection
+    )
+
+    return processed_selection, diagnostics
+
+
+def _filter_audience_metrics(
+    *,
+    audience_metrics: tuple[
+        EventAudienceMetrics,
+        ...,
+    ],
+    processed_news_ids: tuple[int, ...],
+) -> tuple[
+    EventAudienceMetrics,
+    ...,
+]:
+    """Исключает метрики пропущенных кандидатов."""
+
+    processed_set = set(processed_news_ids)
+
+    return tuple(
+        metric
+        for metric in audience_metrics
+        if metric.news_id in processed_set
+    )
 
 
 def _require_evaluation_telemetry(
@@ -410,6 +512,12 @@ async def run_reserved_openai_event_ranking(
     usage: OpenAITokenUsage | None = None
     cost_estimate: OpenAICostEstimate | None = None
 
+    processed_selection = candidate_selection
+    coverage_diagnostics: (
+        EventRankingCoverageDiagnostics
+        | None
+    ) = None
+
     failure_stage = "model_evaluation"
 
     try:
@@ -449,16 +557,43 @@ async def run_reserved_openai_event_ranking(
                 "отсутствует после проверки."
             )
 
+        failure_stage = "coverage_resolution"
+
+        (
+            processed_selection,
+            coverage_diagnostics,
+        ) = _build_processed_selection(
+            selection=candidate_selection,
+            evaluation=evaluation,
+        )
+
+        processed_news_ids = tuple(
+            candidate.news_id
+            for candidate
+            in processed_selection.candidates
+        )
+
+        processed_audience_metrics = (
+            _filter_audience_metrics(
+                audience_metrics=(
+                    audience_metrics
+                ),
+                processed_news_ids=(
+                    processed_news_ids
+                ),
+            )
+        )
+
         failure_stage = "event_score_calculation"
 
         score_calculation = (
             calculate_event_scores(
                 selection=(
-                    candidate_selection
+                    processed_selection
                 ),
                 events=evaluation.events,
                 audience_metrics=(
-                    audience_metrics
+                    processed_audience_metrics
                 ),
             )
         )
@@ -485,6 +620,9 @@ async def run_reserved_openai_event_ranking(
                 calculation=calculation,
                 usage=usage,
                 cost_estimate=cost_estimate,
+                coverage_diagnostics=(
+                    coverage_diagnostics
+                ),
             )
         )
 

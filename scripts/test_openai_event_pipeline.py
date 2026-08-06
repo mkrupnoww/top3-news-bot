@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from math import comb
@@ -9,7 +9,12 @@ from uuid import uuid4
 
 import asyncpg
 
+import app.ranking.openai_event_pipeline as event_pipeline_module
 from app.config import get_settings
+from app.db.news_candidates import (
+    CandidateSelectionResult,
+    NewsCandidate,
+)
 from app.db.pool import (
     close_database_pool,
     create_database_pool,
@@ -81,8 +86,14 @@ class FakeStructuredEventRankingClient:
         self,
         *,
         fail_request: bool = False,
+        omit_news_id: int | None = None,
+        preserve_missing_on_repair: bool = False,
     ) -> None:
         self._fail_request = fail_request
+        self._omit_news_id = omit_news_id
+        self._preserve_missing_on_repair = (
+            preserve_missing_on_repair
+        )
         self.requests: list[
             EventRankingModelRequest
         ] = []
@@ -104,6 +115,45 @@ class FakeStructuredEventRankingClient:
         input_payload = json.loads(
             request.input_text
         )
+
+        task = input_payload.get("task")
+
+        if task == (
+            "repair_movie_news_event_coverage"
+        ):
+            if not self._preserve_missing_on_repair:
+                raise AssertionError(
+                    "Repair-запрос не ожидался "
+                    "для этого fake-клиента."
+                )
+
+            original_response = input_payload.get(
+                "original_response"
+            )
+
+            if not isinstance(
+                original_response,
+                dict,
+            ):
+                raise AssertionError(
+                    "Repair-запрос не содержит "
+                    "original_response."
+                )
+
+            telemetry = build_telemetry(
+                model_name=request.model
+            )
+
+            return EventRankingModelResponse(
+                output_text=json.dumps(
+                    original_response,
+                    ensure_ascii=False,
+                ),
+                usage=telemetry.usage,
+                cost_estimate=(
+                    telemetry.cost_estimate
+                ),
+            )
 
         candidates = input_payload.get(
             "candidates"
@@ -147,6 +197,9 @@ class FakeStructuredEventRankingClient:
                 raise AssertionError(
                     "published_at должен быть str."
                 )
+
+            if news_id == self._omit_news_id:
+                continue
 
             events.append(
                 {
@@ -272,6 +325,54 @@ def build_model_name(
     )
 
 
+def build_degraded_selection(
+) -> CandidateSelectionResult:
+    """Создаёт пять существующих DB-кандидатов."""
+
+    candidates = tuple(
+        NewsCandidate(
+            news_id=news_id,
+            source_id=8,
+            source_code="variety_film",
+            source_name="Variety Film",
+            collection_priority=100,
+            processing_status="collected",
+            title=(
+                "Synthetic degraded movie news "
+                f"{news_id}"
+            ),
+            summary=(
+                "Synthetic pipeline summary "
+                f"{news_id}."
+            ),
+            author_name="Pipeline Test",
+            source_published_at=(
+                AS_OF
+                - timedelta(hours=index + 1)
+            ),
+            age_hours=float(index + 1),
+            source_url=(
+                "https://example.com/degraded/"
+                f"{news_id}"
+            ),
+            primary_image_url=None,
+            source_weight=3,
+        )
+        for index, news_id in enumerate(
+            (7, 8, 9, 10, 11)
+        )
+    )
+
+    return CandidateSelectionResult(
+        window_start=(
+            AS_OF - timedelta(hours=24)
+        ),
+        window_end=AS_OF,
+        window_hours=24.0,
+        candidates=candidates,
+    )
+
+
 def decode_jsonb(
     value: Any,
 ) -> Any:
@@ -308,7 +409,19 @@ async def load_run_by_model(
                 parameters->'openai_cost'
                     AS openai_cost,
                 parameters->'failure'
-                    AS failure
+                    AS failure,
+                parameters->>'degraded'
+                    AS degraded,
+                parameters->>'degraded_reason'
+                    AS degraded_reason,
+                parameters->>'processed_candidate_count'
+                    AS processed_candidate_count,
+                parameters->'processed_news_ids'
+                    AS processed_news_ids,
+                parameters->'missing_news_ids'
+                    AS missing_news_ids,
+                parameters->'coverage'
+                    AS coverage
             FROM top3_news.ranking_runs
             WHERE model_name = $1
             ORDER BY ranking_run_id
@@ -628,6 +741,187 @@ async def test_successful_pipeline(
     print("fake_model_call_count=1")
 
 
+async def test_degraded_pipeline(
+    pool: asyncpg.Pool,
+    *,
+    test_model_names: set[str],
+) -> None:
+    """Проверяет completed после неудачного repair."""
+
+    model_name = build_model_name(
+        scenario="degraded"
+    )
+    test_model_names.add(model_name)
+
+    fake_client = (
+        FakeStructuredEventRankingClient(
+            omit_news_id=11,
+            preserve_missing_on_repair=True,
+        )
+    )
+    evaluator = OpenAIEventRankingEvaluator(
+        client=fake_client,
+        model_name=model_name,
+    )
+
+    selection = build_degraded_selection()
+
+    async def fake_select_news_candidates(
+        _pool: asyncpg.Pool,
+        *,
+        as_of: datetime,
+        window_hours: float = 24.0,
+        limit: int = 500,
+        source_codes: (
+            tuple[str, ...]
+            | None
+        ) = None,
+    ) -> CandidateSelectionResult:
+        del _pool, limit, source_codes
+
+        if as_of != AS_OF:
+            raise AssertionError(
+                "Неожиданный as_of в fake selection."
+            )
+
+        if window_hours != WINDOW_HOURS:
+            raise AssertionError(
+                "Неожиданный window_hours."
+            )
+
+        return selection
+
+    original_selector = (
+        event_pipeline_module
+        .select_news_candidates
+    )
+    event_pipeline_module.select_news_candidates = (
+        fake_select_news_candidates
+    )
+
+    try:
+        result = (
+            await run_reserved_openai_event_ranking(
+                pool,
+                evaluator=evaluator,
+                as_of=AS_OF,
+                window_hours=WINDOW_HOURS,
+                limit=5,
+                source_codes=None,
+            )
+        )
+    finally:
+        event_pipeline_module.select_news_candidates = (
+            original_selector
+        )
+
+    assert result.completed is True
+    assert result.degraded is True
+    assert result.run_status == "completed"
+    assert result.evaluation is not None
+    assert result.calculation is not None
+    assert result.completion is not None
+    assert len(fake_client.requests) == 2
+
+    diagnostics = result.evaluation.diagnostics
+
+    if diagnostics is None:
+        raise AssertionError(
+            "Coverage diagnostics отсутствует."
+        )
+
+    assert diagnostics.processed_news_ids == (
+        7,
+        8,
+        9,
+        10,
+    )
+    assert diagnostics.missing_news_ids == (11,)
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+
+    assert len(
+        result.calculation.calculated_events
+    ) == 4
+    assert (
+        result.completion.candidate_count
+        == 5
+    )
+    assert (
+        result.completion
+        .processed_candidate_count
+        == 4
+    )
+    assert result.completion.scored_count == 4
+    assert result.completion.eligible_count == 4
+    assert result.completion.degraded is True
+    assert result.completion.missing_news_ids == (11,)
+    assert result.completion.combination_count == 4
+
+    record = await load_run_by_model(
+        pool,
+        model_name=model_name,
+    )
+    usage = decode_jsonb(record["openai_usage"])
+    cost = decode_jsonb(record["openai_cost"])
+    processed_news_ids = decode_jsonb(
+        record["processed_news_ids"]
+    )
+    missing_news_ids = decode_jsonb(
+        record["missing_news_ids"]
+    )
+    coverage = decode_jsonb(record["coverage"])
+
+    assert record["run_status"] == "completed"
+    assert record["candidate_count"] == 5
+    assert record["scored_count"] == 4
+    assert record["eligible_count"] == 4
+    assert record["error_message"] is None
+    assert record["degraded"] == "true"
+    assert record["degraded_reason"] == (
+        "incomplete_model_coverage_after_repair"
+    )
+    assert record[
+        "processed_candidate_count"
+    ] == "4"
+    assert processed_news_ids == [7, 8, 9, 10]
+    assert missing_news_ids == [11]
+    assert coverage["repair_attempted"] is True
+    assert coverage["repair_succeeded"] is False
+    assert coverage["model_call_count"] == 2
+    assert usage["total_tokens"] == 2600
+    assert cost["total_cost_usd"] == (
+        "0.01084000"
+    )
+
+    counts = await load_v2_counts(
+        pool,
+        ranking_run_id=result.ranking_run_id,
+    )
+
+    assert int(counts["event_count"]) == 4
+    assert int(counts["member_count"]) == 4
+    assert int(counts["score_count"]) == 4
+    assert int(counts["combination_count"]) == 4
+    assert int(
+        counts["combination_item_count"]
+    ) == 12
+
+    print()
+    print("Degraded event pipeline: OK")
+    print(
+        "ranking_run_id="
+        f"{result.ranking_run_id}"
+    )
+    print("run_status=completed")
+    print("degraded=true")
+    print("model_call_count=2")
+    print("candidate_count=5")
+    print("processed_candidate_count=4")
+    print("missing_news_ids=11")
+    print("generation_status_compatible=true")
+
+
 async def test_failed_pipeline(
     pool: asyncpg.Pool,
     *,
@@ -878,6 +1172,13 @@ async def main() -> int:
 
     try:
         await test_successful_pipeline(
+            pool,
+            test_model_names=(
+                test_model_names
+            ),
+        )
+
+        await test_degraded_pipeline(
             pool,
             test_model_names=(
                 test_model_names

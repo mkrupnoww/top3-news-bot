@@ -37,6 +37,7 @@ from app.ranking.event_evaluator import (
     EVENT_PROMPT_VERSION,
     EventAssessment,
     EventMemberAssessment,
+    EventRankingCoverageDiagnostics,
 )
 from app.ranking.event_formula_pipeline import (
     EventAudienceMetrics,
@@ -62,6 +63,17 @@ TEST_NEWS_IDS = (
     8,
     9,
     10,
+    11,
+)
+
+DEGRADED_PROCESSED_NEWS_IDS = (
+    7,
+    8,
+    9,
+    10,
+)
+
+DEGRADED_MISSING_NEWS_IDS = (
     11,
 )
 
@@ -424,6 +436,62 @@ def build_calculation(
     )
 
 
+def build_degraded_calculation(
+) -> EventFormulaCalculationResult:
+    """Выполняет расчёт без пропущенной публикации 11."""
+
+    full_selection = build_selection()
+
+    processed_selection = replace(
+        full_selection,
+        candidates=tuple(
+            candidate
+            for candidate in full_selection.candidates
+            if candidate.news_id
+            in DEGRADED_PROCESSED_NEWS_IDS
+        ),
+    )
+
+    processed_events = tuple(
+        event
+        for event in build_events()
+        if event.representative_news_id != 11
+    )
+
+    return calculate_event_formula(
+        selection=processed_selection,
+        events=processed_events,
+        audience_metrics=(
+            build_audience_metrics()
+        ),
+    )
+
+
+def build_degraded_diagnostics(
+) -> EventRankingCoverageDiagnostics:
+    """Создаёт coverage после неудачного repair."""
+
+    return EventRankingCoverageDiagnostics(
+        expected_news_ids=TEST_NEWS_IDS,
+        processed_news_ids=(
+            DEGRADED_PROCESSED_NEWS_IDS
+        ),
+        initial_missing_news_ids=(
+            DEGRADED_MISSING_NEWS_IDS
+        ),
+        missing_news_ids=(
+            DEGRADED_MISSING_NEWS_IDS
+        ),
+        repair_attempted=True,
+        repair_succeeded=False,
+        repair_error_type="ValueError",
+        repair_error_message=(
+            "Synthetic repair still omitted news_id=11."
+        ),
+        model_call_count=2,
+    )
+
+
 def build_usage() -> OpenAITokenUsage:
     """Создаёт тестовую телеметрию."""
 
@@ -622,6 +690,9 @@ async def test_successful_completion(
 
     assert result.run_status == "completed"
     assert result.already_completed is False
+    assert result.degraded is False
+    assert result.processed_candidate_count == 5
+    assert result.missing_news_ids == ()
     assert result.formula_version == (
         FULL_FORMULA_VERSION
     )
@@ -678,7 +749,15 @@ async def test_successful_completion(
                 parameters->>'combination_count'
                     AS combination_count,
                 parameters->'winner_news_ids'
-                    AS winner_news_ids
+                    AS winner_news_ids,
+                parameters->>'degraded'
+                    AS degraded,
+                parameters->>'processed_candidate_count'
+                    AS processed_candidate_count,
+                parameters->'missing_news_ids'
+                    AS missing_news_ids,
+                parameters->'coverage'
+                    AS coverage
             FROM top3_news.ranking_runs
             WHERE ranking_run_id = $1
             """,
@@ -802,6 +881,14 @@ async def test_successful_completion(
         run_record["winner_news_ids"]
     )
 
+    missing_news_ids = decode_jsonb(
+        run_record["missing_news_ids"]
+    )
+
+    coverage = decode_jsonb(
+        run_record["coverage"]
+    )
+
     assert run_record["run_status"] == (
         "completed"
     )
@@ -824,6 +911,16 @@ async def test_successful_completion(
     )
     assert run_record["event_count"] == "4"
     assert run_record["combination_count"] == "1"
+    assert run_record["degraded"] == "false"
+    assert run_record[
+        "processed_candidate_count"
+    ] == "5"
+    assert missing_news_ids == []
+    assert coverage["degraded"] is False
+    assert coverage[
+        "processed_news_ids"
+    ] == list(TEST_NEWS_IDS)
+    assert coverage["missing_news_ids"] == []
 
     assert openai_usage["input_tokens"] == 1570
     assert openai_usage["output_tokens"] == 521
@@ -943,6 +1040,9 @@ async def test_successful_completion(
     )
 
     assert repeated.already_completed is True
+    assert repeated.degraded is False
+    assert repeated.processed_candidate_count == 5
+    assert repeated.missing_news_ids == ()
     assert repeated.ranking_run_id == (
         result.ranking_run_id
     )
@@ -980,6 +1080,202 @@ async def test_successful_completion(
             "Completed event ranking_run "
             "был ошибочно переведён в failed."
         )
+
+
+async def test_degraded_completion(
+    pool: asyncpg.Pool,
+    *,
+    created_run_ids: set[int],
+) -> None:
+    """Сохраняет неполное coverage как completed."""
+
+    metadata = build_metadata()
+    request_key = build_request_key(
+        test_name=(
+            "event_ranking_degraded_completion"
+        )
+    )
+
+    reservation = await reserve_test_run(
+        pool,
+        request_key=request_key,
+        created_run_ids=created_run_ids,
+    )
+
+    calculation = build_degraded_calculation()
+    diagnostics = build_degraded_diagnostics()
+    usage = build_usage()
+    cost_estimate = calculate_openai_cost(
+        usage,
+        get_model_pricing(
+            metadata.model_name
+            or "gpt-5.6-terra"
+        ),
+    )
+
+    result = (
+        await complete_reserved_event_ranking_run(
+            pool,
+            ranking_run_id=(
+                reservation.ranking_run_id
+            ),
+            request_key=request_key.value,
+            metadata=metadata,
+            candidate_news_ids=TEST_NEWS_IDS,
+            calculation=calculation,
+            usage=usage,
+            cost_estimate=cost_estimate,
+            coverage_diagnostics=diagnostics,
+        )
+    )
+
+    assert result.run_status == "completed"
+    assert result.already_completed is False
+    assert result.degraded is True
+    assert result.candidate_count == 5
+    assert result.processed_candidate_count == 4
+    assert result.missing_news_ids == (11,)
+    assert result.scored_count == 3
+    assert result.eligible_count == 3
+    assert result.combination_count == 1
+    assert len(result.persisted_events) == 3
+
+    async with pool.acquire() as connection:
+        run_record = await connection.fetchrow(
+            """
+            SELECT
+                run_status,
+                candidate_count,
+                scored_count,
+                eligible_count,
+                error_message,
+                parameters->>'degraded'
+                    AS degraded,
+                parameters->>'degraded_reason'
+                    AS degraded_reason,
+                parameters->>'original_candidate_count'
+                    AS original_candidate_count,
+                parameters->>'processed_candidate_count'
+                    AS processed_candidate_count,
+                parameters->>'missing_candidate_count'
+                    AS missing_candidate_count,
+                parameters->>'repair_attempted'
+                    AS repair_attempted,
+                parameters->>'repair_succeeded'
+                    AS repair_succeeded,
+                parameters->'processed_news_ids'
+                    AS processed_news_ids,
+                parameters->'missing_news_ids'
+                    AS missing_news_ids,
+                parameters->'coverage'
+                    AS coverage
+            FROM top3_news.ranking_runs
+            WHERE ranking_run_id = $1
+            """,
+            reservation.ranking_run_id,
+        )
+
+        persisted_news_ids = await connection.fetch(
+            """
+            SELECT news_id
+            FROM top3_news.ranking_event_members
+            WHERE ranking_run_id = $1
+            ORDER BY news_id
+            """,
+            reservation.ranking_run_id,
+        )
+
+        scored_news_ids = await connection.fetch(
+            """
+            SELECT news_id
+            FROM top3_news.news_scores
+            WHERE ranking_run_id = $1
+            ORDER BY news_id
+            """,
+            reservation.ranking_run_id,
+        )
+
+    if run_record is None:
+        raise AssertionError(
+            "Degraded ranking_run не найден."
+        )
+
+    processed_news_ids = decode_jsonb(
+        run_record["processed_news_ids"]
+    )
+    missing_news_ids = decode_jsonb(
+        run_record["missing_news_ids"]
+    )
+    coverage = decode_jsonb(
+        run_record["coverage"]
+    )
+
+    assert run_record["run_status"] == "completed"
+    assert run_record["candidate_count"] == 5
+    assert run_record["scored_count"] == 3
+    assert run_record["eligible_count"] == 3
+    assert run_record["error_message"] is None
+    assert run_record["degraded"] == "true"
+    assert run_record["degraded_reason"] == (
+        "incomplete_model_coverage_after_repair"
+    )
+    assert run_record[
+        "original_candidate_count"
+    ] == "5"
+    assert run_record[
+        "processed_candidate_count"
+    ] == "4"
+    assert run_record[
+        "missing_candidate_count"
+    ] == "1"
+    assert run_record["repair_attempted"] == "true"
+    assert run_record["repair_succeeded"] == "false"
+    assert processed_news_ids == [7, 8, 9, 10]
+    assert missing_news_ids == [11]
+    assert coverage["model_call_count"] == 2
+    assert coverage["repair_error_type"] == (
+        "ValueError"
+    )
+
+    assert tuple(
+        int(record["news_id"])
+        for record in persisted_news_ids
+    ) == (7, 8, 9, 10)
+    assert tuple(
+        int(record["news_id"])
+        for record in scored_news_ids
+    ) == (7, 9, 10)
+
+    repeated = (
+        await complete_reserved_event_ranking_run(
+            pool,
+            ranking_run_id=(
+                reservation.ranking_run_id
+            ),
+            request_key=request_key.value,
+            metadata=metadata,
+            candidate_news_ids=TEST_NEWS_IDS,
+            calculation=calculation,
+            usage=usage,
+            cost_estimate=cost_estimate,
+            coverage_diagnostics=diagnostics,
+        )
+    )
+
+    assert repeated.already_completed is True
+    assert repeated.degraded is True
+    assert repeated.processed_candidate_count == 4
+    assert repeated.missing_news_ids == (11,)
+
+    print()
+    print("Degraded event completion: OK")
+    print("run_status=completed")
+    print("degraded=true")
+    print("candidate_count=5")
+    print("processed_candidate_count=4")
+    print("missing_news_ids=11")
+    print("persisted_event_count=3")
+    print("generation_status_compatible=true")
 
 
 async def test_failed_run_blocking(
@@ -1217,6 +1513,11 @@ async def main() -> int:
 
     try:
         await test_successful_completion(
+            pool,
+            created_run_ids=created_run_ids,
+        )
+
+        await test_degraded_completion(
             pool,
             created_run_ids=created_run_ids,
         )
