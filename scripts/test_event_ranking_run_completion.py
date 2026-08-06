@@ -1163,6 +1163,9 @@ async def test_successful_completion(
             calculation=calculation,
             usage=usage,
             cost_estimate=cost_estimate,
+            coverage_diagnostics=(
+                build_verified_diagnostics()
+            ),
         )
     )
 
