@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.ranking.event_evaluator import (
+    EVENT_EVALUATOR_VERSION,
     MACRO_TOPICS,
     SOURCE_RELATIONS,
     EventAssessment,
@@ -440,7 +441,7 @@ def main() -> int:
 
     print(
         "event_evaluator_version="
-        "event_ranking_evaluator_v5"
+        f"{EVENT_EVALUATOR_VERSION}"
     )
     print(
         "openai_requests=not_performed"
