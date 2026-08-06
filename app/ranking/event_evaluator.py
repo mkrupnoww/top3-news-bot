@@ -12,11 +12,11 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v3"
+    "event_ranking_evaluator_v4"
 )
 
 EVENT_PROMPT_VERSION = (
-    "movie_news_event_ranking_prompt_v3"
+    "movie_news_event_ranking_prompt_v4"
 )
 
 MACRO_TOPICS = frozenset(
@@ -121,9 +121,7 @@ def _normalize_decimal(
     """Преобразует число в Decimal и проверяет диапазон."""
 
     try:
-        normalized_value = Decimal(
-            str(value)
-        )
+        normalized_value = Decimal(str(value))
     except (
         InvalidOperation,
         TypeError,
@@ -151,6 +149,40 @@ def _normalize_decimal(
     return normalized_value
 
 
+def _normalize_news_ids(
+    value: tuple[int, ...],
+    *,
+    field_name: str,
+    allow_empty: bool,
+) -> tuple[int, ...]:
+    """Проверяет упорядоченный набор news_id."""
+
+    if not isinstance(value, tuple):
+        raise TypeError(
+            f"{field_name} должен быть tuple."
+        )
+
+    if not allow_empty and not value:
+        raise ValueError(
+            f"{field_name} не может быть пустым."
+        )
+
+    normalized = tuple(
+        _normalize_positive_integer(
+            news_id,
+            field_name=f"{field_name} item",
+        )
+        for news_id in value
+    )
+
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(
+            f"{field_name} содержит повторяющиеся news_id."
+        )
+
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class EventMemberAssessment:
     """Роль одной публикации внутри инфоповода."""
@@ -166,31 +198,20 @@ class EventMemberAssessment:
     def __post_init__(self) -> None:
         """Проверяет согласованность роли источника."""
 
-        normalized_news_id = (
-            _normalize_positive_integer(
-                self.news_id,
-                field_name="news_id",
-            )
+        normalized_news_id = _normalize_positive_integer(
+            self.news_id,
+            field_name="news_id",
+        )
+        normalized_relation = _normalize_required_text(
+            self.source_relation,
+            field_name="source_relation",
+        )
+        normalized_reason = _normalize_required_text(
+            self.membership_reason,
+            field_name="membership_reason",
         )
 
-        normalized_relation = (
-            _normalize_required_text(
-                self.source_relation,
-                field_name="source_relation",
-            )
-        )
-
-        normalized_reason = (
-            _normalize_required_text(
-                self.membership_reason,
-                field_name="membership_reason",
-            )
-        )
-
-        if (
-            normalized_relation
-            not in SOURCE_RELATIONS
-        ):
+        if normalized_relation not in SOURCE_RELATIONS:
             raise ValueError(
                 "source_relation имеет "
                 "неподдерживаемое значение: "
@@ -198,10 +219,7 @@ class EventMemberAssessment:
             )
 
         for field_name, value in (
-            (
-                "is_representative",
-                self.is_representative,
-            ),
+            ("is_representative", self.is_representative),
             (
                 "is_independent_source",
                 self.is_independent_source,
@@ -221,10 +239,7 @@ class EventMemberAssessment:
                 "source_weight не может быть bool."
             )
 
-        if not isinstance(
-            self.source_weight,
-            int,
-        ):
+        if not isinstance(self.source_weight, int):
             raise TypeError(
                 "source_weight должен быть int."
             )
@@ -281,13 +296,11 @@ class EventMemberAssessment:
             "news_id",
             normalized_news_id,
         )
-
         object.__setattr__(
             self,
             "source_relation",
             normalized_relation,
         )
-
         object.__setattr__(
             self,
             "membership_reason",
@@ -323,27 +336,18 @@ class EventAssessment:
     def __post_init__(self) -> None:
         """Проверяет инфоповод и его участников."""
 
-        representative_news_id = (
-            _normalize_positive_integer(
-                self.representative_news_id,
-                field_name=(
-                    "representative_news_id"
-                ),
-            )
+        representative_news_id = _normalize_positive_integer(
+            self.representative_news_id,
+            field_name="representative_news_id",
         )
-
         event_title = _normalize_required_text(
             self.event_title,
             field_name="event_title",
         )
-
-        event_time_utc = (
-            _normalize_datetime_utc(
-                self.event_time_utc,
-                field_name="event_time_utc",
-            )
+        event_time_utc = _normalize_datetime_utc(
+            self.event_time_utc,
+            field_name="event_time_utc",
         )
-
         macro_topic = _normalize_required_text(
             self.macro_topic,
             field_name="macro_topic",
@@ -395,20 +399,14 @@ class EventAssessment:
             ),
         }
 
-        impact_reason = (
-            _normalize_required_text(
-                self.impact_reason,
-                field_name="impact_reason",
-            )
+        impact_reason = _normalize_required_text(
+            self.impact_reason,
+            field_name="impact_reason",
         )
-
-        hook_reason = (
-            _normalize_required_text(
-                self.hook_reason,
-                field_name="hook_reason",
-            )
+        hook_reason = _normalize_required_text(
+            self.hook_reason,
+            field_name="hook_reason",
         )
-
         q_reason = _normalize_required_text(
             self.q_reason,
             field_name="q_reason",
@@ -430,19 +428,13 @@ class EventAssessment:
             for member in self.members
         )
 
-        if (
-            len(set(member_news_ids))
-            != len(member_news_ids)
-        ):
+        if len(set(member_news_ids)) != len(member_news_ids):
             raise ValueError(
                 "members содержит повторяющиеся "
                 "news_id."
             )
 
-        if (
-            representative_news_id
-            not in member_news_ids
-        ):
+        if representative_news_id not in member_news_ids:
             raise ValueError(
                 "representative_news_id должен "
                 "входить в members."
@@ -475,28 +467,23 @@ class EventAssessment:
             "representative_news_id",
             representative_news_id,
         )
-
         object.__setattr__(
             self,
             "event_title",
             event_title,
         )
-
         object.__setattr__(
             self,
             "event_time_utc",
             event_time_utc,
         )
-
         object.__setattr__(
             self,
             "macro_topic",
             macro_topic,
         )
 
-        for field_name, value in (
-            normalized_scores.items()
-        ):
+        for field_name, value in normalized_scores.items():
             object.__setattr__(
                 self,
                 field_name,
@@ -508,13 +495,11 @@ class EventAssessment:
             "impact_reason",
             impact_reason,
         )
-
         object.__setattr__(
             self,
             "hook_reason",
             hook_reason,
         )
-
         object.__setattr__(
             self,
             "q_reason",
@@ -522,9 +507,7 @@ class EventAssessment:
         )
 
     @property
-    def member_news_ids(
-        self,
-    ) -> tuple[int, ...]:
+    def member_news_ids(self) -> tuple[int, ...]:
         """Возвращает news_id публикаций инфоповода."""
 
         return tuple(
@@ -533,9 +516,7 @@ class EventAssessment:
         )
 
     @property
-    def source_weight_sum(
-        self,
-    ) -> int:
+    def source_weight_sum(self) -> int:
         """Суммирует веса независимых источников."""
 
         return sum(
@@ -564,20 +545,199 @@ class EventRankingModelResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class EventRankingCoverageDiagnostics:
+    """Диагностика покрытия и единственного repair-запроса."""
+
+    expected_news_ids: tuple[int, ...]
+    processed_news_ids: tuple[int, ...]
+    initial_missing_news_ids: tuple[int, ...] = ()
+    missing_news_ids: tuple[int, ...] = ()
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    repair_error_type: str | None = None
+    repair_error_message: str | None = None
+    model_call_count: int = 1
+
+    def __post_init__(self) -> None:
+        """Проверяет диагностическую модель."""
+
+        expected = _normalize_news_ids(
+            self.expected_news_ids,
+            field_name="expected_news_ids",
+            allow_empty=False,
+        )
+        processed = _normalize_news_ids(
+            self.processed_news_ids,
+            field_name="processed_news_ids",
+            allow_empty=False,
+        )
+        initial_missing = _normalize_news_ids(
+            self.initial_missing_news_ids,
+            field_name="initial_missing_news_ids",
+            allow_empty=True,
+        )
+        missing = _normalize_news_ids(
+            self.missing_news_ids,
+            field_name="missing_news_ids",
+            allow_empty=True,
+        )
+
+        expected_set = set(expected)
+        processed_set = set(processed)
+        missing_set = set(missing)
+
+        if not processed_set.issubset(expected_set):
+            raise ValueError(
+                "processed_news_ids содержит "
+                "неожиданные news_id."
+            )
+
+        if not set(initial_missing).issubset(expected_set):
+            raise ValueError(
+                "initial_missing_news_ids содержит "
+                "неожиданные news_id."
+            )
+
+        if not missing_set.issubset(expected_set):
+            raise ValueError(
+                "missing_news_ids содержит "
+                "неожиданные news_id."
+            )
+
+        if processed_set & missing_set:
+            raise ValueError(
+                "processed_news_ids и missing_news_ids "
+                "не должны пересекаться."
+            )
+
+        if processed_set | missing_set != expected_set:
+            raise ValueError(
+                "processed_news_ids и missing_news_ids "
+                "не образуют полный expected_news_ids."
+            )
+
+        for field_name, value in (
+            ("repair_attempted", self.repair_attempted),
+            ("repair_succeeded", self.repair_succeeded),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"{field_name} должен быть bool."
+                )
+
+        if self.repair_succeeded and not self.repair_attempted:
+            raise ValueError(
+                "repair_succeeded требует "
+                "repair_attempted=true."
+            )
+
+        if self.repair_succeeded and missing:
+            raise ValueError(
+                "Успешный repair не может оставлять "
+                "missing_news_ids."
+            )
+
+        if initial_missing and not self.repair_attempted:
+            raise ValueError(
+                "Пропуск в первом ответе требует "
+                "repair_attempted=true."
+            )
+
+        if not isinstance(self.model_call_count, int):
+            raise TypeError(
+                "model_call_count должен быть int."
+            )
+
+        if self.model_call_count not in {1, 2}:
+            raise ValueError(
+                "model_call_count должен быть 1 или 2."
+            )
+
+        if self.repair_attempted and self.model_call_count != 2:
+            raise ValueError(
+                "repair_attempted требует "
+                "model_call_count=2."
+            )
+
+        if not self.repair_attempted and self.model_call_count != 1:
+            raise ValueError(
+                "Без repair model_call_count должен быть 1."
+            )
+
+        normalized_error_type: str | None = None
+        normalized_error_message: str | None = None
+
+        if self.repair_error_type is not None:
+            normalized_error_type = _normalize_required_text(
+                self.repair_error_type,
+                field_name="repair_error_type",
+            )
+
+        if self.repair_error_message is not None:
+            normalized_error_message = _normalize_required_text(
+                self.repair_error_message,
+                field_name="repair_error_message",
+            )
+
+        object.__setattr__(
+            self,
+            "expected_news_ids",
+            expected,
+        )
+        object.__setattr__(
+            self,
+            "processed_news_ids",
+            processed,
+        )
+        object.__setattr__(
+            self,
+            "initial_missing_news_ids",
+            initial_missing,
+        )
+        object.__setattr__(
+            self,
+            "missing_news_ids",
+            missing,
+        )
+        object.__setattr__(
+            self,
+            "repair_error_type",
+            normalized_error_type,
+        )
+        object.__setattr__(
+            self,
+            "repair_error_message",
+            normalized_error_message,
+        )
+
+    @property
+    def degraded(self) -> bool:
+        """Показывает неполное итоговое покрытие."""
+
+        return bool(self.missing_news_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class EventRankingEvaluationResult:
-    """Проверенные инфоповоды и ответ модели."""
+    """Проверенные инфоповоды и ответы модели."""
 
     events: tuple[
         EventAssessment,
         ...,
     ]
     model_response: EventRankingModelResponse
+    diagnostics: (
+        EventRankingCoverageDiagnostics
+        | None
+    ) = None
+    model_responses: tuple[
+        EventRankingModelResponse,
+        ...,
+    ] = ()
 
 
 @runtime_checkable
-class StructuredEventRankingClient(
-    Protocol
-):
+class StructuredEventRankingClient(Protocol):
     """Транспортный интерфейс event-level модели."""
 
     async def create_response(
@@ -590,15 +750,11 @@ class StructuredEventRankingClient(
 
 
 @runtime_checkable
-class EventRankingEvaluator(
-    Protocol
-):
+class EventRankingEvaluator(Protocol):
     """Интерфейс оценщика полной формулы v2."""
 
     @property
-    def metadata(
-        self,
-    ) -> RankingEvaluatorMetadata:
+    def metadata(self) -> RankingEvaluatorMetadata:
         """Возвращает метаданные оценщика."""
 
         ...

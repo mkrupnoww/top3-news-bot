@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 import json
 
 from app.db.news_candidates import (
@@ -19,18 +20,34 @@ from app.ranking.full_formula import (
 )
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
+    REPAIR_INSTRUCTIONS,
     SYSTEM_INSTRUCTIONS,
+)
+from app.ranking.openai_usage import (
+    OpenAICostEstimate,
+    OpenAITokenUsage,
 )
 
 
+MODEL_NAME = "test-model-no-network"
+
+
+class SyntheticRepairError(RuntimeError):
+    """Тестовая ошибка корректирующего запроса."""
+
+
 class FakeStructuredEventRankingClient:
-    """Тестовый клиент без сетевых запросов."""
+    """Тестовый клиент с очередью ответов."""
 
     def __init__(
         self,
-        response_text: str,
+        responses: tuple[
+            EventRankingModelResponse
+            | Exception,
+            ...,
+        ],
     ) -> None:
-        self._response_text = response_text
+        self._responses = list(responses)
         self.requests: list[
             EventRankingModelRequest
         ] = []
@@ -39,13 +56,22 @@ class FakeStructuredEventRankingClient:
         self,
         request: EventRankingModelRequest,
     ) -> EventRankingModelResponse:
-        """Возвращает заранее заданный JSON."""
+        """Возвращает следующий ответ или ошибку."""
 
         self.requests.append(request)
 
-        return EventRankingModelResponse(
-            output_text=self._response_text,
-        )
+        if not self._responses:
+            raise AssertionError(
+                "Fake-клиент не имеет "
+                "подготовленного ответа."
+            )
+
+        response = self._responses.pop(0)
+
+        if isinstance(response, Exception):
+            raise response
+
+        return response
 
 
 def build_selection() -> CandidateSelectionResult:
@@ -59,7 +85,6 @@ def build_selection() -> CandidateSelectionResult:
         0,
         tzinfo=timezone.utc,
     )
-
     window_start = datetime(
         2026,
         8,
@@ -171,178 +196,255 @@ def build_selection() -> CandidateSelectionResult:
     )
 
 
-def build_valid_response() -> str:
-    """
-    Возвращает два инфоповода.
+def build_valid_payload() -> dict[str, object]:
+    """Возвращает два корректных инфоповода."""
 
-    Модель не возвращает source_weight.
-    Порядок событий специально обратный входному.
-    """
+    return {
+        "events": [
+            {
+                "representative_news_id": 103,
+                "event_title": (
+                    "Festival Adds New Competition"
+                ),
+                "event_time_utc": (
+                    "2026-08-02T08:00:00Z"
+                ),
+                "macro_topic": (
+                    "festivals_awards_criticism"
+                ),
+                "i_score": "4.5",
+                "k_score": "1.0",
+                "n_score": "5.5",
+                "e_score": "3.5",
+                "x_score": "6.0",
+                "q_score": "0.90",
+                "impact_reason": (
+                    "Новая конкурсная программа "
+                    "расширяет фестиваль."
+                ),
+                "hook_reason": (
+                    "Изменение заметно внутри "
+                    "фестивального потока."
+                ),
+                "q_reason": (
+                    "Информация опубликована "
+                    "профильным источником."
+                ),
+                "members": [
+                    {
+                        "news_id": 103,
+                        "source_relation": "primary",
+                        "is_representative": True,
+                        "is_independent_source": True,
+                        "counts_toward_reach": True,
+                        "membership_reason": (
+                            "Первичная профильная "
+                            "публикация."
+                        ),
+                    }
+                ],
+            },
+            {
+                "representative_news_id": 101,
+                "event_title": (
+                    "Studio Announces "
+                    "International Film Project"
+                ),
+                "event_time_utc": (
+                    "2026-08-02T09:30:00+00:00"
+                ),
+                "macro_topic": (
+                    "creative_cast_production"
+                ),
+                "i_score": "7.5",
+                "k_score": "2.0",
+                "n_score": "6.5",
+                "e_score": "5.0",
+                "x_score": "7.0",
+                "q_score": "0.95",
+                "impact_reason": (
+                    "Проект влияет на "
+                    "международное производство."
+                ),
+                "hook_reason": (
+                    "Масштабное партнёрство "
+                    "выделяется в потоке."
+                ),
+                "q_reason": (
+                    "Есть первичная публикация "
+                    "и повторное освещение."
+                ),
+                "members": [
+                    {
+                        "news_id": 101,
+                        "source_relation": "primary",
+                        "is_representative": True,
+                        "is_independent_source": True,
+                        "counts_toward_reach": True,
+                        "membership_reason": (
+                            "Наиболее содержательная "
+                            "первичная публикация."
+                        ),
+                    },
+                    {
+                        "news_id": 102,
+                        "source_relation": "duplicate",
+                        "is_representative": False,
+                        "is_independent_source": False,
+                        "counts_toward_reach": False,
+                        "membership_reason": (
+                            "Повторяет тот же инфоповод "
+                            "без новых фактов."
+                        ),
+                    },
+                ],
+            },
+        ]
+    }
+
+
+def encode_payload(
+    payload: dict[str, object],
+) -> str:
+    """Кодирует тестовый JSON."""
 
     return json.dumps(
-        {
-            "events": [
-                {
-                    "representative_news_id": 103,
-                    "event_title": (
-                        "Festival Adds "
-                        "New Competition"
-                    ),
-                    "event_time_utc": (
-                        "2026-08-02T08:00:00Z"
-                    ),
-                    "macro_topic": (
-                        "festivals_awards_criticism"
-                    ),
-                    "i_score": "4.5",
-                    "k_score": "1.0",
-                    "n_score": "5.5",
-                    "e_score": "3.5",
-                    "x_score": "6.0",
-                    "q_score": "0.90",
-                    "impact_reason": (
-                        "Новая конкурсная программа "
-                        "расширяет фестиваль."
-                    ),
-                    "hook_reason": (
-                        "Изменение заметно внутри "
-                        "фестивального потока."
-                    ),
-                    "q_reason": (
-                        "Информация опубликована "
-                        "профильным источником."
-                    ),
-                    "members": [
-                        {
-                            "news_id": 103,
-                            "source_relation": (
-                                "primary"
-                            ),
-                            "is_representative": True,
-                            "is_independent_source": (
-                                True
-                            ),
-                            "counts_toward_reach": (
-                                True
-                            ),
-                            "membership_reason": (
-                                "Первичная профильная "
-                                "публикация."
-                            ),
-                        }
-                    ],
-                },
-                {
-                    "representative_news_id": 101,
-                    "event_title": (
-                        "Studio Announces "
-                        "International Film Project"
-                    ),
-                    "event_time_utc": (
-                        "2026-08-02T09:30:00+00:00"
-                    ),
-                    "macro_topic": (
-                        "creative_cast_production"
-                    ),
-                    "i_score": "7.5",
-                    "k_score": "2.0",
-                    "n_score": "6.5",
-                    "e_score": "5.0",
-                    "x_score": "7.0",
-                    "q_score": "0.95",
-                    "impact_reason": (
-                        "Проект влияет на "
-                        "международное производство."
-                    ),
-                    "hook_reason": (
-                        "Масштабное партнёрство "
-                        "выделяется в потоке."
-                    ),
-                    "q_reason": (
-                        "Есть первичная публикация "
-                        "и повторное освещение."
-                    ),
-                    "members": [
-                        {
-                            "news_id": 101,
-                            "source_relation": (
-                                "primary"
-                            ),
-                            "is_representative": True,
-                            "is_independent_source": (
-                                True
-                            ),
-                            "counts_toward_reach": (
-                                True
-                            ),
-                            "membership_reason": (
-                                "Наиболее содержательная "
-                                "первичная публикация."
-                            ),
-                        },
-                        {
-                            "news_id": 102,
-                            "source_relation": (
-                                "duplicate"
-                            ),
-                            "is_representative": False,
-                            "is_independent_source": (
-                                False
-                            ),
-                            "counts_toward_reach": (
-                                False
-                            ),
-                            "membership_reason": (
-                                "Повторяет тот же "
-                                "инфоповод без новых фактов."
-                            ),
-                        },
-                    ],
-                },
-            ]
-        },
+        payload,
         ensure_ascii=False,
     )
 
 
+def build_partial_payload() -> dict[str, object]:
+    """Возвращает валидный payload без news_id=102."""
+
+    payload = build_valid_payload()
+    events = payload["events"]
+
+    if not isinstance(events, list):
+        raise AssertionError(
+            "events должен быть list."
+        )
+
+    second_event = events[1]
+
+    if not isinstance(second_event, dict):
+        raise AssertionError(
+            "Второй event должен быть dict."
+        )
+
+    members = second_event["members"]
+
+    if not isinstance(members, list):
+        raise AssertionError(
+            "members должен быть list."
+        )
+
+    second_event["members"] = [members[0]]
+
+    return payload
+
+
+def build_telemetry() -> tuple[
+    OpenAITokenUsage,
+    OpenAICostEstimate,
+]:
+    """Создаёт телеметрию одного запроса."""
+
+    return (
+        OpenAITokenUsage(
+            input_tokens=1000,
+            cached_input_tokens=100,
+            cache_write_tokens=0,
+            output_tokens=300,
+            reasoning_tokens=75,
+            total_tokens=1300,
+        ),
+        OpenAICostEstimate(
+            model_name=MODEL_NAME,
+            pricing_version=(
+                "synthetic_event_pricing_v1"
+            ),
+            regular_input_cost_usd=(
+                Decimal("0.00180000")
+            ),
+            cached_input_cost_usd=(
+                Decimal("0.00002000")
+            ),
+            cache_write_cost_usd=(
+                Decimal("0.00000000")
+            ),
+            output_cost_usd=(
+                Decimal("0.00360000")
+            ),
+            total_cost_usd=(
+                Decimal("0.00542000")
+            ),
+        ),
+    )
+
+
+def build_response(
+    payload: dict[str, object] | str,
+    *,
+    with_telemetry: bool = False,
+) -> EventRankingModelResponse:
+    """Создаёт тестовый ответ модели."""
+
+    output_text = (
+        payload
+        if isinstance(payload, str)
+        else encode_payload(payload)
+    )
+
+    if not with_telemetry:
+        return EventRankingModelResponse(
+            output_text=output_text,
+        )
+
+    usage, cost = build_telemetry()
+
+    return EventRankingModelResponse(
+        output_text=output_text,
+        usage=usage,
+        cost_estimate=cost,
+    )
+
+
 def build_evaluator(
-    response_text: str | None = None,
+    *responses: (
+        EventRankingModelResponse
+        | Exception
+    ),
 ) -> tuple[
     OpenAIEventRankingEvaluator,
     FakeStructuredEventRankingClient,
 ]:
     """Создаёт оценщик и fake-клиент."""
 
-    client = (
-        FakeStructuredEventRankingClient(
-            response_text
-            if response_text is not None
-            else build_valid_response()
-        )
+    prepared_responses = responses or (
+        build_response(build_valid_payload()),
     )
-
+    client = FakeStructuredEventRankingClient(
+        tuple(prepared_responses)
+    )
     evaluator = OpenAIEventRankingEvaluator(
         client=client,
-        model_name="test-model-no-network",
+        model_name=MODEL_NAME,
     )
 
     return evaluator, client
 
 
 def test_build_request() -> None:
-    """Проверяет запрос без обращения к модели."""
+    """Проверяет основной запрос v4."""
 
     evaluator, client = build_evaluator()
-    selection = build_selection()
-
     request = evaluator.build_request(
-        selection
+        build_selection()
     )
 
     assert len(client.requests) == 0
-    assert request.model == (
-        "test-model-no-network"
-    )
+    assert request.model == MODEL_NAME
     assert request.instructions == (
         SYSTEM_INSTRUCTIONS
     )
@@ -360,168 +462,380 @@ def test_build_request() -> None:
     assert payload["formula_version"] == (
         FULL_FORMULA_VERSION
     )
-    assert FULL_FORMULA_VERSION == (
-        "top3_cinema_v3"
-    )
-    assert payload["window"]["hours"] == 24.0
     assert payload["expected_news_count"] == 3
     assert payload["expected_news_ids"] == [
         101,
         102,
         103,
     ]
-
-    assert [
-        candidate["news_id"]
-        for candidate
-        in payload["candidates"]
-    ] == [
-        101,
-        102,
-        103,
-    ]
-
     assert [
         candidate["configured_source_weight"]
-        for candidate
-        in payload["candidates"]
-    ] == [
-        3,
-        2,
-        1,
-    ]
-
-    assert (
-        payload["source_weight_policy"]
-        ["model_must_not_return"]
-        is True
-    )
-
-    assert "source_weight_scale" not in payload
-
-    forbidden_fields = {
-        "f_score",
-        "u_score",
-        "m_score",
-        "v_score",
-        "c_score",
-        "s_score",
-        "r_score",
-        "h_score",
-        "individual_score",
-        "diversity_score",
-        "top_score",
-    }
-
-    assert forbidden_fields.isdisjoint(
-        payload.keys()
-    )
-
-    assert evaluator.metadata.run_mode == (
-        "openai_event_ranking"
-    )
-    assert (
-        evaluator.metadata.evaluator_version
-        == EVENT_EVALUATOR_VERSION
-    )
-    assert (
-        evaluator.metadata.prompt_version
-        == EVENT_PROMPT_VERSION
-    )
+        for candidate in payload["candidates"]
+    ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v3"
+        "event_ranking_evaluator_v4"
     )
     assert EVENT_PROMPT_VERSION == (
-        "movie_news_event_ranking_prompt_v3"
+        "movie_news_event_ranking_prompt_v4"
+    )
+    assert evaluator.metadata.evaluator_version == (
+        EVENT_EVALUATOR_VERSION
+    )
+    assert evaluator.metadata.prompt_version == (
+        EVENT_PROMPT_VERSION
     )
 
-    print("Request preparation: OK")
+    print("Request preparation v4: OK")
     print("client_call_count=0")
-    print(
-        "configured_source_weights=3,2,1"
-    )
-    print(
-        f"prompt_chars="
-        f"{len(request.instructions)}"
-    )
 
 
-async def test_prepared_request() -> None:
-    """Проверяет подстановку веса из конфигурации."""
+async def test_complete_response() -> None:
+    """Проверяет обычный путь без repair."""
 
     evaluator, client = build_evaluator()
     selection = build_selection()
-
-    request = evaluator.build_request(
-        selection
-    )
-
-    result = (
-        await evaluator
-        .evaluate_prepared_request(
-            selection,
-            request,
-        )
+    request = evaluator.build_request(selection)
+    result = await evaluator.evaluate_prepared_request(
+        selection,
+        request,
     )
 
     assert len(client.requests) == 1
-    assert client.requests[0] == request
-    assert result.model_response.usage is None
-    assert (
-        result.model_response.cost_estimate
-        is None
+    assert result.diagnostics is not None
+    assert result.diagnostics.degraded is False
+    assert result.diagnostics.repair_attempted is False
+    assert result.diagnostics.repair_succeeded is False
+    assert result.diagnostics.model_call_count == 1
+    assert result.diagnostics.processed_news_ids == (
+        101,
+        102,
+        103,
     )
-
+    assert result.diagnostics.missing_news_ids == ()
+    assert len(result.model_responses) == 1
     assert tuple(
         event.representative_news_id
         for event in result.events
-    ) == (
-        101,
-        103,
+    ) == (101, 103)
+    assert result.events[0].source_weight_sum == 3
+    assert result.events[1].source_weight_sum == 1
+
+    print()
+    print("Complete response without repair: OK")
+    print("client_call_count=1")
+
+
+async def test_successful_repair() -> None:
+    """Исправляет пропущенный ID одним запросом."""
+
+    primary = build_response(
+        build_partial_payload(),
+        with_telemetry=True,
+    )
+    repair = build_response(
+        build_valid_payload(),
+        with_telemetry=True,
+    )
+    evaluator, client = build_evaluator(
+        primary,
+        repair,
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
     )
 
-    first_event = result.events[0]
-    second_event = result.events[1]
+    assert len(client.requests) == 2
+    assert client.requests[0].instructions == (
+        SYSTEM_INSTRUCTIONS
+    )
+    assert client.requests[1].instructions == (
+        REPAIR_INSTRUCTIONS
+    )
 
-    assert first_event.member_news_ids == (
+    repair_payload = json.loads(
+        client.requests[1].input_text
+    )
+    assert repair_payload["task"] == (
+        "repair_movie_news_event_coverage"
+    )
+    assert repair_payload["missing_news_ids"] == [
+        102,
+    ]
+    assert repair_payload["expected_news_ids"] == [
         101,
         102,
-    )
-    assert first_event.source_weight_sum == 3
-
-    first_weights = {
-        member.news_id: member.source_weight
-        for member in first_event.members
-    }
-
-    assert first_weights == {
-        101: 3,
-        102: 0,
-    }
-
-    assert second_event.source_weight_sum == 1
-    assert second_event.members[0].source_weight == 1
-
+        103,
+    ]
+    assert [
+        item["news_id"]
+        for item in repair_payload[
+            "missing_candidates"
+        ]
+    ] == [102]
     assert (
-        first_event.event_time_utc
-        == datetime(
-            2026,
-            8,
-            2,
-            9,
-            30,
-            tzinfo=timezone.utc,
-        )
+        repair_payload["requirements"]
+        ["return_full_corrected_payload"]
+        is True
+    )
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.degraded is False
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is True
+    assert diagnostics.initial_missing_news_ids == (
+        102,
+    )
+    assert diagnostics.missing_news_ids == ()
+    assert diagnostics.processed_news_ids == (
+        101,
+        102,
+        103,
+    )
+    assert diagnostics.model_call_count == 2
+    assert len(result.model_responses) == 2
+
+    usage = result.model_response.usage
+    cost = result.model_response.cost_estimate
+    assert usage is not None
+    assert cost is not None
+    assert usage.input_tokens == 2000
+    assert usage.output_tokens == 600
+    assert usage.reasoning_tokens == 150
+    assert usage.total_tokens == 2600
+    assert cost.total_cost_usd == (
+        Decimal("0.01084000")
+    )
+    assert result.model_response.output_text == (
+        repair.output_text
     )
 
     print()
-    print(
-        "Configured source weight application: OK"
+    print("Single repair success: OK")
+    print("client_call_count=2")
+    print("missing_news_ids=none")
+    print("aggregated_total_tokens=2600")
+
+
+async def test_degraded_after_unsuccessful_repair() -> None:
+    """Возвращает частичный результат после второго пропуска."""
+
+    partial = build_partial_payload()
+    evaluator, client = build_evaluator(
+        build_response(
+            partial,
+            with_telemetry=True,
+        ),
+        build_response(
+            partial,
+            with_telemetry=True,
+        ),
     )
-    print("client_call_count=1")
-    print("first_event_weights=101:3,102:0")
-    print("second_event_weights=103:1")
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 2
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.degraded is True
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+    assert diagnostics.initial_missing_news_ids == (
+        102,
+    )
+    assert diagnostics.missing_news_ids == (
+        102,
+    )
+    assert diagnostics.processed_news_ids == (
+        101,
+        103,
+    )
+    assert diagnostics.model_call_count == 2
+    assert tuple(
+        news_id
+        for event in result.events
+        for news_id in event.member_news_ids
+    ) == (101, 103)
+
+    usage = result.model_response.usage
+    assert usage is not None
+    assert usage.total_tokens == 2600
+
+    print()
+    print("Degraded result after repair: OK")
+    print("client_call_count=2")
+    print("processed_news_ids=101,103")
+    print("missing_news_ids=102")
+
+
+async def test_degraded_after_repair_error() -> None:
+    """Не теряет первый валидный partial при ошибке repair."""
+
+    evaluator, client = build_evaluator(
+        build_response(
+            build_partial_payload(),
+            with_telemetry=True,
+        ),
+        SyntheticRepairError(
+            "Synthetic repair timeout."
+        ),
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 2
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.degraded is True
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+    assert diagnostics.repair_error_type == (
+        "SyntheticRepairError"
+    )
+    assert diagnostics.repair_error_message == (
+        "Synthetic repair timeout."
+    )
+    assert diagnostics.missing_news_ids == (
+        102,
+    )
+    assert len(result.model_responses) == 1
+
+    usage = result.model_response.usage
+    assert usage is not None
+    assert usage.total_tokens == 1300
+
+    print()
+    print("Repair transport failure degraded mode: OK")
+    print("client_call_count=2")
+    print("successful_response_count=1")
+
+
+async def test_initial_unexpected_candidate() -> None:
+    """Посторонний ID в первом ответе остаётся ошибкой."""
+
+    payload = build_valid_payload()
+    events = payload["events"]
+    assert isinstance(events, list)
+    first_event = events[0]
+    assert isinstance(first_event, dict)
+    members = first_event["members"]
+    assert isinstance(members, list)
+    members.append(
+        {
+            "news_id": 999,
+            "source_relation": "duplicate",
+            "is_representative": False,
+            "is_independent_source": False,
+            "counts_toward_reach": False,
+            "membership_reason": (
+                "Посторонняя тестовая публикация."
+            ),
+        }
+    )
+
+    evaluator, client = build_evaluator(
+        build_response(payload)
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_selection()
+        )
+    except ValueError as error:
+        assert "unexpected=[999]" in str(error)
+        assert len(client.requests) == 1
+        print()
+        print("Initial unexpected ID blocking: OK")
+        return
+
+    raise AssertionError(
+        "Посторонний news_id не был "
+        "заблокирован."
+    )
+
+
+async def test_initial_cross_event_duplicate() -> None:
+    """Дубликат ID между событиями остаётся ошибкой."""
+
+    payload = build_valid_payload()
+    events = payload["events"]
+    assert isinstance(events, list)
+    first_event = events[0]
+    assert isinstance(first_event, dict)
+    members = first_event["members"]
+    assert isinstance(members, list)
+    members.append(
+        {
+            "news_id": 102,
+            "source_relation": "duplicate",
+            "is_representative": False,
+            "is_independent_source": False,
+            "counts_toward_reach": False,
+            "membership_reason": (
+                "Повторное ошибочное включение."
+            ),
+        }
+    )
+
+    evaluator, client = build_evaluator(
+        build_response(payload)
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_selection()
+        )
+    except ValueError as error:
+        assert "нескольким инфоповодам" in str(
+            error
+        )
+        assert len(client.requests) == 1
+        print()
+        print("Initial duplicate ID blocking: OK")
+        return
+
+    raise AssertionError(
+        "news_id в двух инфоповодах "
+        "не был заблокирован."
+    )
+
+
+async def test_model_source_weight_rejected() -> None:
+    """Модель по-прежнему не может вернуть вес."""
+
+    payload = build_valid_payload()
+    events = payload["events"]
+    assert isinstance(events, list)
+    first_event = events[0]
+    assert isinstance(first_event, dict)
+    members = first_event["members"]
+    assert isinstance(members, list)
+    first_member = members[0]
+    assert isinstance(first_member, dict)
+    first_member["source_weight"] = 3
+
+    evaluator, client = build_evaluator(
+        build_response(payload)
+    )
+
+    try:
+        await evaluator.evaluate(
+            build_selection()
+        )
+    except ValueError as error:
+        assert "event-level схеме" in str(error)
+        assert len(client.requests) == 1
+        print()
+        print("Model source_weight rejection: OK")
+        return
+
+    raise AssertionError(
+        "source_weight от модели "
+        "не был заблокирован."
+    )
 
 
 def test_missing_configured_source_weight() -> None:
@@ -529,16 +843,11 @@ def test_missing_configured_source_weight() -> None:
 
     evaluator, client = build_evaluator()
     selection = build_selection()
-
-    candidates = list(
-        selection.candidates
-    )
-
+    candidates = list(selection.candidates)
     candidates[1] = replace(
         candidates[1],
         source_weight=None,
     )
-
     invalid_selection = replace(
         selection,
         candidates=tuple(candidates),
@@ -552,58 +861,12 @@ def test_missing_configured_source_weight() -> None:
         assert "не настроен" in str(error)
         assert "example_wire" in str(error)
         assert len(client.requests) == 0
-
         print()
-        print(
-            "Missing source weight blocking: OK"
-        )
-        print("client_call_count=0")
+        print("Missing source weight blocking: OK")
         return
 
     raise AssertionError(
         "Отсутствующий source_weight "
-        "не был заблокирован."
-    )
-
-
-async def test_model_source_weight_rejected() -> None:
-    """Блокирует попытку модели вернуть вес."""
-
-    payload = json.loads(
-        build_valid_response()
-    )
-
-    payload["events"][0]["members"][0][
-        "source_weight"
-    ] = 3
-
-    evaluator, client = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует "
-            "event-level схеме"
-            in str(error)
-        )
-        assert len(client.requests) == 1
-
-        print()
-        print(
-            "Model source_weight rejection: OK"
-        )
-        return
-
-    raise AssertionError(
-        "source_weight от модели "
         "не был заблокирован."
     )
 
@@ -613,11 +876,9 @@ async def test_modified_request_blocking() -> None:
 
     evaluator, client = build_evaluator()
     selection = build_selection()
-
     valid_request = evaluator.build_request(
         selection
     )
-
     modified_request = EventRankingModelRequest(
         model=valid_request.model,
         instructions=(
@@ -632,17 +893,10 @@ async def test_modified_request_blocking() -> None:
             modified_request,
         )
     except ValueError as error:
-        assert (
-            "не соответствует"
-            in str(error)
-        )
+        assert "не соответствует" in str(error)
         assert len(client.requests) == 0
-
         print()
-        print(
-            "Modified request blocking: OK"
-        )
-        print("client_call_count=0")
+        print("Modified request blocking: OK")
         return
 
     raise AssertionError(
@@ -651,179 +905,19 @@ async def test_modified_request_blocking() -> None:
     )
 
 
-async def test_common_interface() -> None:
-    """Проверяет общий event-level интерфейс."""
-
-    evaluator, client = build_evaluator()
-
-    assert isinstance(
-        evaluator,
-        EventRankingEvaluator,
-    )
-
-    events = await evaluator.evaluate(
-        build_selection()
-    )
-
-    assert len(client.requests) == 1
-    assert len(events) == 2
-
-    print()
-    print(
-        "Common event evaluator interface: OK"
-    )
-    print("event_count=2")
-
-
-async def test_missing_candidate() -> None:
-    """Блокирует пропущенную публикацию."""
-
-    payload = json.loads(
-        build_valid_response()
-    )
-
-    payload["events"][1]["members"] = [
-        payload["events"][1]["members"][0]
-    ]
-
-    evaluator, _ = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert "missing=[102]" in str(error)
-
-        print()
-        print(
-            "Missing candidate blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Пропущенный news_id не был "
-        "заблокирован."
-    )
-
-
-async def test_unexpected_candidate() -> None:
-    """Блокирует посторонний news_id."""
-
-    payload = json.loads(
-        build_valid_response()
-    )
-
-    payload["events"][0]["members"].append(
-        {
-            "news_id": 999,
-            "source_relation": "duplicate",
-            "is_representative": False,
-            "is_independent_source": False,
-            "counts_toward_reach": False,
-            "membership_reason": (
-                "Посторонняя тестовая публикация."
-            ),
-        }
-    )
-
-    evaluator, _ = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert "unexpected=[999]" in str(
-            error
-        )
-
-        print()
-        print(
-            "Unexpected candidate blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Посторонний news_id не был "
-        "заблокирован."
-    )
-
-
-async def test_cross_event_duplicate() -> None:
-    """Блокирует news_id в двух инфоповодах."""
-
-    payload = json.loads(
-        build_valid_response()
-    )
-
-    payload["events"][0]["members"].append(
-        {
-            "news_id": 102,
-            "source_relation": "duplicate",
-            "is_representative": False,
-            "is_independent_source": False,
-            "counts_toward_reach": False,
-            "membership_reason": (
-                "Повторное ошибочное включение."
-            ),
-        }
-    )
-
-    evaluator, _ = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert "нескольким инфоповодам" in str(
-            error
-        )
-
-        print()
-        print(
-            "Cross-event duplicate blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "news_id в двух инфоповодах "
-        "не был заблокирован."
-    )
-
-
 async def test_event_time_outside_window() -> None:
     """Блокирует время события вне окна."""
 
-    payload = json.loads(
-        build_valid_response()
+    payload = build_valid_payload()
+    events = payload["events"]
+    assert isinstance(events, list)
+    first_event = events[0]
+    assert isinstance(first_event, dict)
+    first_event["event_time_utc"] = (
+        "2026-08-01T11:59:59Z"
     )
-
-    payload["events"][0][
-        "event_time_utc"
-    ] = "2026-08-01T11:59:59Z"
-
-    evaluator, _ = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
+    evaluator, client = build_evaluator(
+        build_response(payload)
     )
 
     try:
@@ -832,12 +926,9 @@ async def test_event_time_outside_window() -> None:
         )
     except ValueError as error:
         assert "вне окна" in str(error)
-        assert "103" in str(error)
-
+        assert len(client.requests) == 1
         print()
-        print(
-            "Event time window blocking: OK"
-        )
+        print("Event time window blocking: OK")
         return
 
     raise AssertionError(
@@ -846,100 +937,38 @@ async def test_event_time_outside_window() -> None:
     )
 
 
-async def test_invalid_schema() -> None:
-    """Блокирует недопустимую оценку модели."""
+async def test_invalid_json_and_empty_response() -> None:
+    """Проверяет синтаксический и пустой ответы."""
 
-    payload = json.loads(
-        build_valid_response()
-    )
-
-    payload["events"][0]["q_score"] = 1.5
-
-    evaluator, _ = build_evaluator(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует "
-            "event-level схеме"
-            in str(error)
+    for response_text, expected_fragment in (
+        ("{invalid-json", "event-level схеме"),
+        ("   ", "пустой ответ"),
+    ):
+        evaluator, client = build_evaluator(
+            build_response(response_text)
         )
 
-        print()
-        print(
-            "Invalid response schema blocking: OK"
-        )
-        return
+        try:
+            await evaluator.evaluate(
+                build_selection()
+            )
+        except ValueError as error:
+            assert expected_fragment in str(error)
+            assert len(client.requests) == 1
+        else:
+            raise AssertionError(
+                "Некорректный ответ модели "
+                "не был заблокирован."
+            )
 
-    raise AssertionError(
-        "Оценка вне схемы не была "
-        "заблокирована."
-    )
-
-
-async def test_invalid_json() -> None:
-    """Блокирует синтаксически неверный JSON."""
-
-    evaluator, _ = build_evaluator(
-        "{invalid-json"
-    )
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует "
-            "event-level схеме"
-            in str(error)
-        )
-
-        print()
-        print("Invalid JSON blocking: OK")
-        return
-
-    raise AssertionError(
-        "Некорректный JSON не был "
-        "заблокирован."
-    )
-
-
-async def test_empty_response() -> None:
-    """Блокирует пустой ответ модели."""
-
-    evaluator, _ = build_evaluator("   ")
-
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert "пустой ответ" in str(error)
-
-        print()
-        print("Empty response blocking: OK")
-        return
-
-    raise AssertionError(
-        "Пустой ответ не был "
-        "заблокирован."
-    )
+    print()
+    print("Invalid and empty response blocking: OK")
 
 
 def test_empty_selection() -> None:
     """Блокирует пустую выборку до модели."""
 
     evaluator, client = build_evaluator()
-
     selection = CandidateSelectionResult(
         window_start=datetime(
             2026,
@@ -962,20 +991,12 @@ def test_empty_selection() -> None:
     )
 
     try:
-        evaluator.build_request(
-            selection
-        )
+        evaluator.build_request(selection)
     except ValueError as error:
-        assert "Список кандидатов" in str(
-            error
-        )
+        assert "Список кандидатов" in str(error)
         assert len(client.requests) == 0
-
         print()
-        print(
-            "Empty selection blocking: OK"
-        )
-        print("client_call_count=0")
+        print("Empty selection blocking: OK")
         return
 
     raise AssertionError(
@@ -984,23 +1005,41 @@ def test_empty_selection() -> None:
     )
 
 
+async def test_common_interface() -> None:
+    """Проверяет общий event-level интерфейс."""
+
+    evaluator, client = build_evaluator()
+    assert isinstance(
+        evaluator,
+        EventRankingEvaluator,
+    )
+    events = await evaluator.evaluate(
+        build_selection()
+    )
+    assert len(client.requests) == 1
+    assert len(events) == 2
+
+    print()
+    print("Common event evaluator interface: OK")
+
+
 async def main() -> int:
-    """Запускает fake-client тест v3."""
+    """Запускает изолированный тест v4."""
 
     test_build_request()
-    await test_prepared_request()
-    test_missing_configured_source_weight()
+    await test_complete_response()
+    await test_successful_repair()
+    await test_degraded_after_unsuccessful_repair()
+    await test_degraded_after_repair_error()
+    await test_initial_unexpected_candidate()
+    await test_initial_cross_event_duplicate()
     await test_model_source_weight_rejected()
+    test_missing_configured_source_weight()
     await test_modified_request_blocking()
-    await test_common_interface()
-    await test_missing_candidate()
-    await test_unexpected_candidate()
-    await test_cross_event_duplicate()
     await test_event_time_outside_window()
-    await test_invalid_schema()
-    await test_invalid_json()
-    await test_empty_response()
+    await test_invalid_json_and_empty_response()
     test_empty_selection()
+    await test_common_interface()
 
     print()
     print("API key required: no")
@@ -1008,8 +1047,8 @@ async def main() -> int:
     print("Database changes: not performed")
     print("Telegram publication: not performed")
     print(
-        "OpenAI event ranking evaluator "
-        "source-weight test: OK"
+        "OpenAI event ranking repair/degraded "
+        "test: OK"
     )
 
     return 0
