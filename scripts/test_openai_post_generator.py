@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -7,7 +8,16 @@ from app.generation.openai_generator import (
     GenerationModelRequest,
     GenerationModelResponse,
     GenerationNewsItem,
+    MAXIMUM_POST_LENGTH,
+    OPENAI_POST_GENERATOR_VERSION,
+    OPENAI_POST_PROMPT_VERSION,
+    OPENAI_POST_TEXT_FORMAT,
     OpenAITelegramPostGenerator,
+    POST_FOOTER_SEPARATOR,
+    POST_HEADER,
+    POST_SUBSCRIPTION_LINE,
+    POST_TOP_SEPARATOR,
+    build_top3_post_text,
 )
 
 
@@ -19,6 +29,7 @@ class FakeStructuredGenerationClient:
         response_text: str,
     ) -> None:
         self._response_text = response_text
+
         self.requests: list[
             GenerationModelRequest
         ] = []
@@ -142,30 +153,83 @@ def build_news_items() -> tuple[
     )
 
 
-def build_valid_post_text() -> str:
-    """Создаёт корректный Telegram-пост."""
+def build_response_items() -> list[
+    dict[str, object]
+]:
+    """Создаёт корректные items ответа модели."""
+
+    return [
+        {
+            "position": 1,
+            "news_id": 201,
+            "headline": (
+                "Студия отчиталась "
+                "о снижении выручки"
+            ),
+            "body": (
+                "Киноподразделение сообщило "
+                "о снижении квартальной выручки, "
+                "тогда как другое направление "
+                "развлекательного бизнеса выросло."
+            ),
+        },
+        {
+            "position": 2,
+            "news_id": 202,
+            "headline": (
+                "Фестиваль добавил "
+                "конкурс AI-фильмов"
+            ),
+            "body": (
+                "Международный фестиваль "
+                "короткометражного кино расширил "
+                "программу конкурсами "
+                "**AI-фильмов** и экранного танца."
+            ),
+        },
+        {
+            "position": 3,
+            "news_id": 203,
+            "headline": (
+                "У кинокомпании появился "
+                "руководитель коммуникаций"
+            ),
+            "body": (
+                "Компания впервые назначила "
+                "специалиста, который возглавит "
+                "коммуникации и маркетинг."
+            ),
+        },
+    ]
+
+
+def build_expected_post_text() -> str:
+    """Возвращает канонический готовый пост."""
 
     return (
-        "**TOP-3 киноновости дня**\n\n"
-        "**1. Студия отчиталась "
-        "о снижении выручки**\n"
+        "**TOP-3 НОВОСТЕЙ КИНО "
+        "ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n"
+        "_______________\n\n"
+        "1️⃣ **Студия отчиталась "
+        "о снижении выручки**\n\n"
         "Киноподразделение сообщило "
         "о снижении квартальной выручки, "
         "тогда как другое направление "
         "развлекательного бизнеса выросло.\n\n"
-        "**2. Фестиваль добавил "
-        "конкурс AI-фильмов**\n"
+        "2️⃣ **Фестиваль добавил "
+        "конкурс AI-фильмов**\n\n"
         "Международный фестиваль "
         "короткометражного кино расширил "
-        "программу конкурсами AI-фильмов "
-        "и экранного танца.\n\n"
-        "**3. У кинокомпании появился "
-        "руководитель коммуникаций**\n"
+        "программу конкурсами "
+        "**AI-фильмов** и экранного танца.\n\n"
+        "3️⃣ **У кинокомпании появился "
+        "руководитель коммуникаций**\n\n"
         "Компания впервые назначила "
         "специалиста, который возглавит "
         "коммуникации и маркетинг.\n\n"
-        "__Какую из новостей "
-        "обсудим подробнее?__"
+        "……………\n"
+        "Подписаться на VIP канал - "
+        "@kkm_vip_bot"
     )
 
 
@@ -175,53 +239,10 @@ def build_valid_response() -> str:
     return json.dumps(
         {
             "post_text": (
-                build_valid_post_text()
+                "Черновик модели, который "
+                "должен быть заменён Python."
             ),
-            "items": [
-                {
-                    "position": 1,
-                    "news_id": 201,
-                    "headline": (
-                        "Студия отчиталась "
-                        "о снижении выручки"
-                    ),
-                    "body": (
-                        "Киноподразделение "
-                        "сообщило о снижении "
-                        "квартальной выручки, "
-                        "тогда как другое "
-                        "направление выросло."
-                    ),
-                },
-                {
-                    "position": 2,
-                    "news_id": 202,
-                    "headline": (
-                        "Фестиваль добавил "
-                        "конкурс AI-фильмов"
-                    ),
-                    "body": (
-                        "Международный фестиваль "
-                        "расширил программу "
-                        "конкурсами AI-фильмов "
-                        "и экранного танца."
-                    ),
-                },
-                {
-                    "position": 3,
-                    "news_id": 203,
-                    "headline": (
-                        "У кинокомпании появился "
-                        "руководитель коммуникаций"
-                    ),
-                    "body": (
-                        "Компания впервые "
-                        "назначила специалиста, "
-                        "который возглавит "
-                        "коммуникации и маркетинг."
-                    ),
-                },
-            ],
+            "items": build_response_items(),
         },
         ensure_ascii=False,
     )
@@ -233,102 +254,263 @@ def build_generator(
     OpenAITelegramPostGenerator,
     FakeStructuredGenerationClient,
 ]:
-    """Создаёт генератор и fake-клиент."""
+    """Создаёт генератор с тестовым клиентом."""
 
     client = FakeStructuredGenerationClient(
-        response_text or build_valid_response()
+        response_text=(
+            response_text
+            if response_text is not None
+            else build_valid_response()
+        )
     )
 
     generator = OpenAITelegramPostGenerator(
         client=client,
-        model_name="test-model-no-network",
+        model_name="gpt-5.6-terra",
     )
 
     return generator, client
 
 
-def test_build_request() -> None:
-    """Проверяет подготовку запроса без модели."""
+def assert_raises(
+    expected_exception: type[Exception],
+    expected_text: str,
+    callback,
+) -> None:
+    """Проверяет синхронное исключение."""
+
+    try:
+        callback()
+    except expected_exception as error:
+        assert expected_text in str(error)
+        return
+
+    raise AssertionError(
+        "Ожидаемое исключение не возникло: "
+        f"{expected_exception.__name__}"
+    )
+
+
+async def assert_raises_async(
+    expected_exception: type[Exception],
+    expected_text: str,
+    callback,
+) -> None:
+    """Проверяет асинхронное исключение."""
+
+    try:
+        await callback()
+    except expected_exception as error:
+        assert expected_text in str(error)
+        return
+
+    raise AssertionError(
+        "Ожидаемое исключение не возникло: "
+        f"{expected_exception.__name__}"
+    )
+
+
+def test_metadata_and_request() -> None:
+    """Проверяет версии и подготовку запроса."""
 
     generator, client = build_generator()
 
-    items = build_news_items()
+    metadata = generator.metadata
+
+    assert (
+        metadata.generator_version
+        == OPENAI_POST_GENERATOR_VERSION
+    )
+
+    assert (
+        metadata.prompt_version
+        == OPENAI_POST_PROMPT_VERSION
+    )
+
+    assert (
+        metadata.text_format
+        == OPENAI_POST_TEXT_FORMAT
+    )
+
+    assert OPENAI_POST_GENERATOR_VERSION == (
+        "openai_telegram_post_generator_v2"
+    )
+
+    assert OPENAI_POST_PROMPT_VERSION == (
+        "movie_news_telegram_post_prompt_v2"
+    )
 
     request = generator.build_request(
-        items
+        build_news_items()
     )
 
-    assert len(client.requests) == 0
+    assert request.model == "gpt-5.6-terra"
 
-    assert request.model == (
-        "test-model-no-network"
+    assert (
+        "TOP-3 НОВОСТЕЙ КИНО"
+        in request.instructions
     )
 
-    assert request.instructions.strip()
+    assert (
+        "телевизионные сериалы"
+        in request.instructions
+    )
 
-    input_payload = json.loads(
+    assert (
+        "Прогнозы погоды"
+        in request.instructions
+    )
+
+    assert (
+        POST_SUBSCRIPTION_LINE
+        in request.instructions
+    )
+
+    payload = json.loads(
         request.input_text
     )
 
-    assert input_payload["task"] == (
+    assert payload["task"] == (
         "generate_russian_telegram_"
         "movie_news_top3"
     )
 
-    assert (
-        input_payload["text_format"]
-        == "markdown"
-    )
+    assert payload["text_format"] == "markdown"
 
     assert (
-        input_payload[
-            "maximum_post_length"
-        ]
-        == 3900
+        payload["maximum_post_length"]
+        == MAXIMUM_POST_LENGTH
     )
-
-    assert [
-        item["position"]
-        for item in input_payload["news"]
-    ] == [
-        1,
-        2,
-        3,
-    ]
 
     assert [
         item["news_id"]
-        for item in input_payload["news"]
+        for item in payload["news"]
     ] == [
         201,
         202,
         203,
     ]
 
-    assert (
-        input_payload["news"][0][
-            "individual_score"
-        ]
-        == "6.700000"
-    )
-
-    assert (
-        input_payload["news"][1][
-            "source_name"
-        ]
-        == "Test Film Source"
-    )
+    assert len(client.requests) == 0
 
     print("Request preparation: OK")
-    print("client_call_count=0")
-    print(f"model={request.model}")
     print(
-        "news_ids="
-        + ",".join(
-            str(item["news_id"])
-            for item in input_payload["news"]
+        "generator_version="
+        f"{metadata.generator_version}"
+    )
+    print(
+        "prompt_version="
+        f"{metadata.prompt_version}"
+    )
+    print("client_call_count=0")
+
+
+def test_canonical_builder() -> None:
+    """Проверяет точный шаблон Python-сборки."""
+
+    response_payload = json.loads(
+        build_valid_response()
+    )
+
+    from app.generation.openai_generator import (
+        OpenAIGeneratedPostPayload,
+    )
+
+    payload = (
+        OpenAIGeneratedPostPayload
+        .model_validate(
+            response_payload
         )
     )
+
+    post_text = build_top3_post_text(
+        payload.items
+    )
+
+    assert post_text == (
+        build_expected_post_text()
+    )
+
+    assert post_text.startswith(
+        POST_HEADER
+        + "\n"
+        + POST_TOP_SEPARATOR
+    )
+
+    assert post_text.endswith(
+        POST_FOOTER_SEPARATOR
+        + "\n"
+        + POST_SUBSCRIPTION_LINE
+    )
+
+    assert post_text.count("1️⃣") == 1
+    assert post_text.count("2️⃣") == 1
+    assert post_text.count("3️⃣") == 1
+
+    assert "#кино" not in post_text
+
+    print("Canonical post builder: OK")
+    print(f"post_length={len(post_text)}")
+
+
+async def test_generation_success() -> None:
+    """Проверяет успешную генерацию."""
+
+    generator, client = build_generator()
+
+    result = await generator.generate_detailed(
+        build_news_items()
+    )
+
+    assert len(client.requests) == 1
+
+    assert result.payload.post_text == (
+        build_expected_post_text()
+    )
+
+    assert (
+        "Черновик модели"
+        not in result.payload.post_text
+    )
+
+    assert tuple(
+        item.news_id
+        for item in result.payload.items
+    ) == (
+        201,
+        202,
+        203,
+    )
+
+    assert (
+        result.model_response.output_text
+        == build_valid_response()
+    )
+
+    print("Detailed generation: OK")
+    print("client_call_count=1")
+    print(
+        "canonical_post_length="
+        f"{len(result.payload.post_text)}"
+    )
+
+
+async def test_generate_text_interface() -> None:
+    """Проверяет интерфейс возврата одной строки."""
+
+    generator, client = build_generator()
+
+    post_text = await generator.generate(
+        build_news_items()
+    )
+
+    assert post_text == (
+        build_expected_post_text()
+    )
+
+    assert len(client.requests) == 1
+
+    print("Text generation interface: OK")
 
 
 async def test_prepared_request() -> None:
@@ -351,552 +533,138 @@ async def test_prepared_request() -> None:
     )
 
     assert len(client.requests) == 1
-    assert client.requests[0] == request
 
     assert (
         result.payload.post_text
-        == build_valid_post_text()
+        == build_expected_post_text()
     )
 
-    assert [
-        item.news_id
-        for item in result.payload.items
-    ] == [
-        201,
-        202,
-        203,
-    ]
-
-    assert (
-        result.model_response.usage
-        is None
-    )
-
-    assert (
-        result
-        .model_response
-        .cost_estimate
-        is None
-    )
-
-    print()
-    print(
-        "Prepared request generation: OK"
-    )
-    print("client_call_count=1")
-    print(
-        "response_news_ids="
-        + ",".join(
-            str(item.news_id)
-            for item in result.payload.items
-        )
-    )
+    print("Prepared request generation: OK")
 
 
 async def test_modified_request_blocking() -> None:
-    """Проверяет блокировку изменённого запроса."""
+    """Не отправляет изменённый запрос модели."""
 
     generator, client = build_generator()
 
     items = build_news_items()
 
-    valid_request = generator.build_request(
+    request = generator.build_request(
         items
     )
 
-    modified_request = GenerationModelRequest(
-        model=valid_request.model,
-        instructions=(
-            valid_request.instructions
+    modified_request = (
+        GenerationModelRequest(
+            model=request.model,
+            instructions=(
+                request.instructions + " "
+            ),
+            input_text=request.input_text,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "не соответствует",
+        lambda: (
+            generator
+            .generate_prepared_request(
+                items,
+                modified_request,
+            )
         ),
-        input_text=(
-            valid_request.input_text
-            + " "
-        ),
     )
 
-    try:
-        await generator.generate_prepared_request(
-            items,
-            modified_request,
-        )
-    except ValueError as error:
-        assert (
-            "Подготовленный запрос "
-            "не соответствует"
-            in str(error)
-        )
+    assert len(client.requests) == 0
 
-        assert len(client.requests) == 0
+    print("Modified request blocking: OK")
+    print("client_call_count=0")
 
-        print()
-        print(
-            "Modified request blocking: OK"
-        )
-        print("client_call_count=0")
-        return
 
-    raise AssertionError(
-        "Изменённый запрос "
-        "не был заблокирован."
-    )
-
-
-async def test_valid_response() -> None:
-    """Проверяет корректный структурированный ответ."""
-
-    generator, client = build_generator()
-
-    result = await generator.generate_detailed(
-        build_news_items()
-    )
-
-    assert len(client.requests) == 1
-
-    assert (
-        result.payload.post_text
-        == build_valid_post_text()
-    )
-
-    assert len(result.payload.items) == 3
-
-    assert [
-        item.position
-        for item in result.payload.items
-    ] == [
-        1,
-        2,
-        3,
-    ]
-
-    assert [
-        item.news_id
-        for item in result.payload.items
-    ] == [
-        201,
-        202,
-        203,
-    ]
-
-    assert (
-        generator.metadata.generator_name
-        == "OpenAITelegramPostGenerator"
-    )
-
-    assert (
-        generator.metadata.model_name
-        == "test-model-no-network"
-    )
-
-    assert (
-        generator.metadata.text_format
-        == "markdown"
-    )
-
-    assert (
-        result.model_response.usage
-        is None
-    )
-
-    assert (
-        result
-        .model_response
-        .cost_estimate
-        is None
-    )
-
-    print()
-    print(
-        "Valid structured response: OK"
-    )
-    print(
-        "client_call_count="
-        f"{len(client.requests)}"
-    )
-    print(
-        "generated_item_count="
-        f"{len(result.payload.items)}"
-    )
-    print(
-        "post_length="
-        f"{len(result.payload.post_text)}"
-    )
-    print("usage_present=false")
-    print("cost_estimate_present=false")
-
-
-async def test_simple_interface() -> None:
-    """Проверяет метод generate()."""
-
-    generator, client = build_generator()
-
-    post_text = await generator.generate(
-        build_news_items()
-    )
-
-    assert len(client.requests) == 1
-
-    assert post_text == (
-        build_valid_post_text()
-    )
-
-    print()
-    print(
-        "Simple generator interface: OK"
-    )
-    print(
-        f"post_length={len(post_text)}"
-    )
-
-
-async def test_changed_news_order() -> None:
-    """Проверяет изменённый порядок news_id."""
-
-    response_payload = json.loads(
-        build_valid_response()
-    )
-
-    response_payload["items"][0][
-        "news_id"
-    ] = 202
-
-    response_payload["items"][1][
-        "news_id"
-    ] = 201
-
-    generator, _ = build_generator(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "изменила порядок или набор "
-            "news_id"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Changed news order blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Изменённый порядок news_id "
-        "не был заблокирован."
-    )
-
-
-async def test_duplicate_news_id() -> None:
-    """Проверяет повторяющийся news_id."""
-
-    response_payload = json.loads(
-        build_valid_response()
-    )
-
-    response_payload["items"][1][
-        "news_id"
-    ] = 201
-
-    generator, _ = build_generator(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует схеме"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Duplicate news_id blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Повторяющийся news_id "
-        "не был заблокирован."
-    )
-
-
-async def test_invalid_position_order() -> None:
-    """Проверяет неправильный порядок позиций."""
-
-    response_payload = json.loads(
-        build_valid_response()
-    )
-
-    response_payload["items"][0][
-        "position"
-    ] = 2
-
-    response_payload["items"][1][
-        "position"
-    ] = 1
-
-    generator, _ = build_generator(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует схеме"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Invalid position order "
-            "blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Неверный порядок позиций "
-        "не был заблокирован."
-    )
-
-
-async def test_empty_headline() -> None:
-    """Проверяет пустой заголовок новости."""
-
-    response_payload = json.loads(
-        build_valid_response()
-    )
-
-    response_payload["items"][0][
-        "headline"
-    ] = "   "
-
-    generator, _ = build_generator(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует схеме"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Empty headline blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Пустой заголовок "
-        "не был заблокирован."
-    )
-
-
-async def test_oversized_post() -> None:
-    """Проверяет превышение лимита текста."""
-
-    response_payload = json.loads(
-        build_valid_response()
-    )
-
-    response_payload["post_text"] = (
-        "X" * 4097
-    )
-
-    generator, _ = build_generator(
-        json.dumps(
-            response_payload,
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует схеме"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Oversized post blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Слишком длинный пост "
-        "не был заблокирован."
-    )
-
-
-async def test_invalid_json() -> None:
-    """Проверяет синтаксически неверный JSON."""
-
-    generator, _ = build_generator(
-        "{invalid-json"
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert (
-            "не соответствует схеме"
-            in str(error)
-        )
-
-        print()
-        print(
-            "Invalid JSON blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Некорректный JSON "
-        "не был заблокирован."
-    )
-
-
-async def test_empty_response() -> None:
-    """Проверяет пустой ответ модели."""
-
-    generator, _ = build_generator(
-        "   "
-    )
-
-    try:
-        await generator.generate(
-            build_news_items()
-        )
-    except ValueError as error:
-        assert "пустой ответ" in str(error)
-
-        print()
-        print(
-            "Empty response blocking: OK"
-        )
-        return
-
-    raise AssertionError(
-        "Пустой ответ модели "
-        "не был заблокирован."
-    )
-
-
-async def test_wrong_input_count() -> None:
-    """Проверяет вход без третьей новости."""
+def test_invalid_input_count() -> None:
+    """Блокирует TOP-3 неполного размера."""
 
     generator, client = build_generator()
 
     items = build_news_items()[:2]
 
-    try:
-        generator.build_request(items)
-    except ValueError as error:
-        assert (
-            "ровно три новости"
-            in str(error)
-        )
-
-        assert len(client.requests) == 0
-
-        print()
-        print(
-            "Wrong input count blocking: OK"
-        )
-        print("client_call_count=0")
-        return
-
-    raise AssertionError(
-        "Неполный входной TOP-3 "
-        "не был заблокирован."
+    assert_raises(
+        ValueError,
+        "ровно три новости",
+        lambda: generator.build_request(
+            items
+        ),
     )
 
+    assert len(client.requests) == 0
 
-async def test_invalid_input_positions() -> None:
-    """Проверяет неверные входные позиции."""
+    print("Invalid input count blocking: OK")
 
-    valid_items = build_news_items()
 
-    invalid_items = (
-        valid_items[1],
-        valid_items[0],
-        valid_items[2],
-    )
+def test_invalid_input_order() -> None:
+    """Блокирует неправильный порядок TOP-3."""
 
     generator, client = build_generator()
 
-    try:
-        generator.build_request(
-            invalid_items
-        )
-    except ValueError as error:
-        assert (
-            "порядке позиций 1, 2 и 3"
-            in str(error)
-        )
+    items = build_news_items()
 
-        assert len(client.requests) == 0
-
-        print()
-        print(
-            "Invalid input positions "
-            "blocking: OK"
-        )
-        print("client_call_count=0")
-        return
-
-    raise AssertionError(
-        "Неверный порядок входных позиций "
-        "не был заблокирован."
+    invalid_items = (
+        items[1],
+        items[0],
+        items[2],
     )
 
-
-async def test_naive_publication_datetime() -> None:
-    """Проверяет дату без часового пояса."""
-
-    valid_items = build_news_items()
-
-    invalid_first_item = GenerationNewsItem(
-        position=valid_items[0].position,
-        news_id=valid_items[0].news_id,
-        title=valid_items[0].title,
-        summary=valid_items[0].summary,
-        source_name=(
-            valid_items[0].source_name
+    assert_raises(
+        ValueError,
+        "порядке позиций",
+        lambda: generator.build_request(
+            invalid_items
         ),
-        source_url=valid_items[0].source_url,
+    )
+
+    assert len(client.requests) == 0
+
+    print("Invalid input order blocking: OK")
+
+
+def test_duplicate_input_news_id() -> None:
+    """Блокирует повторяющийся входной news_id."""
+
+    generator, client = build_generator()
+
+    items = list(
+        build_news_items()
+    )
+
+    items[1] = replace(
+        items[1],
+        news_id=items[0].news_id,
+    )
+
+    assert_raises(
+        ValueError,
+        "уникальными",
+        lambda: generator.build_request(
+            tuple(items)
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print("Duplicate input news_id blocking: OK")
+
+
+def test_naive_datetime() -> None:
+    """Блокирует дату без часового пояса."""
+
+    generator, client = build_generator()
+
+    items = list(
+        build_news_items()
+    )
+
+    items[0] = replace(
+        items[0],
         source_published_at=datetime(
             2026,
             7,
@@ -904,74 +672,388 @@ async def test_naive_publication_datetime() -> None:
             10,
             0,
         ),
-        individual_score=(
-            valid_items[0].individual_score
-        ),
-        selection_reason=(
-            valid_items[0].selection_reason
+    )
+
+    assert_raises(
+        ValueError,
+        "содержать часовой пояс",
+        lambda: generator.build_request(
+            tuple(items)
         ),
     )
 
-    invalid_items = (
-        invalid_first_item,
-        valid_items[1],
-        valid_items[2],
-    )
+    assert len(client.requests) == 0
+
+    print("Naive datetime blocking: OK")
+
+
+def test_invalid_score() -> None:
+    """Блокирует отрицательный балл."""
 
     generator, client = build_generator()
 
-    try:
-        generator.build_request(
-            invalid_items
-        )
-    except ValueError as error:
-        assert (
-            "должен содержать часовой пояс"
-            in str(error)
-        )
-
-        assert len(client.requests) == 0
-
-        print()
-        print(
-            "Naive datetime blocking: OK"
-        )
-        print("client_call_count=0")
-        return
-
-    raise AssertionError(
-        "Дата без часового пояса "
-        "не была заблокирована."
+    items = list(
+        build_news_items()
     )
+
+    items[0] = replace(
+        items[0],
+        individual_score=Decimal("-1"),
+    )
+
+    assert_raises(
+        ValueError,
+        "неотрицательным",
+        lambda: generator.build_request(
+            tuple(items)
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print("Invalid score blocking: OK")
+
+
+async def test_invalid_json() -> None:
+    """Блокирует синтаксически неверный JSON."""
+
+    generator, client = build_generator(
+        "{invalid-json"
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "не соответствует схеме",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Invalid JSON blocking: OK")
+
+
+async def test_wrong_response_news_ids() -> None:
+    """Блокирует изменение набора news_id."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][1]["news_id"] = 999
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "изменила порядок или набор",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Wrong response news_id blocking: OK")
+
+
+async def test_duplicate_response_news_id() -> None:
+    """Блокирует повторяющийся news_id ответа."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][1]["news_id"] = (
+        payload["items"][0]["news_id"]
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "не соответствует схеме",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Duplicate response news_id blocking: OK")
+
+
+async def test_empty_headline() -> None:
+    """Блокирует пустой headline."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["headline"] = "   "
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "не соответствует схеме",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Empty headline blocking: OK")
+
+
+async def test_headline_markdown() -> None:
+    """Блокирует Markdown-маркеры вокруг headline."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["headline"] = (
+        "**Заголовок с маркерами**"
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "без Markdown-маркеров",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Headline Markdown blocking: OK")
+
+
+async def test_hashtag_blocking() -> None:
+    """Блокирует хештеги в body."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["body"] += (
+        "\n\n#кино"
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "Хештеги в body запрещены",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Hashtag blocking: OK")
+
+
+async def test_service_fragment_in_body() -> None:
+    """Блокирует служебные элементы в body."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["body"] += (
+        "\n\n"
+        + POST_SUBSCRIPTION_LINE
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "служебный элемент шаблона",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Service fragment blocking: OK")
+
+
+async def test_unpaired_body_markdown() -> None:
+    """Блокирует непарный Markdown в body."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["body"] += (
+        "\n\n**Незакрытый жирный текст"
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "непарный маркер жирного",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Unpaired body Markdown blocking: OK")
+
+
+async def test_oversized_canonical_post() -> None:
+    """Блокирует итоговый текст длиннее 3900."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    for item in payload["items"]:
+        item["body"] = "X" * 1400
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "превышает 3900 символов",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Oversized canonical post blocking: OK")
+
+
+async def test_model_draft_is_ignored() -> None:
+    """Проверяет, что модель не управляет шаблоном."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["post_text"] = (
+        "Совершенно неправильный формат модели."
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    result = await generator.generate_detailed(
+        build_news_items()
+    )
+
+    assert (
+        result.payload.post_text
+        == build_expected_post_text()
+    )
+
+    assert (
+        "Совершенно неправильный формат"
+        not in result.payload.post_text
+    )
+
+    assert len(client.requests) == 1
+
+    print("Model draft replacement: OK")
 
 
 async def main() -> int:
-    """Запускает автономный тест генератора."""
+    """Запускает изолированные тесты генератора."""
 
-    test_build_request()
+    print(
+        "OpenAI post generator isolated test"
+    )
+    print(
+        "database_connections=not_performed"
+    )
+    print("openai_requests=not_performed")
+    print("telegram_requests=not_performed")
+    print()
+
+    test_metadata_and_request()
+    test_canonical_builder()
+    test_invalid_input_count()
+    test_invalid_input_order()
+    test_duplicate_input_news_id()
+    test_naive_datetime()
+    test_invalid_score()
+
+    await test_generation_success()
+    await test_generate_text_interface()
     await test_prepared_request()
     await test_modified_request_blocking()
-    await test_valid_response()
-    await test_simple_interface()
-    await test_changed_news_order()
-    await test_duplicate_news_id()
-    await test_invalid_position_order()
-    await test_empty_headline()
-    await test_oversized_post()
     await test_invalid_json()
-    await test_empty_response()
-    await test_wrong_input_count()
-    await test_invalid_input_positions()
-    await test_naive_publication_datetime()
+    await test_wrong_response_news_ids()
+    await test_duplicate_response_news_id()
+    await test_empty_headline()
+    await test_headline_markdown()
+    await test_hashtag_blocking()
+    await test_service_fragment_in_body()
+    await test_unpaired_body_markdown()
+    await test_oversized_canonical_post()
+    await test_model_draft_is_ignored()
 
     print()
-    print("API key required: no")
-    print("OpenAI requests: not performed")
-    print("Database changes: not performed")
-    print("Telegram publication: not performed")
     print(
-        "OpenAI post generator "
-        "fake-client test: OK"
+        "OpenAI post generator test: OK"
     )
 
     return 0

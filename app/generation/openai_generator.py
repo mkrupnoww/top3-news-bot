@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import json
+import re
 from typing import Protocol, runtime_checkable
 
 from pydantic import (
@@ -20,14 +21,40 @@ from app.ranking.openai_usage import (
 
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v1"
+    "openai_telegram_post_generator_v2"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
-    "movie_news_telegram_post_prompt_v1"
+    "movie_news_telegram_post_prompt_v2"
 )
 
 OPENAI_POST_TEXT_FORMAT = "markdown"
+
+MAXIMUM_POST_LENGTH = 3900
+
+POST_HEADER = (
+    "**TOP-3 НОВОСТЕЙ КИНО "
+    "ЗА ПОСЛЕДНИЕ 24 ЧАСА**"
+)
+
+POST_TOP_SEPARATOR = "_______________"
+
+POST_FOOTER_SEPARATOR = "……………"
+
+POST_SUBSCRIPTION_LINE = (
+    "Подписаться на VIP канал - @kkm_vip_bot"
+)
+
+POST_POSITION_MARKERS = (
+    "1️⃣",
+    "2️⃣",
+    "3️⃣",
+)
+
+_HASHTAG_PATTERN = re.compile(
+    r"(?<![\w/])#[\wА-Яа-яЁё]+",
+    flags=re.UNICODE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +209,7 @@ class OpenAIGeneratedPostPayload(
         cls,
         value: str,
     ) -> str:
-        """Нормализует готовый Telegram-текст."""
+        """Нормализует черновик Telegram-текста."""
 
         normalized_value = value.strip()
 
@@ -232,84 +259,143 @@ class OpenAIGeneratedPostPayload(
 
 SYSTEM_INSTRUCTIONS = """
 Ты готовишь русскоязычный пост для Telegram-канала
-с ежедневной подборкой TOP-3 киноновостей.
+с ежедневной подборкой TOP-3 новостей о кино
+и сериалах.
 
 Используй только сведения из переданного JSON.
 Не добавляй факты, цитаты, числа, имена, оценки,
-просмотры, реакции или последствия, которых нет
-во входных данных.
+просмотры, реакции, даты или последствия, которых
+нет во входных данных.
 
-Требования к готовому посту:
+Тематическая область включает:
+
+- полнометражные и короткометражные фильмы;
+- документальное кино;
+- анимационные фильмы и сериалы;
+- телевизионные сериалы;
+- мини-сериалы и limited series;
+- сериалы стриминговых платформ;
+- производство, кастинг и съёмки;
+- премьеры, трейлеры и даты выпуска;
+- кинотеатральную и стриминговую дистрибуцию;
+- фестивали и награды;
+- бизнес, право и кадровые решения, если они
+  непосредственно связаны с производством или
+  распространением фильмов и сериалов.
+
+Слово television, TV или название телевизионной
+компании само по себе не означает, что публикация
+относится к сериалам.
+
+Прогнозы погоды, новостные эфиры, спортивные
+трансляции, ток-шоу, реалити-шоу и обычные
+телевизионные программы не являются сериалами.
+
+Требования к содержанию:
 
 1. Сохрани порядок новостей 1, 2 и 3.
-2. Для каждой новости сделай короткий,
-   выразительный заголовок и понятный абзац.
-3. Передавай смысл своими словами, не копируй
-   длинные фрагменты исходных публикаций.
-4. Пиши естественно и информативно, без кликбейта,
-   канцелярита и рекламных формулировок.
-5. Англоязычные имена людей, компаний, фильмов
-   и проектов передавай точно. Не придумывай
-   официальные русские названия.
-6. Не включай в post_text технические показатели,
-   баллы F, M, R, H, Q, individual_score,
-   news_id или внутренние объяснения оценщика.
-7. Не вставляй source_url и длинные перечни
-   источников в post_text.
-8. Не утверждай, что событие является скандалом,
-   сенсацией или рекордом, если это прямо
-   не подтверждено входными данными.
-9. Не используй Markdown-заголовки с символом #.
-10. Для жирного текста применяй две звёздочки:
-    **текст**.
-11. Для курсива применяй двойное нижнее
-    подчёркивание: __текст__.
-12. Не используй MarkdownV2 и HTML.
-13. Общая длина post_text должна быть
-    не более 3900 символов.
-14. Верни каждую входную новость ровно один раз.
-15. Верни только JSON-объект без Markdown-обёртки.
+2. Для каждой новости подготовь короткий,
+   выразительный headline и содержательный body.
+3. Body может состоять из одного или двух
+   коротких абзацев.
+4. Передавай смысл своими словами.
+5. Не копируй длинные фрагменты публикаций.
+6. Пиши естественно и информативно.
+7. Не используй кликбейт, канцелярит и рекламу.
+8. Англоязычные имена людей, компаний, фильмов
+   и сериалов передавай точно.
+9. Не придумывай официальные русские названия.
+10. Не включай технические показатели, баллы,
+    individual_score, news_id или внутренние
+    объяснения оценщика в текст публикации.
+11. Не вставляй ссылки на исходные статьи.
+12. Не добавляй длинный перечень источников.
+13. Не добавляй ссылку на трейлер, если во
+    входных данных нет отдельной подтверждённой
+    официальной ссылки на трейлер.
+14. Не называй событие скандалом, сенсацией или
+    рекордом, если это прямо не подтверждено.
+15. Хештеги запрещены.
+16. Markdown-заголовки с символом # запрещены.
+17. Не используй MarkdownV2 или HTML.
+18. Для жирного текста внутри body используй
+    только две звёздочки: **текст**.
+19. Для курсива внутри body используй только
+    двойное нижнее подчёркивание: __текст__.
+20. headline возвращай без внешних Markdown-
+    маркеров.
+21. Верни каждую входную новость ровно один раз.
+22. items должны идти строго в порядке:
+    position=1, position=2, position=3.
+23. Общая длина будущего поста должна позволять
+    уложиться в 3900 символов.
 
-Рекомендуемая структура post_text:
+Финальный post_text будет программно собран
+Python-кодом из headline и body.
 
-**TOP-3 киноновости дня**
+Не добавляй в headline или body служебные элементы:
 
-**1. Короткий заголовок**
-Абзац новости.
+- заголовок всего выпуска;
+- строку из подчёркиваний;
+- номера 1️⃣, 2️⃣ и 3️⃣;
+- нижний разделитель;
+- строку подписки.
 
-**2. Короткий заголовок**
-Абзац новости.
+Python самостоятельно добавит эти элементы по
+неизменяемому шаблону:
 
-**3. Короткий заголовок**
-Абзац новости.
+**TOP-3 НОВОСТЕЙ КИНО ЗА ПОСЛЕДНИЕ 24 ЧАСА**
+_______________
 
-__Какую из новостей обсудим подробнее?__
+1️⃣ **Заголовок первой новости**
+
+Текст первой новости.
+
+2️⃣ **Заголовок второй новости**
+
+Текст второй новости.
+
+3️⃣ **Заголовок третьей новости**
+
+Текст третьей новости.
+
+……………
+Подписаться на VIP канал - @kkm_vip_bot
+
+Поле post_text также обязательно верни в JSON.
+Оно является черновиком модели.
+
+Окончательный канонический post_text будет
+построен Python-кодом из массива items, поэтому
+главное — вернуть точные headline и body.
 
 Формат JSON-ответа:
 
 {
-  "post_text": "Полный текст Telegram-поста",
+  "post_text": "Черновик полного Telegram-поста",
   "items": [
     {
       "position": 1,
       "news_id": 1,
       "headline": "Короткий заголовок",
-      "body": "Абзац новости"
+      "body": "Текст первой новости"
     },
     {
       "position": 2,
       "news_id": 2,
       "headline": "Короткий заголовок",
-      "body": "Абзац новости"
+      "body": "Текст второй новости"
     },
     {
       "position": 3,
       "news_id": 3,
       "headline": "Короткий заголовок",
-      "body": "Абзац новости"
+      "body": "Текст третьей новости"
     }
   ]
 }
+
+Верни только JSON-объект без Markdown-обёртки.
 """.strip()
 
 
@@ -319,6 +405,11 @@ def _normalize_required_text(
     field_name: str,
 ) -> str:
     """Проверяет обязательное текстовое поле."""
+
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{field_name} должен быть строкой."
+        )
 
     normalized_value = value.strip()
 
@@ -426,6 +517,16 @@ def _validate_news_items(
             item.source_published_at
         )
 
+        if not isinstance(
+            published_at,
+            datetime,
+        ):
+            raise TypeError(
+                "source_published_at должен "
+                "быть datetime: "
+                f"news_id={item.news_id}"
+            )
+
         if (
             published_at.tzinfo is None
             or published_at.utcoffset() is None
@@ -475,7 +576,9 @@ def _build_input_text(
         "text_format": (
             OPENAI_POST_TEXT_FORMAT
         ),
-        "maximum_post_length": 3900,
+        "maximum_post_length": (
+            MAXIMUM_POST_LENGTH
+        ),
         "news": [
             {
                 "position": item.position,
@@ -570,6 +673,195 @@ def _validate_response_items(
             "порядок позиций: "
             f"{response_positions}"
         )
+
+
+def _validate_generated_headline(
+    headline: str,
+    *,
+    position: int,
+) -> str:
+    """Проверяет заголовок одной новости."""
+
+    normalized_headline = (
+        _normalize_required_text(
+            headline,
+            field_name=(
+                f"headline position={position}"
+            ),
+        )
+    )
+
+    if (
+        "\n" in normalized_headline
+        or "\r" in normalized_headline
+    ):
+        raise ValueError(
+            "headline не должен содержать "
+            "перевод строки: "
+            f"position={position}"
+        )
+
+    if (
+        "**" in normalized_headline
+        or "__" in normalized_headline
+    ):
+        raise ValueError(
+            "headline должен содержать чистый "
+            "текст без Markdown-маркеров: "
+            f"position={position}"
+        )
+
+    if _HASHTAG_PATTERN.search(
+        normalized_headline
+    ):
+        raise ValueError(
+            "Хештеги в headline запрещены: "
+            f"position={position}"
+        )
+
+    forbidden_fragments = (
+        POST_HEADER,
+        POST_TOP_SEPARATOR,
+        POST_FOOTER_SEPARATOR,
+        POST_SUBSCRIPTION_LINE,
+        *POST_POSITION_MARKERS,
+    )
+
+    for fragment in forbidden_fragments:
+        if fragment in normalized_headline:
+            raise ValueError(
+                "headline содержит служебный "
+                "элемент шаблона: "
+                f"position={position}, "
+                f"fragment={fragment!r}"
+            )
+
+    return normalized_headline
+
+
+def _validate_generated_body(
+    body: str,
+    *,
+    position: int,
+) -> str:
+    """Проверяет текст одной новости."""
+
+    normalized_body = _normalize_required_text(
+        body,
+        field_name=f"body position={position}",
+    )
+
+    if _HASHTAG_PATTERN.search(normalized_body):
+        raise ValueError(
+            "Хештеги в body запрещены: "
+            f"position={position}"
+        )
+
+    forbidden_fragments = (
+        POST_HEADER,
+        POST_TOP_SEPARATOR,
+        POST_FOOTER_SEPARATOR,
+        POST_SUBSCRIPTION_LINE,
+        *POST_POSITION_MARKERS,
+    )
+
+    for fragment in forbidden_fragments:
+        if fragment in normalized_body:
+            raise ValueError(
+                "body содержит служебный "
+                "элемент шаблона: "
+                f"position={position}, "
+                f"fragment={fragment!r}"
+            )
+
+    if normalized_body.count("**") % 2 != 0:
+        raise ValueError(
+            "В body обнаружен непарный "
+            "маркер жирного текста **: "
+            f"position={position}"
+        )
+
+    if normalized_body.count("__") % 2 != 0:
+        raise ValueError(
+            "В body обнаружен непарный "
+            "маркер курсива __: "
+            f"position={position}"
+        )
+
+    return normalized_body
+
+
+def build_top3_post_text(
+    items: list[
+        OpenAIGeneratedNewsPayload
+    ],
+) -> str:
+    """
+    Собирает финальный Markdown-пост TOP-3.
+
+    Служебные элементы не зависят от формулировки
+    модели и всегда добавляются Python-кодом.
+    """
+
+    if len(items) != 3:
+        raise ValueError(
+            "Для построения поста требуется "
+            "ровно три элемента."
+        )
+
+    positions = tuple(
+        item.position
+        for item in items
+    )
+
+    if positions != (1, 2, 3):
+        raise ValueError(
+            "Элементы должны идти строго "
+            "в порядке позиций 1, 2 и 3: "
+            f"actual={positions}"
+        )
+
+    news_sections: list[str] = []
+
+    for item, marker in zip(
+        items,
+        POST_POSITION_MARKERS,
+        strict=True,
+    ):
+        headline = (
+            _validate_generated_headline(
+                item.headline,
+                position=item.position,
+            )
+        )
+
+        body = _validate_generated_body(
+            item.body,
+            position=item.position,
+        )
+
+        news_sections.append(
+            f"{marker} **{headline}**"
+            f"\n\n{body}"
+        )
+
+    post_text = (
+        f"{POST_HEADER}\n"
+        f"{POST_TOP_SEPARATOR}\n\n"
+        + "\n\n".join(news_sections)
+        + "\n\n"
+        + f"{POST_FOOTER_SEPARATOR}\n"
+        + POST_SUBSCRIPTION_LINE
+    )
+
+    if len(post_text) > MAXIMUM_POST_LENGTH:
+        raise ValueError(
+            "Собранный post_text превышает "
+            f"{MAXIMUM_POST_LENGTH} символов: "
+            f"actual={len(post_text)}"
+        )
+
+    return post_text
 
 
 class OpenAITelegramPostGenerator:
@@ -685,6 +977,20 @@ class OpenAITelegramPostGenerator:
                 expected_news_ids
             ),
             payload=payload,
+        )
+
+        canonical_post_text = (
+            build_top3_post_text(
+                payload.items
+            )
+        )
+
+        payload = payload.model_copy(
+            update={
+                "post_text": (
+                    canonical_post_text
+                ),
+            }
         )
 
         return OpenAIPostGenerationResult(

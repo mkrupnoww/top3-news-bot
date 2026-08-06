@@ -11,6 +11,10 @@ PROJECT_ITALIC_PATTERN = re.compile(
     r"__(?=\S)(.+?)(?<=\S)__"
 )
 
+PROJECT_SEPARATOR_LINE_PATTERN = re.compile(
+    r"^_{3,}$"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedTelegramText:
@@ -40,16 +44,55 @@ def _validate_post_text(
     return post_text
 
 
+def _is_separator_line(
+    line: str,
+) -> bool:
+    """
+    Проверяет строку-разделитель из подчёркиваний.
+
+    Такая строка является обычным текстом проекта,
+    а не Markdown-разметкой курсива.
+    """
+
+    return bool(
+        PROJECT_SEPARATOR_LINE_PATTERN.fullmatch(
+            line.strip()
+        )
+    )
+
+
+def _markdown_without_separator_lines(
+    post_text: str,
+) -> str:
+    """
+    Исключает строки-разделители при проверке
+    парности Markdown-маркеров.
+    """
+
+    return "\n".join(
+        ""
+        if _is_separator_line(line)
+        else line
+        for line in post_text.splitlines()
+    )
+
+
 def _validate_project_markdown(
     post_text: str,
 ) -> None:
     """Проверяет парность разрешённых маркеров."""
 
-    bold_marker_count = post_text.count(
+    markdown_text = (
+        _markdown_without_separator_lines(
+            post_text
+        )
+    )
+
+    bold_marker_count = markdown_text.count(
         "**"
     )
 
-    italic_marker_count = post_text.count(
+    italic_marker_count = markdown_text.count(
         "__"
     )
 
@@ -66,6 +109,65 @@ def _validate_project_markdown(
         )
 
 
+def _split_line_ending(
+    value: str,
+) -> tuple[str, str]:
+    """Отделяет содержимое строки от перевода строки."""
+
+    if value.endswith("\r\n"):
+        return value[:-2], "\r\n"
+
+    if value.endswith("\n"):
+        return value[:-1], "\n"
+
+    if value.endswith("\r"):
+        return value[:-1], "\r"
+
+    return value, ""
+
+
+def _convert_markdown_line_to_html(
+    line: str,
+) -> str:
+    """
+    Преобразует одну обычную строку проекта
+    из Markdown в безопасный HTML.
+    """
+
+    escaped_line = escape(
+        line,
+        quote=False,
+    )
+
+    converted_line = (
+        PROJECT_BOLD_PATTERN.sub(
+            r"<b>\1</b>",
+            escaped_line,
+        )
+    )
+
+    converted_line = (
+        PROJECT_ITALIC_PATTERN.sub(
+            r"<i>\1</i>",
+            converted_line,
+        )
+    )
+
+    if "**" in converted_line:
+        raise ValueError(
+            "Не удалось однозначно преобразовать "
+            "маркер жирного текста **."
+        )
+
+    if "__" in converted_line:
+        raise ValueError(
+            "Не удалось однозначно преобразовать "
+            "маркер курсива __."
+        )
+
+    return converted_line
+
+
 def convert_project_markdown_to_html(
     post_text: str,
 ) -> str:
@@ -76,6 +178,10 @@ def convert_project_markdown_to_html(
 
     **жирный текст**
     __курсив__
+
+    Строки, состоящие минимум из трёх символов
+    подчёркивания, считаются текстовыми
+    разделителями и сохраняются без изменений.
 
     Весь исходный HTML предварительно экранируется.
     """
@@ -88,38 +194,32 @@ def convert_project_markdown_to_html(
         validated_text
     )
 
-    escaped_text = escape(
-        validated_text,
-        quote=False,
-    )
+    converted_lines: list[str] = []
 
-    converted_text = (
-        PROJECT_BOLD_PATTERN.sub(
-            r"<b>\1</b>",
-            escaped_text,
-        )
-    )
-
-    converted_text = (
-        PROJECT_ITALIC_PATTERN.sub(
-            r"<i>\1</i>",
-            converted_text,
-        )
-    )
-
-    if "**" in converted_text:
-        raise ValueError(
-            "Не удалось однозначно преобразовать "
-            "маркер жирного текста **."
+    for raw_line in validated_text.splitlines(
+        keepends=True
+    ):
+        line, line_ending = _split_line_ending(
+            raw_line
         )
 
-    if "__" in converted_text:
-        raise ValueError(
-            "Не удалось однозначно преобразовать "
-            "маркер курсива __."
+        if _is_separator_line(line):
+            converted_line = escape(
+                line,
+                quote=False,
+            )
+        else:
+            converted_line = (
+                _convert_markdown_line_to_html(
+                    line
+                )
+            )
+
+        converted_lines.append(
+            converted_line + line_ending
         )
 
-    return converted_text
+    return "".join(converted_lines)
 
 
 def prepare_telegram_text(
