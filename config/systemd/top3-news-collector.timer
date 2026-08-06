@@ -1,0 +1,11 @@
+[Unit]
+Description=Run TOP 3 NEWS RSS collector hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+Unit=top3-news-collector.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run TOP 3 NEWS old data cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=top3-news-cleanup.service
+
+[Install]
+WantedBy=timers.target
