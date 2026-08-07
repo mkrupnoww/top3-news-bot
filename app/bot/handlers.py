@@ -1,8 +1,11 @@
+import inspect
 import logging
 
 import asyncpg
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -22,6 +25,12 @@ from app.db.review_sources import (
     get_review_sources,
 )
 from app.db.users import BotUser, get_active_bot_user
+from app.generation.openai_factory import (
+    create_openai_generation_runtime,
+)
+from app.generation.openai_revision_pipeline import (
+    run_reserved_openai_generation_revision,
+)
 from app.publication import (
     PublicationStateUncertainError,
     publish_approved_post,
@@ -31,6 +40,12 @@ from app.publication import (
 logger = logging.getLogger(__name__)
 
 router = Router(name=__name__)
+
+
+class ReviewRevisionStates(StatesGroup):
+    """Состояния диалога редакционной доработки."""
+
+    waiting_for_comment = State()
 
 
 def build_review_keyboard(
@@ -45,6 +60,12 @@ def build_review_keyboard(
                     text="✅ Одобрить",
                     callback_data=(
                         f"review:approve:{generated_post_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="✏️ Изменить",
+                    callback_data=(
+                        f"review:change:{generated_post_id}"
                     ),
                 ),
                 InlineKeyboardButton(
@@ -137,6 +158,31 @@ async def send_callback_message(
     )
 
 
+async def close_sdk_client(
+    sdk_client: object,
+) -> None:
+    """Закрывает совместимый OpenAI SDK-клиент."""
+
+    close_method = getattr(
+        sdk_client,
+        "close",
+        None,
+    )
+
+    if close_method is None:
+        return
+
+    try:
+        close_result = close_method()
+
+        if inspect.isawaitable(close_result):
+            await close_result
+    except Exception:
+        logger.exception(
+            "Не удалось закрыть OpenAI SDK-клиент."
+        )
+
+
 @router.message(CommandStart())
 async def handle_start(
     message: Message,
@@ -195,6 +241,7 @@ async def handle_start(
 async def handle_review(
     message: Message,
     db_pool: asyncpg.Pool,
+    state: FSMContext,
 ) -> None:
     """Показывает последний черновик на ручную проверку."""
 
@@ -222,6 +269,8 @@ async def handle_review(
             "У вашей роли нет права проверять публикации."
         )
         return
+
+    await state.clear()
 
     draft = await get_latest_review_draft(
         db_pool
@@ -327,8 +376,9 @@ async def handle_review(
 async def handle_review_callback(
     callback: CallbackQuery,
     db_pool: asyncpg.Pool,
+    state: FSMContext,
 ) -> None:
-    """Обрабатывает одобрение или отклонение черновика."""
+    """Обрабатывает решение человека по черновику."""
 
     callback_data = callback.data
 
@@ -350,7 +400,7 @@ async def handle_review_callback(
 
     _, action, generated_post_id_text = parts
 
-    if action not in {"approve", "reject"}:
+    if action not in {"approve", "change", "reject"}:
         await callback.answer(
             "Неизвестное действие.",
             show_alert=True,
@@ -384,6 +434,45 @@ async def handle_review_callback(
             show_alert=True,
         )
         return
+
+    if action == "change":
+        await state.clear()
+        await state.set_state(
+            ReviewRevisionStates.waiting_for_comment
+        )
+        await state.update_data(
+            generated_post_id=generated_post_id
+        )
+
+        await remove_callback_keyboard(callback)
+
+        await callback.answer(
+            "Введите замечания."
+        )
+
+        await send_callback_message(
+            callback,
+            (
+                "✏️ Напишите замечания к черновику "
+                "одним сообщением.\n\n"
+                "Можно перечислить несколько замечаний "
+                "с новой строки. После отправки бот "
+                "сохранит changes_required и создаст "
+                "новую версию текста через OpenAI.\n\n"
+                "Чтобы отменить ввод без изменений, "
+                "отправьте /cancel."
+            ),
+        )
+
+        logger.info(
+            "Review revision input requested: "
+            "user_id=%s, generated_post_id=%s",
+            bot_user.telegram_user_id,
+            generated_post_id,
+        )
+        return
+
+    await state.clear()
 
     try:
         result = await record_human_review_decision(
@@ -474,6 +563,264 @@ async def handle_review_callback(
         result.generated_post_id,
         result.decision,
         result.review_action_id,
+    )
+
+
+@router.message(Command("cancel"))
+async def handle_cancel(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Отменяет незавершённый ввод замечаний."""
+
+    current_state = await state.get_state()
+
+    if current_state is None:
+        await message.answer(
+            "Сейчас нет активного ввода замечаний."
+        )
+        return
+
+    await state.clear()
+
+    await message.answer(
+        "Ввод замечаний отменён. "
+        "Черновик не изменён.\n\n"
+        "Для повторной проверки используйте /review."
+    )
+
+
+@router.message(
+    ReviewRevisionStates.waiting_for_comment,
+    F.text,
+)
+async def handle_revision_comment(
+    message: Message,
+    db_pool: asyncpg.Pool,
+    state: FSMContext,
+) -> None:
+    """Сохраняет замечания и создаёт новую версию."""
+
+    telegram_user = message.from_user
+
+    if telegram_user is None:
+        await message.answer(
+            "Не удалось определить пользователя Telegram."
+        )
+        return
+
+    bot_user = await get_authorized_user(
+        db_pool,
+        telegram_user.id,
+    )
+
+    if bot_user is None:
+        await message.answer(
+            "Доступ к этому боту не предоставлен."
+        )
+        return
+
+    if not can_review(bot_user):
+        await message.answer(
+            "У вашей роли нет права проверять публикации."
+        )
+        await state.clear()
+        return
+
+    comment_text = (
+        message.text.strip()
+        if message.text is not None
+        else ""
+    )
+
+    if not comment_text:
+        await message.answer(
+            "Замечания не могут быть пустыми. "
+            "Напишите текст или отправьте /cancel."
+        )
+        return
+
+    state_data = await state.get_data()
+
+    generated_post_id = state_data.get(
+        "generated_post_id"
+    )
+
+    if not isinstance(generated_post_id, int):
+        await state.clear()
+        await message.answer(
+            "Не удалось определить черновик "
+            "для доработки. Выполните /review заново."
+        )
+        return
+
+    issues = tuple(
+        line.strip()
+        for line in comment_text.splitlines()
+        if line.strip()
+    )
+
+    if not issues:
+        await message.answer(
+            "Замечания не могут быть пустыми. "
+            "Напишите текст или отправьте /cancel."
+        )
+        return
+
+    try:
+        review_result = (
+            await record_human_review_decision(
+                db_pool,
+                generated_post_id=generated_post_id,
+                reviewer_telegram_user_id=(
+                    bot_user.telegram_user_id
+                ),
+                decision="changes_required",
+                requested_action="regenerate_text",
+                comment_text=comment_text,
+                issues=issues,
+            )
+        )
+    except (
+        LookupError,
+        PermissionError,
+        ValueError,
+    ) as error:
+        logger.warning(
+            "Changes required rejected: user_id=%s, "
+            "generated_post_id=%s, error=%s",
+            bot_user.telegram_user_id,
+            generated_post_id,
+            error,
+        )
+
+        await message.answer(
+            "Не удалось сохранить замечания:\n"
+            f"{error}\n\n"
+            "Исправьте сообщение или отправьте /cancel."
+        )
+        return
+    except Exception:
+        logger.exception(
+            "Changes required failed: user_id=%s, "
+            "generated_post_id=%s",
+            bot_user.telegram_user_id,
+            generated_post_id,
+        )
+
+        await message.answer(
+            "Не удалось сохранить замечания. "
+            "Подробности сохранены в журнале."
+        )
+        return
+
+    review_action_id = (
+        review_result.review_action_id
+    )
+
+    if not isinstance(review_action_id, int):
+        logger.error(
+            "Changes required has no review_action_id: "
+            "user_id=%s, generated_post_id=%s",
+            bot_user.telegram_user_id,
+            generated_post_id,
+        )
+
+        await message.answer(
+            "Замечания сохранены, но не удалось "
+            "определить Review action ID. "
+            "Автоматическая доработка не запущена."
+        )
+        return
+
+    await message.answer(
+        "Замечания сохранены. "
+        "Создаю новую версию текста…"
+    )
+
+    runtime = None
+
+    try:
+        settings = get_settings()
+
+        runtime = create_openai_generation_runtime(
+            settings
+        )
+
+        revision_result = (
+            await run_reserved_openai_generation_revision(
+                db_pool,
+                generator=runtime.generator,
+                review_action_id=review_action_id,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "OpenAI review revision failed: "
+            "user_id=%s, generated_post_id=%s, "
+            "review_action_id=%s",
+            bot_user.telegram_user_id,
+            generated_post_id,
+            review_action_id,
+        )
+
+        await message.answer(
+            "⚠️ Замечания сохранены, но новую версию "
+            "создать не удалось.\n\n"
+            "Повторно отправьте точно такое же сообщение, "
+            "чтобы безопасно повторить revision, "
+            "либо отправьте /cancel."
+        )
+        return
+    finally:
+        if runtime is not None:
+            await close_sdk_client(
+                runtime.sdk_client
+            )
+
+    await state.clear()
+
+    if not revision_result.completed:
+        logger.error(
+            "Revision pipeline returned non-completed "
+            "result: user_id=%s, review_action_id=%s, "
+            "revision_status=%s",
+            bot_user.telegram_user_id,
+            review_action_id,
+            revision_result.revision_status,
+        )
+
+        await message.answer(
+            "Замечания сохранены, но новая версия "
+            "не перешла в completed. "
+            "Проверьте журнал сервиса."
+        )
+        return
+
+    await message.answer(
+        "✅ Новая версия текста создана.\n\n"
+        f"Исходный Generated post ID: "
+        f"{generated_post_id}\n"
+        f"Новый Generated post ID: "
+        f"{revision_result.generated_post_id}\n"
+        f"Версия: "
+        f"{revision_result.target_version_number}\n"
+        "Статус: awaiting_review\n\n"
+        "Отправьте /review, чтобы проверить "
+        "новую версию."
+    )
+
+    logger.info(
+        "Review revision completed: "
+        "user_id=%s, source_generated_post_id=%s, "
+        "generated_post_id=%s, review_action_id=%s, "
+        "generation_revision_id=%s, model_called=%s",
+        bot_user.telegram_user_id,
+        generated_post_id,
+        revision_result.generated_post_id,
+        review_action_id,
+        revision_result.generation_revision_id,
+        revision_result.model_called,
     )
 
 
