@@ -377,7 +377,10 @@ async def record_human_review_decision(
                 await connection.fetchrow(
                     """
                     SELECT
-                        review_action_id
+                        review_action_id,
+                        reviewer_telegram_user_id,
+                        comment_text,
+                        issues::text AS issues_json
                     FROM review_actions
                     WHERE generated_post_id = $1
                       AND reviewer_type = 'human'
@@ -397,6 +400,34 @@ async def record_human_review_decision(
                 is not None
             ):
                 if decision == "changes_required":
+                    existing_issues = tuple(
+                        json.loads(
+                            existing_changes_required[
+                                "issues_json"
+                            ]
+                        )
+                    )
+
+                    same_request = (
+                        existing_changes_required[
+                            "reviewer_telegram_user_id"
+                        ]
+                        == reviewer_telegram_user_id
+                        and existing_changes_required[
+                            "comment_text"
+                        ]
+                        == normalized_comment_text
+                        and existing_issues
+                        == normalized_issues
+                    )
+
+                    if not same_request:
+                        raise ValueError(
+                            "По посту уже зафиксирован "
+                            "changes_required с другими "
+                            "параметрами."
+                        )
+
                     return ReviewDecisionResult(
                         batch_id=record["batch_id"],
                         generated_post_id=(

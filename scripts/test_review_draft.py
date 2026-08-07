@@ -349,6 +349,41 @@ async def main() -> None:
                 "создал другой review_action."
             )
 
+        modified_request_blocked = False
+
+        try:
+            await record_human_review_decision(
+                database_pool,
+                generated_post_id=(
+                    draft.generated_post_id
+                ),
+                reviewer_telegram_user_id=(
+                    reviewer_telegram_user_id
+                ),
+                decision="changes_required",
+                requested_action="regenerate_text",
+                comment_text=(
+                    REVIEW_COMMENT
+                    + " Изменённое задание."
+                ),
+                issues=REVIEW_ISSUES,
+            )
+        except ValueError as error:
+            if (
+                "с другими параметрами"
+                not in str(error)
+            ):
+                raise
+
+            modified_request_blocked = True
+
+        if not modified_request_blocked:
+            raise RuntimeError(
+                "Изменённый повторный "
+                "changes_required должен "
+                "блокироваться."
+            )
+
         review_action_count = (
             await database_pool.fetchval(
                 """
@@ -480,6 +515,9 @@ async def main() -> None:
         )
         print(
             "repeated_request_blocked=true"
+        )
+        print(
+            "modified_request_blocked=true"
         )
         print(
             "review_action_count=1"
