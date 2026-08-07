@@ -28,6 +28,10 @@ OPENAI_POST_PROMPT_VERSION = (
     "movie_news_telegram_post_prompt_v3"
 )
 
+OPENAI_POST_REVISION_PROMPT_VERSION = (
+    "movie_news_telegram_post_revision_prompt_v1"
+)
+
 OPENAI_POST_TEXT_FORMAT = "markdown"
 
 MAXIMUM_POST_LENGTH = 3900
@@ -419,6 +423,45 @@ _______________
 """.strip()
 
 
+REVISION_SYSTEM_INSTRUCTIONS = """
+Ты дорабатываешь ранее созданный русскоязычный
+Telegram-пост с ежедневной подборкой TOP-3
+новостей о кино и сериалах.
+
+Соблюдай все основные правила генерации поста.
+
+Дополнительные правила ревизии:
+
+1. Исправь замечания редактора из полей
+   editorial_comment и issues.
+
+2. Предыдущий post_text используй только как
+   редактируемый черновик, а не как источник
+   фактов.
+
+3. Факты для каждой новости разрешено брать
+   только из полей title и summary этой новости.
+
+4. Удали из предыдущего текста любые имена,
+   события, даты, цитаты и обстоятельства,
+   которые не подтверждены полями title
+   и summary соответствующей новости.
+
+5. Сохрани исходный порядок трёх новостей
+   и их news_id.
+
+6. Верни полностью обновлённые headline и body
+   для всех трёх новостей, даже если замечание
+   относится только к одной из них.
+
+7. Не описывай внесённые исправления и не
+   обращайся к редактору.
+
+8. Верни только JSON-объект в той же структуре,
+   что требуется основными инструкциями.
+""".strip()
+
+
 def _normalize_required_text(
     value: str,
     *,
@@ -439,6 +482,115 @@ def _normalize_required_text(
         )
 
     return normalized_value
+
+
+def _normalize_revision_issues(
+    issues: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Проверяет редакционные замечания."""
+
+    if not isinstance(issues, tuple):
+        raise TypeError(
+            "issues должен быть tuple."
+        )
+
+    if not issues:
+        raise ValueError(
+            "issues не может быть пустым."
+        )
+
+    normalized_issues: list[str] = []
+
+    for index, issue in enumerate(
+        issues,
+        start=1,
+    ):
+        normalized_issue = (
+            _normalize_required_text(
+                issue,
+                field_name=(
+                    f"issues[{index}]"
+                ),
+            )
+        )
+
+        normalized_issues.append(
+            normalized_issue
+        )
+
+    return tuple(normalized_issues)
+
+
+def _build_revision_input_text(
+    items: tuple[
+        GenerationNewsItem,
+        ...,
+    ],
+    *,
+    source_post_text: str,
+    editorial_comment: str,
+    issues: tuple[str, ...],
+) -> str:
+    """Формирует JSON запроса на ревизию."""
+
+    _validate_news_items(items)
+
+    normalized_source_post_text = (
+        _normalize_required_text(
+            source_post_text,
+            field_name="source_post_text",
+        )
+    )
+
+    normalized_editorial_comment = (
+        _normalize_required_text(
+            editorial_comment,
+            field_name="editorial_comment",
+        )
+    )
+
+    normalized_issues = (
+        _normalize_revision_issues(
+            issues
+        )
+    )
+
+    payload = {
+        "task": (
+            "revise_russian_telegram_"
+            "movie_news_top3"
+        ),
+        "text_format": (
+            OPENAI_POST_TEXT_FORMAT
+        ),
+        "maximum_post_length": (
+            MAXIMUM_POST_LENGTH
+        ),
+        "source_post_text": (
+            normalized_source_post_text
+        ),
+        "editorial_comment": (
+            normalized_editorial_comment
+        ),
+        "issues": list(
+            normalized_issues
+        ),
+        "news": [
+            {
+                "position": item.position,
+                "news_id": item.news_id,
+                "title": item.title.strip(),
+                "summary": item.summary.strip(),
+            }
+            for item in items
+        ],
+    }
+
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _validate_news_items(
@@ -932,6 +1084,117 @@ class OpenAITelegramPostGenerator:
             input_text=_build_input_text(
                 items
             ),
+        )
+
+    def build_revision_request(
+        self,
+        items: tuple[
+            GenerationNewsItem,
+            ...,
+        ],
+        *,
+        source_post_text: str,
+        editorial_comment: str,
+        issues: tuple[str, ...],
+    ) -> GenerationModelRequest:
+        """Формирует запрос на доработку поста."""
+
+        _validate_news_items(items)
+
+        instructions = (
+            f"{SYSTEM_INSTRUCTIONS}\n\n"
+            f"{REVISION_SYSTEM_INSTRUCTIONS}"
+        )
+
+        return GenerationModelRequest(
+            model=self._metadata.model_name,
+            instructions=instructions,
+            input_text=_build_revision_input_text(
+                items,
+                source_post_text=source_post_text,
+                editorial_comment=(
+                    editorial_comment
+                ),
+                issues=issues,
+            ),
+        )
+
+    async def generate_prepared_revision_request(
+        self,
+        items: tuple[
+            GenerationNewsItem,
+            ...,
+        ],
+        request: GenerationModelRequest,
+        *,
+        source_post_text: str,
+        editorial_comment: str,
+        issues: tuple[str, ...],
+    ) -> OpenAIPostGenerationResult:
+        """
+        Выполняет заранее сформированный запрос
+        на редакционную доработку поста.
+        """
+
+        expected_news_ids = (
+            _validate_news_items(items)
+        )
+
+        expected_request = (
+            self.build_revision_request(
+                items,
+                source_post_text=(
+                    source_post_text
+                ),
+                editorial_comment=(
+                    editorial_comment
+                ),
+                issues=issues,
+            )
+        )
+
+        if request != expected_request:
+            raise ValueError(
+                "Подготовленный revision-запрос "
+                "не соответствует текущему TOP-3, "
+                "исходному посту, замечаниям, "
+                "модели или промпту."
+            )
+
+        model_response = (
+            await self._client.create_response(
+                request
+            )
+        )
+
+        payload = _parse_response(
+            model_response.output_text
+        )
+
+        _validate_response_items(
+            expected_news_ids=(
+                expected_news_ids
+            ),
+            payload=payload,
+        )
+
+        canonical_post_text = (
+            build_top3_post_text(
+                payload.items
+            )
+        )
+
+        payload = payload.model_copy(
+            update={
+                "post_text": (
+                    canonical_post_text
+                ),
+            }
+        )
+
+        return OpenAIPostGenerationResult(
+            payload=payload,
+            model_response=model_response,
         )
 
     async def generate_prepared_request(

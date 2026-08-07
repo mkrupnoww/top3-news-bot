@@ -11,6 +11,7 @@ from app.generation.openai_generator import (
     MAXIMUM_POST_LENGTH,
     OPENAI_POST_GENERATOR_VERSION,
     OPENAI_POST_PROMPT_VERSION,
+    OPENAI_POST_REVISION_PROMPT_VERSION,
     OPENAI_POST_TEXT_FORMAT,
     OpenAITelegramPostGenerator,
     POST_FOOTER_SEPARATOR,
@@ -18,6 +19,31 @@ from app.generation.openai_generator import (
     POST_SUBSCRIPTION_LINE,
     POST_TOP_SEPARATOR,
     build_top3_post_text,
+)
+
+
+REVISION_SOURCE_POST_TEXT = (
+    "**TOP-3 НОВОСТЕЙ КИНО "
+    "ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n"
+    "_______________\n\n"
+    "1️⃣ **Старый заголовок первой новости**\n\n"
+    "Старый текст первой новости.\n\n"
+    "2️⃣ **Старый заголовок второй новости**\n\n"
+    "Старый текст второй новости.\n\n"
+    "3️⃣ **Старый заголовок третьей новости**\n\n"
+    "Старый текст третьей новости.\n\n"
+    "……………\n"
+    "Подписаться на VIP канал - @kkm_vip_bot"
+)
+
+REVISION_EDITORIAL_COMMENT = (
+    "Исправить фактические неточности и "
+    "убрать неподтверждённые имена."
+)
+
+REVISION_ISSUES = (
+    "Имена людей должны быть переданы кириллицей.",
+    "Не добавлять факты вне title и summary.",
 )
 
 
@@ -338,6 +364,10 @@ def test_metadata_and_request() -> None:
 
     assert OPENAI_POST_PROMPT_VERSION == (
         "movie_news_telegram_post_prompt_v3"
+    )
+
+    assert OPENAI_POST_REVISION_PROMPT_VERSION == (
+        "movie_news_telegram_post_revision_prompt_v1"
     )
 
     request = generator.build_request(
@@ -1042,6 +1072,268 @@ async def test_model_draft_is_ignored() -> None:
     print("Model draft replacement: OK")
 
 
+def test_revision_request_preparation() -> None:
+    """Проверяет подготовку revision-запроса."""
+
+    generator, client = build_generator()
+
+    request = generator.build_revision_request(
+        build_news_items(),
+        source_post_text=REVISION_SOURCE_POST_TEXT,
+        editorial_comment=REVISION_EDITORIAL_COMMENT,
+        issues=REVISION_ISSUES,
+    )
+
+    assert request.model == "gpt-5.6-terra"
+
+    assert (
+        "Соблюдай все основные правила "
+        "генерации поста."
+        in request.instructions
+    )
+
+    assert (
+        "Предыдущий post_text используй только как"
+        in request.instructions
+    )
+
+    assert (
+        "только из полей title и summary"
+        in request.instructions
+    )
+
+    payload = json.loads(request.input_text)
+
+    assert payload["task"] == (
+        "revise_russian_telegram_"
+        "movie_news_top3"
+    )
+
+    assert (
+        payload["text_format"]
+        == OPENAI_POST_TEXT_FORMAT
+    )
+
+    assert (
+        payload["maximum_post_length"]
+        == MAXIMUM_POST_LENGTH
+    )
+
+    assert (
+        payload["source_post_text"]
+        == REVISION_SOURCE_POST_TEXT
+    )
+
+    assert (
+        payload["editorial_comment"]
+        == REVISION_EDITORIAL_COMMENT
+    )
+
+    assert payload["issues"] == list(
+        REVISION_ISSUES
+    )
+
+    expected_news_fields = {
+        "position",
+        "news_id",
+        "title",
+        "summary",
+    }
+
+    assert all(
+        set(item) == expected_news_fields
+        for item in payload["news"]
+    )
+
+    assert [
+        item["news_id"]
+        for item in payload["news"]
+    ] == [
+        201,
+        202,
+        203,
+    ]
+
+    assert len(client.requests) == 0
+
+    print("Revision request preparation: OK")
+    print("revision_client_call_count=0")
+
+
+def test_empty_revision_issues() -> None:
+    """Блокирует пустой список замечаний."""
+
+    generator, client = build_generator()
+
+    assert_raises(
+        ValueError,
+        "issues не может быть пустым",
+        lambda: generator.build_revision_request(
+            build_news_items(),
+            source_post_text=REVISION_SOURCE_POST_TEXT,
+            editorial_comment=(
+                REVISION_EDITORIAL_COMMENT
+            ),
+            issues=(),
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print("Empty revision issues blocking: OK")
+
+
+def test_empty_revision_comment() -> None:
+    """Блокирует пустой комментарий редактора."""
+
+    generator, client = build_generator()
+
+    assert_raises(
+        ValueError,
+        "editorial_comment не может быть пустым",
+        lambda: generator.build_revision_request(
+            build_news_items(),
+            source_post_text=REVISION_SOURCE_POST_TEXT,
+            editorial_comment="   ",
+            issues=REVISION_ISSUES,
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print("Empty revision comment blocking: OK")
+
+
+async def test_revision_generation_success() -> None:
+    """Проверяет успешную доработку поста."""
+
+    generator, client = build_generator()
+    items = build_news_items()
+
+    request = generator.build_revision_request(
+        items,
+        source_post_text=REVISION_SOURCE_POST_TEXT,
+        editorial_comment=REVISION_EDITORIAL_COMMENT,
+        issues=REVISION_ISSUES,
+    )
+
+    result = (
+        await generator
+        .generate_prepared_revision_request(
+            items,
+            request,
+            source_post_text=REVISION_SOURCE_POST_TEXT,
+            editorial_comment=REVISION_EDITORIAL_COMMENT,
+            issues=REVISION_ISSUES,
+        )
+    )
+
+    assert len(client.requests) == 1
+    assert client.requests[0] == request
+
+    assert (
+        result.payload.post_text
+        == build_expected_post_text()
+    )
+
+    assert (
+        "Черновик модели"
+        not in result.payload.post_text
+    )
+
+    assert tuple(
+        item.news_id
+        for item in result.payload.items
+    ) == (
+        201,
+        202,
+        203,
+    )
+
+    print("Revision generation: OK")
+    print("revision_client_call_count=1")
+
+
+async def test_modified_revision_source_blocking() -> None:
+    """Блокирует подмену исходного поста."""
+
+    generator, client = build_generator()
+    items = build_news_items()
+
+    request = generator.build_revision_request(
+        items,
+        source_post_text=REVISION_SOURCE_POST_TEXT,
+        editorial_comment=REVISION_EDITORIAL_COMMENT,
+        issues=REVISION_ISSUES,
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "revision-запрос",
+        lambda: (
+            generator
+            .generate_prepared_revision_request(
+                items,
+                request,
+                source_post_text=(
+                    REVISION_SOURCE_POST_TEXT
+                    + "\nПодмена."
+                ),
+                editorial_comment=(
+                    REVISION_EDITORIAL_COMMENT
+                ),
+                issues=REVISION_ISSUES,
+            )
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print(
+        "Modified revision source blocking: OK"
+    )
+    print("revision_client_call_count=0")
+
+
+async def test_modified_revision_comment_blocking() -> None:
+    """Блокирует подмену комментария редактора."""
+
+    generator, client = build_generator()
+    items = build_news_items()
+
+    request = generator.build_revision_request(
+        items,
+        source_post_text=REVISION_SOURCE_POST_TEXT,
+        editorial_comment=REVISION_EDITORIAL_COMMENT,
+        issues=REVISION_ISSUES,
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "revision-запрос",
+        lambda: (
+            generator
+            .generate_prepared_revision_request(
+                items,
+                request,
+                source_post_text=REVISION_SOURCE_POST_TEXT,
+                editorial_comment=(
+                    REVISION_EDITORIAL_COMMENT
+                    + " Дополнительное изменение."
+                ),
+                issues=REVISION_ISSUES,
+            )
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print(
+        "Modified revision comment blocking: OK"
+    )
+    print("revision_client_call_count=0")
+
+
 async def main() -> int:
     """Запускает изолированные тесты генератора."""
 
@@ -1062,6 +1354,9 @@ async def main() -> int:
     test_duplicate_input_news_id()
     test_naive_datetime()
     test_invalid_score()
+    test_revision_request_preparation()
+    test_empty_revision_issues()
+    test_empty_revision_comment()
 
     await test_generation_success()
     await test_generate_text_interface()
@@ -1077,6 +1372,9 @@ async def main() -> int:
     await test_unpaired_body_markdown()
     await test_oversized_canonical_post()
     await test_model_draft_is_ignored()
+    await test_revision_generation_success()
+    await test_modified_revision_source_blocking()
+    await test_modified_revision_comment_blocking()
 
     print()
     print(
