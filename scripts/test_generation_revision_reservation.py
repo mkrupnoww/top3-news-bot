@@ -173,7 +173,7 @@ async def load_test_reviewer(
                 SELECT telegram_user_id
                 FROM top3_news.bot_users
                 WHERE is_active = true
-                  AND role = 'admin'
+                  AND user_role = 'admin'
                 ORDER BY telegram_user_id
                 LIMIT 1
                 """
