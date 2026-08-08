@@ -83,6 +83,7 @@ class GenerationModelRequest:
     model: str
     instructions: str
     input_text: str
+    allow_web_search: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,9 @@ class GenerationModelResponse:
     output_text: str
     usage: OpenAITokenUsage | None = None
     cost_estimate: OpenAICostEstimate | None = None
+    web_search_used: bool = False
+    web_search_call_count: int = 0
+    web_source_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +513,97 @@ Telegram-пост с ежедневной подборкой TOP-3
     что требуется основными инструкциями.
 """.strip()
 
+SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
+Ты выполняешь второй редакционный проход по уже
+созданному русскоязычному Telegram-посту с TOP-3
+новостей о кино и сериалах.
+
+Твоя задача — самостоятельно оценить готовый пост
+как внимательный редактор и при необходимости
+точечно улучшить его. Не жди замечаний человека.
+
+Проверь весь source_post_text и для каждой новости
+оцени:
+
+- понятен ли текст обычному читателю без знания
+  исходной статьи;
+- понятно ли, кто такие упомянутые люди и какова
+  их роль, если это существенно для смысла;
+- естественно ли звучат формулировки по-русски;
+- нет ли двусмысленных, обрубленных или слишком
+  буквальных переводов;
+- корректно ли переданы имена людей кириллицей;
+- понятны ли даты и относительные указания времени;
+- не выглядит ли рекорд, сумма, дата, должность,
+  статус сделки, цитата или другой существенный факт
+  сомнительным либо недостаточно объяснённым;
+- нет ли внутренних противоречий между headline,
+  body и исходными данными новости.
+
+У тебя доступен web_search. Сам решай, нужен ли он.
+Если поиск нужен, старайся ограничиться одним или
+двумя целевыми поисковыми вызовами.
+
+Используй web_search, когда имеющихся входных данных
+недостаточно для важного уточнения или проверки,
+которая заметно улучшает понятность или фактическую
+надёжность поста. Например, поиск уместен при
+неполном имени или неясной должности человека,
+неоднозначной дате, сомнительном рекорде, точной
+сумме, статусе сделки или другом существенном факте.
+
+Не используй поиск только ради обогащения поста
+новыми интересными подробностями. Найденные в сети
+сведения разрешено добавлять лишь тогда, когда они
+непосредственно нужны для устранения обнаруженного
+недостатка текущего текста.
+
+При проверке предпочитай первоисточники, официальные
+сайты и авторитетные профильные СМИ. Учитывай
+переданный source_url исходной новости. Если
+источники противоречат друг другу или уверенно
+установить факт не удалось, не выдумывай ответ:
+используй более безопасную формулировку либо убери
+сомнительную деталь.
+
+Редактируй консервативно:
+
+1. source_post_text — текущая версия поста и основа
+   результата.
+2. Если фрагмент уже хороший и понятный, сохрани его
+   максимально близко к исходному.
+3. Не переписывай весь пост ради стилистического
+   разнообразия.
+4. Исправляй только реальные недостатки, которые
+   обнаружил при втором проходе.
+5. Сохраняй порядок трёх новостей и их news_id.
+6. Имена людей передавай кириллицей: используй
+   общепринятую русскую форму или нейтральную
+   транслитерацию.
+7. Названия компаний и брендов можно сохранять
+   латиницей.
+8. Названия фильмов и сериалов сохраняй в исходном
+   написании, если нет надёжно подтверждённого
+   русского названия.
+9. Не добавляй в публикацию ссылки на веб-источники,
+   поисковые цитаты, список источников или объяснение
+   своей проверки. Уже присутствующие в исходном
+   посте ссылки сохраняй, если нет явной причины
+   считать их ошибочными.
+10. Не добавляй хештеги, Markdown-заголовки, HTML
+    или служебные комментарии.
+11. headline возвращай без внешних Markdown-маркеров.
+12. body может содержать только обычный Markdown,
+    разрешённый основными правилами поста.
+13. В JSON обязательно верни headline и body для
+    всех трёх новостей, даже если часть из них не
+    потребовала изменений.
+14. Поле post_text также обязательно верни, однако
+    окончательный post_text будет заново собран
+    Python-кодом из массива items.
+15. Верни только JSON-объект без Markdown-обёртки.
+""".strip()
+
 
 def _normalize_required_text(
     value: str,
@@ -640,6 +735,67 @@ def _build_revision_input_text(
         separators=(",", ":"),
     )
 
+
+
+def _build_self_review_input_text(
+    items: tuple[
+        GenerationNewsItem,
+        ...,
+    ],
+    *,
+    source_post_text: str,
+) -> str:
+    """Формирует JSON для второго прохода редактора."""
+
+    _validate_news_items(items)
+
+    normalized_source_post_text = (
+        _normalize_required_text(
+            source_post_text,
+            field_name="source_post_text",
+        )
+    )
+
+    payload = {
+        "task": (
+            "self_review_russian_telegram_"
+            "movie_news_top3"
+        ),
+        "text_format": (
+            OPENAI_POST_TEXT_FORMAT
+        ),
+        "maximum_post_length": (
+            MAXIMUM_POST_LENGTH
+        ),
+        "source_post_text": (
+            normalized_source_post_text
+        ),
+        "news": [
+            {
+                "position": item.position,
+                "news_id": item.news_id,
+                "title": item.title.strip(),
+                "summary": item.summary.strip(),
+                "source_name": (
+                    item.source_name.strip()
+                ),
+                "source_url": (
+                    item.source_url.strip()
+                ),
+                "source_published_at": (
+                    item.source_published_at
+                    .isoformat()
+                ),
+            }
+            for item in items
+        ],
+    }
+
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 def _validate_news_items(
     items: tuple[
@@ -1165,6 +1321,91 @@ class OpenAITelegramPostGenerator:
                 ),
                 issues=issues,
             ),
+        )
+
+    def build_self_review_request(
+        self,
+        items: tuple[
+            GenerationNewsItem,
+            ...,
+        ],
+        *,
+        source_post_text: str,
+    ) -> GenerationModelRequest:
+        """Формирует запрос второго редакционного прохода."""
+
+        _validate_news_items(items)
+
+        return GenerationModelRequest(
+            model=self._metadata.model_name,
+            instructions=(
+                SELF_REVIEW_SYSTEM_INSTRUCTIONS
+            ),
+            input_text=(
+                _build_self_review_input_text(
+                    items,
+                    source_post_text=(
+                        source_post_text
+                    ),
+                )
+            ),
+            allow_web_search=True,
+        )
+
+    async def generate_self_review_detailed(
+        self,
+        items: tuple[
+            GenerationNewsItem,
+            ...,
+        ],
+        *,
+        source_post_text: str,
+    ) -> OpenAIPostGenerationResult:
+        """Выполняет второй проход с optional web search."""
+
+        expected_news_ids = (
+            _validate_news_items(items)
+        )
+
+        request = self.build_self_review_request(
+            items,
+            source_post_text=source_post_text,
+        )
+
+        model_response = (
+            await self._client.create_response(
+                request
+            )
+        )
+
+        payload = _parse_response(
+            model_response.output_text
+        )
+
+        _validate_response_items(
+            expected_news_ids=(
+                expected_news_ids
+            ),
+            payload=payload,
+        )
+
+        canonical_post_text = (
+            build_top3_post_text(
+                payload.items
+            )
+        )
+
+        payload = payload.model_copy(
+            update={
+                "post_text": (
+                    canonical_post_text
+                ),
+            }
+        )
+
+        return OpenAIPostGenerationResult(
+            payload=payload,
+            model_response=model_response,
         )
 
     async def generate_prepared_revision_request(

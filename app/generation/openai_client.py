@@ -76,6 +76,70 @@ OPENAI_GENERATION_RESPONSE_SCHEMA: dict[
 }
 
 
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    """Преобразует SDK Response в обычный dict."""
+
+    model_dump = getattr(response, "model_dump", None)
+
+    if callable(model_dump):
+        dumped = model_dump()
+
+        if isinstance(dumped, dict):
+            return dumped
+
+    if isinstance(response, dict):
+        return response
+
+    return {}
+
+
+def _extract_web_search_telemetry(
+    response: Any,
+) -> tuple[int, tuple[str, ...]]:
+    """Возвращает число web search и URL источников."""
+
+    payload = _response_to_dict(response)
+    output = payload.get("output")
+
+    if not isinstance(output, list):
+        return 0, ()
+
+    web_search_call_count = 0
+    urls: list[str] = []
+
+    def collect_urls(value: Any) -> None:
+        if isinstance(value, dict):
+            url = value.get("url")
+
+            if isinstance(url, str):
+                normalized_url = url.strip()
+
+                if (
+                    normalized_url
+                    and normalized_url not in urls
+                ):
+                    urls.append(normalized_url)
+
+            for nested_value in value.values():
+                collect_urls(nested_value)
+
+        elif isinstance(value, list):
+            for nested_value in value:
+                collect_urls(nested_value)
+
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") != "web_search_call":
+            continue
+
+        web_search_call_count += 1
+        collect_urls(item.get("action"))
+
+    return web_search_call_count, tuple(urls)
+
+
 class OpenAIResponsesGenerationClient(
     StructuredGenerationClient
 ):
@@ -146,31 +210,53 @@ class OpenAIResponsesGenerationClient(
                 "быть пустым."
             )
 
+        request_kwargs: dict[str, Any] = {
+            "model": normalized_model,
+            "instructions": (
+                normalized_instructions
+            ),
+            "input": normalized_input,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": (
+                        OPENAI_GENERATION_SCHEMA_NAME
+                    ),
+                    "description": (
+                        "Русскоязычный "
+                        "Telegram-пост с TOP-3 "
+                        "киноновостей."
+                    ),
+                    "schema": (
+                        OPENAI_GENERATION_RESPONSE_SCHEMA
+                    ),
+                    "strict": True,
+                }
+            },
+            "store": False,
+        }
+
+        if request.allow_web_search:
+            request_kwargs.update(
+                {
+                    "tools": [
+                        {
+                            "type": "web_search",
+                        }
+                    ],
+                    "tool_choice": "auto",
+                    "include": [
+                        (
+                            "web_search_call."
+                            "action.sources"
+                        )
+                    ],
+                }
+            )
+
         response = (
             await self._client.responses.create(
-                model=normalized_model,
-                instructions=(
-                    normalized_instructions
-                ),
-                input=normalized_input,
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": (
-                            OPENAI_GENERATION_SCHEMA_NAME
-                        ),
-                        "description": (
-                            "Русскоязычный "
-                            "Telegram-пост с TOP-3 "
-                            "киноновостей."
-                        ),
-                        "schema": (
-                            OPENAI_GENERATION_RESPONSE_SCHEMA
-                        ),
-                        "strict": True,
-                    }
-                },
-                store=False,
+                **request_kwargs
             )
         )
 
@@ -212,8 +298,22 @@ class OpenAIResponsesGenerationClient(
             pricing,
         )
 
+        (
+            web_search_call_count,
+            web_source_urls,
+        ) = _extract_web_search_telemetry(
+            response
+        )
+
         return GenerationModelResponse(
             output_text=normalized_output,
             usage=usage,
             cost_estimate=cost_estimate,
+            web_search_used=(
+                web_search_call_count > 0
+            ),
+            web_search_call_count=(
+                web_search_call_count
+            ),
+            web_source_urls=web_source_urls,
         )
