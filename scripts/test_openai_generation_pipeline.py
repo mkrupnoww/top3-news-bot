@@ -52,9 +52,18 @@ class FakeStructuredGenerationClient:
     def __init__(
         self,
         *,
-        fail_request: bool = False,
+        fail_on_call: int | None = None,
     ) -> None:
-        self._fail_request = fail_request
+        if (
+            fail_on_call is not None
+            and fail_on_call <= 0
+        ):
+            raise ValueError(
+                "fail_on_call должен быть "
+                "больше нуля."
+            )
+
+        self._fail_on_call = fail_on_call
 
         self.requests: list[
             GenerationModelRequest
@@ -68,15 +77,71 @@ class FakeStructuredGenerationClient:
 
         self.requests.append(request)
 
-        if self._fail_request:
+        call_number = len(self.requests)
+
+        if (
+            self._fail_on_call is not None
+            and call_number
+            == self._fail_on_call
+        ):
             raise SyntheticGenerationError(
                 "Synthetic generation failure "
-                "for pipeline integration test."
+                "for pipeline integration test "
+                f"on call {call_number}."
             )
 
         input_payload = json.loads(
             request.input_text
         )
+
+        task = input_payload.get("task")
+
+        expected_tasks = {
+            (
+                "generate_russian_telegram_"
+                "movie_news_top3"
+            ),
+            (
+                "self_review_russian_telegram_"
+                "movie_news_top3"
+            ),
+        }
+
+        if task not in expected_tasks:
+            raise AssertionError(
+                "Неожиданный task в запросе "
+                f"модели: {task!r}"
+            )
+
+        is_self_review = (
+            task
+            == (
+                "self_review_russian_telegram_"
+                "movie_news_top3"
+            )
+        )
+
+        if is_self_review:
+            source_post_text = (
+                input_payload.get(
+                    "source_post_text"
+                )
+            )
+
+            if not isinstance(
+                source_post_text,
+                str,
+            ):
+                raise AssertionError(
+                    "Self-review запрос не "
+                    "содержит source_post_text."
+                )
+
+            if not source_post_text.strip():
+                raise AssertionError(
+                    "source_post_text self-review "
+                    "не может быть пустым."
+                )
 
         news_items = input_payload.get(
             "news"
@@ -179,6 +244,11 @@ class FakeStructuredGenerationClient:
                 normalized_summary[:700]
             )
 
+            if is_self_review:
+                headline = (
+                    f"{headline} — self-review"
+                )
+
             generated_items.append(
                 {
                     "position": position,
@@ -223,6 +293,18 @@ class FakeStructuredGenerationClient:
             cost_estimate=(
                 telemetry.cost_estimate
             ),
+            web_search_used=is_self_review,
+            web_search_call_count=(
+                1 if is_self_review else 0
+            ),
+            web_source_urls=(
+                (
+                    "https://example.test/"
+                    "self-review-source"
+                ),
+            )
+            if is_self_review
+            else (),
         )
 
 
@@ -540,7 +622,60 @@ async def test_successful_pipeline(
         is not None
     )
 
-    assert len(fake_client.requests) == 1
+    assert len(fake_client.requests) == 2
+
+    primary_request = (
+        fake_client.requests[0]
+    )
+
+    self_review_request = (
+        fake_client.requests[1]
+    )
+
+    assert (
+        primary_request.allow_web_search
+        is False
+    )
+
+    assert (
+        self_review_request.allow_web_search
+        is True
+    )
+
+    primary_input = json.loads(
+        primary_request.input_text
+    )
+
+    self_review_input = json.loads(
+        self_review_request.input_text
+    )
+
+    assert (
+        primary_input["task"]
+        == (
+            "generate_russian_telegram_"
+            "movie_news_top3"
+        )
+    )
+
+    assert (
+        self_review_input["task"]
+        == (
+            "self_review_russian_telegram_"
+            "movie_news_top3"
+        )
+    )
+
+    assert isinstance(
+        self_review_input["source_post_text"],
+        str,
+    )
+
+    assert (
+        self_review_input[
+            "source_post_text"
+        ].strip()
+    )
 
     assert (
         first_result
@@ -556,6 +691,35 @@ async def test_successful_pipeline(
         .model_response
         .cost_estimate
         is not None
+    )
+
+    assert (
+        first_result
+        .generation
+        .model_response
+        .web_search_used
+        is True
+    )
+
+    assert (
+        first_result
+        .generation
+        .model_response
+        .web_search_call_count
+        == 1
+    )
+
+    assert (
+        first_result
+        .generation
+        .model_response
+        .web_source_urls
+        == (
+            (
+                "https://example.test/"
+                "self-review-source"
+            ),
+        )
     )
 
     print(
@@ -757,40 +921,56 @@ async def test_successful_pipeline(
         10,
     ]
 
+    assert all(
+        isinstance(
+            item.get("headline"),
+            str,
+        )
+        and item["headline"].endswith(
+            " — self-review"
+        )
+        for item in generated_items
+    )
+
+    assert (
+        "— self-review"
+        in record["post_text"]
+    )
+
     assert (
         batch_usage["input_tokens"]
-        == 1400
+        == 2800
     )
 
     assert (
         batch_usage[
             "regular_input_tokens"
         ]
-        == 1100
+        == 2200
     )
 
     assert (
         batch_usage[
             "cached_input_tokens"
         ]
-        == 200
+        == 400
     )
 
     assert (
         batch_usage[
             "cache_write_tokens"
         ]
-        == 100
+        == 200
     )
 
     assert (
         batch_usage["output_tokens"]
-        == 300
+        == 600
     )
 
     assert (
         batch_usage["total_tokens"]
-        == 1700
+        == 3400
     )
 
     assert post_usage == batch_usage
@@ -802,7 +982,7 @@ async def test_successful_pipeline(
 
     assert (
         batch_cost["total_cost_usd"]
-        == "0.00609000"
+        == "0.01218000"
     )
 
     assert post_cost == batch_cost
@@ -904,7 +1084,7 @@ async def test_successful_pipeline(
         is None
     )
 
-    assert len(fake_client.requests) == 1
+    assert len(fake_client.requests) == 2
 
     repeated_record = (
         await load_batch_by_model(
@@ -950,7 +1130,7 @@ async def test_failed_pipeline(
     publication_date: date,
     test_model_names: set[str],
 ) -> None:
-    """Проверяет ошибку модели и failed."""
+    """Проверяет ошибку self-review и failed."""
 
     model_name = build_model_name(
         scenario="failure"
@@ -962,7 +1142,7 @@ async def test_failed_pipeline(
 
     fake_client = (
         FakeStructuredGenerationClient(
-            fail_request=True
+            fail_on_call=2
         )
     )
 
@@ -1012,7 +1192,33 @@ async def test_failed_pipeline(
             "не была передана вызывающему коду."
         )
 
-    assert len(fake_client.requests) == 1
+    assert len(fake_client.requests) == 2
+
+    assert (
+        fake_client
+        .requests[0]
+        .allow_web_search
+        is False
+    )
+
+    assert (
+        fake_client
+        .requests[1]
+        .allow_web_search
+        is True
+    )
+
+    failed_self_review_input = json.loads(
+        fake_client.requests[1].input_text
+    )
+
+    assert (
+        failed_self_review_input["task"]
+        == (
+            "self_review_russian_telegram_"
+            "movie_news_top3"
+        )
+    )
 
     record = await load_batch_by_model(
         pool,
@@ -1142,7 +1348,7 @@ async def test_failed_pipeline(
     assert repeated_result.generation is None
     assert repeated_result.completion is None
 
-    assert len(fake_client.requests) == 1
+    assert len(fake_client.requests) == 2
 
     print()
     print(
