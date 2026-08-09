@@ -11,7 +11,6 @@ from app.db.pool import (
 )
 
 
-LEGACY_RANKING_RUN_ID = 18
 DIVERSITY_RANKING_RUN_ID = 104
 SECOND_DIVERSITY_RANKING_RUN_ID = 98
 
@@ -43,7 +42,7 @@ def test_selection_mode_validation() -> None:
     assert (
         _resolve_saved_top3_mode(
             0,
-            ranking_run_id=18,
+            ranking_run_id=999,
         )
         is False
     )
@@ -67,27 +66,6 @@ def test_selection_mode_validation() -> None:
             )
 
     print("Selection mode validation: OK")
-
-
-async def test_legacy_selection(pool: object) -> None:
-    """Проверяет fallback старого ranking_run."""
-
-    selection = await load_generation_top3(
-        pool,
-        ranking_run_id=LEGACY_RANKING_RUN_ID,
-    )
-
-    assert selection.ranking_run_id == 18
-    assert selection.run_status == "completed"
-    assert selection.news_ids == (11, 9, 10)
-
-    assert_positions(selection)
-
-    print()
-    print("Legacy generation selection: OK")
-    print("ranking_run_id=18")
-    print("selection_mode=legacy_rank_position")
-    print("news_ids=11,9,10")
 
 
 async def test_diversity_selection(
@@ -167,7 +145,6 @@ async def main() -> int:
     )
 
     try:
-        await test_legacy_selection(pool)
         await test_diversity_selection(pool)
         await test_second_diversity_selection(
             pool
