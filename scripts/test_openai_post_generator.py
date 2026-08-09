@@ -1279,7 +1279,12 @@ def test_revision_request_preparation() -> None:
     )
 
     assert (
-        "Предыдущий post_text используй только как"
+        "source_post_text — текущая редактируемая версия"
+        in request.instructions
+    )
+
+    assert (
+        "но не как источник новых фактов"
         in request.instructions
     )
 
