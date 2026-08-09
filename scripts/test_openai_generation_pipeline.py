@@ -31,6 +31,9 @@ from app.generation.openai_generator import (
 from app.generation.openai_pipeline import (
     run_reserved_openai_generation,
 )
+from app.generation.official_trailer_enrichment import (
+    OfficialTrailerEnrichmentResult,
+)
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
@@ -55,6 +58,10 @@ TEST_NEWS_IDS = (
 
 TEST_SUITE_ID = uuid4().hex
 
+OFFICIAL_TRAILER_URL = (
+    "https://www.youtube.com/watch?v=5fHXyqQOKL8"
+)
+
 
 class SyntheticGenerationError(
     RuntimeError
@@ -68,6 +75,73 @@ class TestGenerationTelemetry:
 
     usage: OpenAITokenUsage
     cost_estimate: OpenAICostEstimate
+
+
+class FakeOfficialTrailerEnricher:
+    """Поддельный trailer enrichment без HTTP."""
+
+    def __init__(self) -> None:
+        self.calls: list[
+            dict[str, str]
+        ] = []
+
+    async def __call__(
+        self,
+        *,
+        source_url: str,
+        source_title: str,
+        source_summary: str,
+    ) -> OfficialTrailerEnrichmentResult:
+        """Подтверждает трейлер только для TOP-2."""
+
+        self.calls.append(
+            {
+                "source_url": source_url,
+                "source_title": source_title,
+                "source_summary": source_summary,
+            }
+        )
+
+        position_in_pass = (
+            (len(self.calls) - 1) % 3
+        ) + 1
+
+        if position_in_pass == 2:
+            return OfficialTrailerEnrichmentResult(
+                attempted=True,
+                verified=True,
+                official_trailer_url=(
+                    OFFICIAL_TRAILER_URL
+                ),
+                reason=(
+                    "verified_official_trailer"
+                ),
+                article_final_url=source_url,
+                youtube_candidate_urls=(
+                    OFFICIAL_TRAILER_URL,
+                ),
+                checked_video_urls=(
+                    OFFICIAL_TRAILER_URL,
+                ),
+                verification_reasons=(
+                    "verified_official_trailer",
+                ),
+                oembed_error_count=0,
+                error_type=None,
+            )
+
+        return OfficialTrailerEnrichmentResult(
+            attempted=False,
+            verified=False,
+            official_trailer_url=None,
+            reason="source_is_not_trailer_news",
+            article_final_url=None,
+            youtube_candidate_urls=(),
+            checked_video_urls=(),
+            verification_reasons=(),
+            oembed_error_count=0,
+            error_type=None,
+        )
 
 
 class FakeStructuredGenerationClient:
@@ -790,6 +864,10 @@ async def test_successful_pipeline(
         FakeStructuredGenerationClient()
     )
 
+    fake_trailer_enricher = (
+        FakeOfficialTrailerEnricher()
+    )
+
     generator = (
         OpenAITelegramPostGenerator(
             client=fake_client,
@@ -801,6 +879,9 @@ async def test_successful_pipeline(
         await run_reserved_openai_generation(
             pool,
             generator=generator,
+            trailer_enricher=(
+                fake_trailer_enricher
+            ),
             ranking_run_id=(
                 ranking_run_id
             ),
@@ -821,6 +902,40 @@ async def test_successful_pipeline(
     assert (
         first_result.selection.news_ids
         == (11, 9, 10)
+    )
+
+    assert all(
+        item.official_trailer_url is None
+        for item in first_result.selection.items
+    )
+
+    assert len(
+        fake_trailer_enricher.calls
+    ) == 3
+
+    reserved_input = json.loads(
+        first_result.model_request.input_text
+    )
+
+    assert all(
+        "official_trailer_url"
+        not in news_item
+        for news_item in reserved_input["news"]
+    )
+
+    request_key_payload = json.loads(
+        first_result.request_key.canonical_json
+    )
+
+    assert all(
+        "official_trailer_url"
+        not in news_item
+        for news_item in request_key_payload["top3"]
+    )
+
+    assert (
+        OFFICIAL_TRAILER_URL
+        not in first_result.request_key.canonical_json
     )
 
     assert (
@@ -901,6 +1016,38 @@ async def test_successful_pipeline(
             "self_review_russian_telegram_"
             "movie_news_top3"
         )
+    )
+
+    assert (
+        "official_trailer_url"
+        not in primary_input["news"][0]
+    )
+
+    assert primary_input[
+        "news"
+    ][1][
+        "official_trailer_url"
+    ] == OFFICIAL_TRAILER_URL
+
+    assert (
+        "official_trailer_url"
+        not in primary_input["news"][2]
+    )
+
+    assert (
+        "official_trailer_url"
+        not in self_review_input["news"][0]
+    )
+
+    assert self_review_input[
+        "news"
+    ][1][
+        "official_trailer_url"
+    ] == OFFICIAL_TRAILER_URL
+
+    assert (
+        "official_trailer_url"
+        not in self_review_input["news"][2]
     )
 
     assert isinstance(
@@ -1266,6 +1413,9 @@ async def test_successful_pipeline(
         await run_reserved_openai_generation(
             pool,
             generator=generator,
+            trailer_enricher=(
+                fake_trailer_enricher
+            ),
             ranking_run_id=(
                 ranking_run_id
             ),
@@ -1322,6 +1472,10 @@ async def test_successful_pipeline(
     )
 
     assert len(fake_client.requests) == 2
+
+    assert len(
+        fake_trailer_enricher.calls
+    ) == 3
 
     repeated_record = (
         await load_batch_by_model(
@@ -1384,6 +1538,10 @@ async def test_failed_pipeline(
         )
     )
 
+    fake_trailer_enricher = (
+        FakeOfficialTrailerEnricher()
+    )
+
     generator = (
         OpenAITelegramPostGenerator(
             client=fake_client,
@@ -1395,6 +1553,9 @@ async def test_failed_pipeline(
         await run_reserved_openai_generation(
             pool,
             generator=generator,
+            trailer_enricher=(
+                fake_trailer_enricher
+            ),
             ranking_run_id=(
                 ranking_run_id
             ),
@@ -1431,6 +1592,10 @@ async def test_failed_pipeline(
         )
 
     assert len(fake_client.requests) == 2
+
+    assert len(
+        fake_trailer_enricher.calls
+    ) == 3
 
     assert (
         fake_client
@@ -1541,6 +1706,9 @@ async def test_failed_pipeline(
         await run_reserved_openai_generation(
             pool,
             generator=generator,
+            trailer_enricher=(
+                fake_trailer_enricher
+            ),
             ranking_run_id=(
                 ranking_run_id
             ),
@@ -1587,6 +1755,10 @@ async def test_failed_pipeline(
     assert repeated_result.completion is None
 
     assert len(fake_client.requests) == 2
+
+    assert len(
+        fake_trailer_enricher.calls
+    ) == 3
 
     print()
     print(
@@ -1883,6 +2055,9 @@ async def main() -> int:
     print()
     print("API key required: no")
     print("OpenAI requests: not performed")
+    print(
+        "Trailer HTTP requests: fake enricher only"
+    )
     print(
         "Database changes: temporary ranking_run, "
         "news_scores, batches, batch_items and "

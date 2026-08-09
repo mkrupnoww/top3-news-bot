@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import date
 
 import asyncpg
@@ -19,8 +20,13 @@ from app.db.generation_selection import (
 from app.generation.openai_generator import (
     GenerationModelRequest,
     GenerationModelResponse,
+    GenerationNewsItem,
     OpenAIPostGenerationResult,
     OpenAITelegramPostGenerator,
+)
+from app.generation.official_trailer_enrichment import (
+    OfficialTrailerEnrichmentResult,
+    enrich_official_trailer,
 )
 from app.generation.request_key import (
     GenerationRequestKey,
@@ -30,6 +36,12 @@ from app.ranking.openai_usage import (
     OpenAICostEstimate,
     OpenAITokenUsage,
 )
+
+
+OfficialTrailerEnricher = Callable[
+    ...,
+    Awaitable[OfficialTrailerEnrichmentResult],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +315,64 @@ def _combine_generation_results(
     )
 
 
+async def _enrich_generation_items(
+    items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ],
+    *,
+    trailer_enricher: OfficialTrailerEnricher,
+) -> tuple[
+    GenerationNewsItem,
+    GenerationNewsItem,
+    GenerationNewsItem,
+]:
+    """
+    Добавляет verified official trailer URL
+    только во временные items OpenAI-запроса.
+
+    Исходный сохранённый TOP-3 не изменяется.
+    Если официальный трейлер не подтверждён,
+    соответствующий GenerationNewsItem остаётся
+    без изменений.
+    """
+
+    enriched_items: list[
+        GenerationNewsItem
+    ] = []
+
+    for item in items:
+        enrichment = await trailer_enricher(
+            source_url=item.source_url,
+            source_title=item.title,
+            source_summary=item.summary,
+        )
+
+        if (
+            enrichment.verified
+            and enrichment.official_trailer_url
+            is not None
+        ):
+            enriched_items.append(
+                replace(
+                    item,
+                    official_trailer_url=(
+                        enrichment
+                        .official_trailer_url
+                    ),
+                )
+            )
+        else:
+            enriched_items.append(item)
+
+    return (
+        enriched_items[0],
+        enriched_items[1],
+        enriched_items[2],
+    )
+
+
 async def _record_pipeline_failure(
     pool: asyncpg.Pool,
     *,
@@ -349,6 +419,9 @@ async def run_reserved_openai_generation(
     ranking_run_id: int,
     publication_date: date,
     telegram_chat_id: int,
+    trailer_enricher: OfficialTrailerEnricher = (
+        enrich_official_trailer
+    ),
 ) -> ReservedOpenAIGenerationResult:
     """
     Запускает защищённую генерацию поста.
@@ -356,21 +429,28 @@ async def run_reserved_openai_generation(
     Последовательность:
 
     1. Читает сохранённый TOP-3 из PostgreSQL.
-    2. Формирует точный запрос первичной модели.
+    2. Формирует базовый запрос без внешнего
+       trailer enrichment.
     3. Вычисляет детерминированный request_key.
     4. Резервирует publication_batch.
-    5. Блокирует повторный платный запуск.
-    6. При новом выпуске выполняет первичную
-       генерацию Telegram-поста.
-    7. Выполняет автоматический self-review
+    5. Блокирует повторный запуск до любых
+       HTTP-запросов enrichment и OpenAI.
+    6. Только для нового выпуска best-effort
+       ищет verified official trailer внутри
+       исходных статей TOP-3.
+    7. Формирует фактический OpenAI-запрос
+       по временным enriched items.
+    8. Выполняет первичную генерацию
+       Telegram-поста.
+    9. Выполняет автоматический self-review
        того же поста. Self-review сам решает,
        нужен ли web_search.
-    8. Финальный текст берёт из self-review,
-       а usage и стоимость модели суммирует
-       по обоим Responses API вызовам.
-    9. Сохраняет только финальный generated_post.
-    10. Переводит выпуск в awaiting_review.
-    11. При ошибке переводит выпуск в failed.
+    10. Финальный текст берёт из self-review,
+        а usage и стоимость модели суммирует
+        по обоим Responses API вызовам.
+    11. Сохраняет только финальный generated_post.
+    12. Переводит выпуск в awaiting_review.
+    13. При ошибке переводит выпуск в failed.
 
     Функция не управляет жизненным циклом
     пула PostgreSQL или OpenAI SDK-клиента.
@@ -427,11 +507,24 @@ async def run_reserved_openai_generation(
         )
 
     try:
+        generation_items = (
+            await _enrich_generation_items(
+                selection.items,
+                trailer_enricher=trailer_enricher,
+            )
+        )
+
+        generation_model_request = (
+            generator.build_request(
+                generation_items
+            )
+        )
+
         primary_generation = (
             await generator
             .generate_prepared_request(
-                selection.items,
-                model_request,
+                generation_items,
+                generation_model_request,
             )
         )
 
@@ -442,7 +535,7 @@ async def run_reserved_openai_generation(
         self_review_generation = (
             await generator
             .generate_self_review_detailed(
-                selection.items,
+                generation_items,
                 source_post_text=(
                     primary_generation
                     .payload
