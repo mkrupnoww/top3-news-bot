@@ -77,6 +77,62 @@ def _normalize_required_text(
     return normalized_value
 
 
+def _resolve_saved_top3_mode(
+    selected_for_top3_count: int,
+    *,
+    ranking_run_id: int,
+) -> bool:
+    """
+    Определяет способ чтения сохранённого TOP-3.
+
+    Возвращает True для нового формата
+    selected_for_top3/top3_position и False
+    для legacy rank_position 1..3.
+
+    Любое частично сохранённое новое состояние
+    считается ошибкой и не маскируется fallback.
+    """
+
+    if isinstance(
+        selected_for_top3_count,
+        bool,
+    ):
+        raise TypeError(
+            "selected_for_top3_count "
+            "не может быть bool."
+        )
+
+    if not isinstance(
+        selected_for_top3_count,
+        int,
+    ):
+        raise TypeError(
+            "selected_for_top3_count "
+            "должен быть int."
+        )
+
+    if selected_for_top3_count < 0:
+        raise ValueError(
+            "selected_for_top3_count "
+            "не может быть отрицательным."
+        )
+
+    if selected_for_top3_count == 3:
+        return True
+
+    if selected_for_top3_count == 0:
+        return False
+
+    raise ValueError(
+        "Сохранённый финальный TOP-3 имеет "
+        "некорректное число строк "
+        "selected_for_top3=true: "
+        f"ranking_run_id={ranking_run_id}, "
+        f"found={selected_for_top3_count}, "
+        "expected=0 legacy или 3."
+    )
+
+
 def _required_record_text(
     record: asyncpg.Record,
     field_name: str,
@@ -135,7 +191,7 @@ def _build_selection(
         )
 
     positions = tuple(
-        int(record["rank_position"])
+        int(record["generation_position"])
         for record in records
     )
 
@@ -150,7 +206,9 @@ def _build_selection(
     items: list[GenerationNewsItem] = []
 
     for record in records:
-        position = int(record["rank_position"])
+        position = int(
+            record["generation_position"]
+        )
         news_id = int(record["news_id"])
         score_id = int(record["score_id"])
 
@@ -337,10 +395,32 @@ async def _load_generation_top3(
             f"{ranking_run_id}"
         )
 
+    selected_for_top3_count = (
+        await connection.fetchval(
+            """
+            SELECT COUNT(*)::integer
+            FROM news_scores
+            WHERE ranking_run_id = $1
+              AND selected_for_top3 = true
+            """,
+            ranking_run_id,
+        )
+    )
+
+    use_saved_top3 = _resolve_saved_top3_mode(
+        int(selected_for_top3_count),
+        ranking_run_id=ranking_run_id,
+    )
+
     records = await connection.fetch(
         """
         SELECT
             ns.score_id,
+            CASE
+                WHEN $2::boolean
+                    THEN ns.top3_position
+                ELSE ns.rank_position
+            END AS generation_position,
             ns.rank_position,
             ns.news_id,
             ns.individual_score,
@@ -380,10 +460,29 @@ async def _load_generation_top3(
             ON s.source_id = ni.source_id
         WHERE ns.ranking_run_id = $1
           AND ns.is_eligible = true
-          AND ns.rank_position BETWEEN 1 AND 3
-        ORDER BY ns.rank_position
+          AND (
+                (
+                    $2::boolean
+                    AND ns.selected_for_top3 = true
+                    AND ns.top3_position
+                        BETWEEN 1 AND 3
+                )
+                OR
+                (
+                    NOT $2::boolean
+                    AND ns.rank_position
+                        BETWEEN 1 AND 3
+                )
+          )
+        ORDER BY
+            CASE
+                WHEN $2::boolean
+                    THEN ns.top3_position
+                ELSE ns.rank_position
+            END
         """,
         ranking_run_id,
+        use_saved_top3,
     )
 
     return _build_selection(
