@@ -1,7 +1,8 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from typing import Any
 from uuid import uuid4
@@ -13,6 +14,15 @@ from app.db.pool import (
     close_database_pool,
     create_database_pool,
 )
+from app.db.ranking_run_completion import (
+    complete_reserved_ranking_run,
+)
+from app.db.ranking_run_reservation import (
+    reserve_ranking_run,
+)
+from app.db.ranking_scores import (
+    ManualNewsAssessment,
+)
 from app.generation.openai_generator import (
     GenerationModelRequest,
     GenerationModelResponse,
@@ -21,13 +31,27 @@ from app.generation.openai_generator import (
 from app.generation.openai_pipeline import (
     run_reserved_openai_generation,
 )
+from app.ranking.evaluator import (
+    RankingEvaluatorMetadata,
+)
 from app.ranking.openai_usage import (
     OpenAICostEstimate,
     OpenAITokenUsage,
 )
+from app.ranking.request_key import (
+    REQUEST_KEY_VERSION,
+    RankingRequestKey,
+)
+from app.ranking.score_formula import (
+    FORMULA_VERSION,
+)
 
 
-TEST_RANKING_RUN_ID = 18
+TEST_NEWS_IDS = (
+    11,
+    9,
+    10,
+)
 
 TEST_SUITE_ID = uuid4().hex
 
@@ -379,6 +403,218 @@ def build_publication_date() -> date:
     )
 
 
+def build_ranking_metadata() -> RankingEvaluatorMetadata:
+    """Создаёт метаданные временной ranking-фикстуры."""
+
+    return RankingEvaluatorMetadata(
+        run_mode="openai_ranking",
+        evaluator_name=(
+            "TestOpenAIGenerationPipelineRankingFixture"
+        ),
+        evaluator_version=(
+            "test_openai_generation_pipeline_"
+            "ranking_fixture_v1"
+        ),
+        prompt_version=(
+            "test_openai_generation_pipeline_"
+            "ranking_prompt_v1"
+        ),
+        model_name="gpt-5.6-terra",
+    )
+
+
+def build_ranking_request_key() -> RankingRequestKey:
+    """Создаёт уникальный request_key фикстуры."""
+
+    payload = {
+        "test": (
+            "openai_generation_pipeline_"
+            "ranking_fixture"
+        ),
+        "test_suite_id": TEST_SUITE_ID,
+        "news_ids": list(TEST_NEWS_IDS),
+    }
+
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    value = sha256(
+        canonical_json.encode("utf-8")
+    ).hexdigest()
+
+    return RankingRequestKey(
+        value=value,
+        version=REQUEST_KEY_VERSION,
+        canonical_json=canonical_json,
+    )
+
+
+def build_ranking_assessments() -> tuple[
+    ManualNewsAssessment,
+    ...,
+]:
+    """Фиксирует legacy TOP-3 в порядке 11, 9, 10."""
+
+    return (
+        ManualNewsAssessment(
+            news_id=11,
+            f_score=Decimal("10.000000"),
+            m_score=Decimal("10.000000"),
+            r_score=Decimal("10.000000"),
+            h_score=Decimal("10.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость с максимальным "
+                "баллом для позиции 1."
+            ),
+        ),
+        ManualNewsAssessment(
+            news_id=9,
+            f_score=Decimal("9.000000"),
+            m_score=Decimal("9.000000"),
+            r_score=Decimal("9.000000"),
+            h_score=Decimal("9.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость со вторым "
+                "баллом для позиции 2."
+            ),
+        ),
+        ManualNewsAssessment(
+            news_id=10,
+            f_score=Decimal("8.000000"),
+            m_score=Decimal("8.000000"),
+            r_score=Decimal("8.000000"),
+            h_score=Decimal("8.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость с третьим "
+                "баллом для позиции 3."
+            ),
+        ),
+    )
+
+
+async def create_test_ranking_run(
+    pool: asyncpg.Pool,
+    *,
+    created_ranking_run_ids: set[int],
+) -> int:
+    """Создаёт и завершает временный ranking_run."""
+
+    metadata = build_ranking_metadata()
+    request_key = build_ranking_request_key()
+
+    window_finished_at = datetime(
+        2026,
+        8,
+        9,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    window_started_at = (
+        window_finished_at
+        - timedelta(hours=24)
+    )
+
+    reservation = await reserve_ranking_run(
+        pool,
+        request_key=request_key,
+        formula_version=FORMULA_VERSION,
+        metadata=metadata,
+        window_started_at=window_started_at,
+        window_finished_at=window_finished_at,
+        news_ids=TEST_NEWS_IDS,
+    )
+
+    created_ranking_run_ids.add(
+        reservation.ranking_run_id
+    )
+
+    assert reservation.created_new is True
+    assert reservation.should_call_model is True
+    assert reservation.run_status == "running"
+
+    telemetry = build_telemetry(
+        model_name="gpt-5.6-terra"
+    )
+
+    completion = (
+        await complete_reserved_ranking_run(
+            pool,
+            ranking_run_id=(
+                reservation.ranking_run_id
+            ),
+            request_key=request_key.value,
+            metadata=metadata,
+            assessments=(
+                build_ranking_assessments()
+            ),
+            usage=telemetry.usage,
+            cost_estimate=(
+                telemetry.cost_estimate
+            ),
+        )
+    )
+
+    assert completion.run_status == "completed"
+    assert completion.already_completed is False
+    assert completion.candidate_count == 3
+    assert completion.scored_count == 3
+    assert completion.eligible_count == 3
+
+    assert [
+        score.news_id
+        for score in completion.scores
+    ] == [
+        11,
+        9,
+        10,
+    ]
+
+    assert [
+        score.rank_position
+        for score in completion.scores
+    ] == [
+        1,
+        2,
+        3,
+    ]
+
+    async with pool.acquire() as connection:
+        selected_for_top3_count = (
+            await connection.fetchval(
+                """
+                SELECT COUNT(*)::integer
+                FROM top3_news.news_scores
+                WHERE ranking_run_id = $1
+                  AND selected_for_top3 = true
+                """,
+                reservation.ranking_run_id,
+            )
+        )
+
+    assert selected_for_top3_count == 0
+
+    print(
+        "Temporary ranking fixture: OK"
+    )
+    print(
+        "temporary_ranking_run_id="
+        f"{reservation.ranking_run_id}"
+    )
+    print("ranking_fixture_news_ids=11,9,10")
+    print("selection_mode=legacy_rank_position")
+
+    return reservation.ranking_run_id
+
+
 def decode_jsonb(
     value: Any,
 ) -> Any:
@@ -535,6 +771,7 @@ async def load_batch_by_model(
 async def test_successful_pipeline(
     pool: asyncpg.Pool,
     *,
+    ranking_run_id: int,
     telegram_chat_id: int,
     publication_date: date,
     test_model_names: set[str],
@@ -565,7 +802,7 @@ async def test_successful_pipeline(
             pool,
             generator=generator,
             ranking_run_id=(
-                TEST_RANKING_RUN_ID
+                ranking_run_id
             ),
             publication_date=(
                 publication_date
@@ -578,7 +815,7 @@ async def test_successful_pipeline(
 
     assert (
         first_result.selection.ranking_run_id
-        == TEST_RANKING_RUN_ID
+        == ranking_run_id
     )
 
     assert (
@@ -806,7 +1043,7 @@ async def test_successful_pipeline(
 
     assert (
         record["ranking_run_id"]
-        == TEST_RANKING_RUN_ID
+        == ranking_run_id
     )
 
     assert (
@@ -1030,7 +1267,7 @@ async def test_successful_pipeline(
             pool,
             generator=generator,
             ranking_run_id=(
-                TEST_RANKING_RUN_ID
+                ranking_run_id
             ),
             publication_date=(
                 publication_date
@@ -1126,6 +1363,7 @@ async def test_successful_pipeline(
 async def test_failed_pipeline(
     pool: asyncpg.Pool,
     *,
+    ranking_run_id: int,
     telegram_chat_id: int,
     publication_date: date,
     test_model_names: set[str],
@@ -1158,7 +1396,7 @@ async def test_failed_pipeline(
             pool,
             generator=generator,
             ranking_run_id=(
-                TEST_RANKING_RUN_ID
+                ranking_run_id
             ),
             publication_date=(
                 publication_date
@@ -1236,7 +1474,7 @@ async def test_failed_pipeline(
 
     assert (
         record["ranking_run_id"]
-        == TEST_RANKING_RUN_ID
+        == ranking_run_id
     )
 
     assert (
@@ -1304,7 +1542,7 @@ async def test_failed_pipeline(
             pool,
             generator=generator,
             ranking_run_id=(
-                TEST_RANKING_RUN_ID
+                ranking_run_id
             ),
             publication_date=(
                 publication_date
@@ -1469,23 +1707,9 @@ async def cleanup_test_batches(
             remaining_item_count = 0
             remaining_post_count = 0
 
-        ranking_run_exists = (
-            await connection.fetchval(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM top3_news.ranking_runs
-                    WHERE ranking_run_id = $1
-                )
-                """,
-                TEST_RANKING_RUN_ID,
-            )
-        )
-
     assert remaining_batch_count == 0
     assert remaining_item_count == 0
     assert remaining_post_count == 0
-    assert ranking_run_exists is True
 
     print()
     print("Test data cleanup: OK")
@@ -1505,9 +1729,81 @@ async def cleanup_test_batches(
         "temporary_batches_items_posts_"
         "deleted=true"
     )
+
+
+
+async def cleanup_test_ranking_runs(
+    pool: asyncpg.Pool,
+    *,
+    created_ranking_run_ids: set[int],
+) -> None:
+    """Удаляет временные ranking runs и scores."""
+
+    deleted_ranking_run_ids: list[int] = []
+
+    for ranking_run_id in sorted(
+        created_ranking_run_ids
+    ):
+        async with pool.acquire() as connection:
+            result = await connection.execute(
+                """
+                DELETE FROM top3_news.ranking_runs
+                WHERE ranking_run_id = $1
+                """,
+                ranking_run_id,
+            )
+
+        if result != "DELETE 1":
+            raise RuntimeError(
+                "Не удалось удалить временный "
+                "ranking_run: "
+                f"ranking_run_id={ranking_run_id}, "
+                f"result={result}"
+            )
+
+        async with pool.acquire() as connection:
+            run_exists = await connection.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM top3_news.ranking_runs
+                    WHERE ranking_run_id = $1
+                )
+                """,
+                ranking_run_id,
+            )
+
+            score_count = await connection.fetchval(
+                """
+                SELECT COUNT(*)::integer
+                FROM top3_news.news_scores
+                WHERE ranking_run_id = $1
+                """,
+                ranking_run_id,
+            )
+
+        assert run_exists is False
+        assert score_count == 0
+
+        deleted_ranking_run_ids.append(
+            ranking_run_id
+        )
+
+    print()
+    print("Ranking fixture cleanup: OK")
     print(
-        "ranking_run_18_preserved=true"
+        "deleted_ranking_run_ids="
+        + (
+            ",".join(
+                str(ranking_run_id)
+                for ranking_run_id
+                in deleted_ranking_run_ids
+            )
+            if deleted_ranking_run_ids
+            else "none"
+        )
     )
+    print("temporary_ranking_data_deleted=true")
 
 
 async def main() -> int:
@@ -1521,13 +1817,25 @@ async def main() -> int:
 
     test_model_names: set[str] = set()
 
+    created_ranking_run_ids: set[int] = set()
+
     publication_date = (
         build_publication_date()
     )
 
     try:
+        ranking_run_id = (
+            await create_test_ranking_run(
+                pool,
+                created_ranking_run_ids=(
+                    created_ranking_run_ids
+                ),
+            )
+        )
+
         await test_successful_pipeline(
             pool,
+            ranking_run_id=ranking_run_id,
             telegram_chat_id=(
                 settings.telegram_channel_id
             ),
@@ -1541,6 +1849,7 @@ async def main() -> int:
 
         await test_failed_pipeline(
             pool,
+            ranking_run_id=ranking_run_id,
             telegram_chat_id=(
                 settings.telegram_channel_id
             ),
@@ -1561,15 +1870,23 @@ async def main() -> int:
                 ),
             )
         finally:
-            await close_database_pool(pool)
+            try:
+                await cleanup_test_ranking_runs(
+                    pool,
+                    created_ranking_run_ids=(
+                        created_ranking_run_ids
+                    ),
+                )
+            finally:
+                await close_database_pool(pool)
 
     print()
     print("API key required: no")
     print("OpenAI requests: not performed")
     print(
-        "Database changes: temporary batches, "
-        "batch_items and generated_post "
-        "inserted and deleted"
+        "Database changes: temporary ranking_run, "
+        "news_scores, batches, batch_items and "
+        "generated_post inserted and deleted"
     )
     print(
         "publication_attempts created: 0"
