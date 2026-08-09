@@ -223,6 +223,15 @@ def _normalize_news_items(
             ),
         )
 
+        if item.official_trailer_url is not None:
+            _normalize_required_text(
+                item.official_trailer_url,
+                field_name=(
+                    "official_trailer_url "
+                    f"news_id={item.news_id}"
+                ),
+            )
+
         published_at = (
             item.source_published_at
         )
@@ -281,6 +290,20 @@ def _build_top3_payload(
             ),
             "selection_reason": (
                 item.selection_reason.strip()
+            ),
+            **(
+                {
+                    "official_trailer_url": (
+                        item
+                        .official_trailer_url
+                        .strip()
+                    )
+                }
+                if (
+                    item.official_trailer_url
+                    is not None
+                )
+                else {}
             ),
         }
         for item in items

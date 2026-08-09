@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 import re
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -74,6 +75,7 @@ class GenerationNewsItem:
     source_published_at: datetime
     individual_score: Decimal
     selection_reason: str
+    official_trailer_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +515,8 @@ Telegram-пост с ежедневной подборкой TOP-3
     что требуется основными инструкциями.
 """.strip()
 
+
+
 SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
 Ты выполняешь второй редакционный проход по уже
 созданному русскоязычному Telegram-посту с TOP-3
@@ -786,6 +790,20 @@ def _build_self_review_input_text(
                     item.source_published_at
                     .isoformat()
                 ),
+                **(
+                    {
+                        "official_trailer_url": (
+                            item
+                            .official_trailer_url
+                            .strip()
+                        )
+                    }
+                    if (
+                        item.official_trailer_url
+                        is not None
+                    )
+                    else {}
+                ),
             }
             for item in items
         ],
@@ -796,6 +814,7 @@ def _build_self_review_input_text(
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
 
 def _validate_news_items(
     items: tuple[
@@ -889,6 +908,33 @@ def _validate_news_items(
             ),
         )
 
+        if item.official_trailer_url is not None:
+            official_trailer_url = (
+                _normalize_required_text(
+                    item.official_trailer_url,
+                    field_name=(
+                        "official_trailer_url "
+                        f"news_id={item.news_id}"
+                    ),
+                )
+            )
+
+            parsed_trailer_url = urlsplit(
+                official_trailer_url
+            )
+
+            if (
+                parsed_trailer_url.scheme.casefold()
+                not in {"http", "https"}
+                or not parsed_trailer_url.netloc
+            ):
+                raise ValueError(
+                    "official_trailer_url должен "
+                    "быть абсолютным HTTP или HTTPS "
+                    "URL: "
+                    f"news_id={item.news_id}"
+                )
+
         published_at = (
             item.source_published_at
         )
@@ -961,6 +1007,20 @@ def _build_input_text(
                 "news_id": item.news_id,
                 "title": item.title.strip(),
                 "summary": item.summary.strip(),
+                **(
+                    {
+                        "official_trailer_url": (
+                            item
+                            .official_trailer_url
+                            .strip()
+                        )
+                    }
+                    if (
+                        item.official_trailer_url
+                        is not None
+                    )
+                    else {}
+                ),
             }
             for item in items
         ],

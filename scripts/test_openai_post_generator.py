@@ -46,6 +46,10 @@ REVISION_ISSUES = (
     "Не добавлять факты вне title и summary.",
 )
 
+OFFICIAL_TRAILER_URL = (
+    "https://www.youtube.com/watch?v=5fHXyqQOKL8"
+)
+
 
 class FakeStructuredGenerationClient:
     """Тестовый клиент без сетевых запросов."""
@@ -448,6 +452,11 @@ def test_metadata_and_request() -> None:
         for item in payload["news"]
     )
 
+    assert all(
+        "official_trailer_url" not in item
+        for item in payload["news"]
+    )
+
     assert len(client.requests) == 0
 
     print("Request preparation: OK")
@@ -769,6 +778,183 @@ def test_invalid_score() -> None:
     assert len(client.requests) == 0
 
     print("Invalid score blocking: OK")
+
+
+def test_official_trailer_request_serialization() -> None:
+    """Передаёт подтверждённый URL в primary JSON."""
+
+    generator, client = build_generator()
+
+    items = list(
+        build_news_items()
+    )
+
+    items[1] = replace(
+        items[1],
+        official_trailer_url=(
+            OFFICIAL_TRAILER_URL
+        ),
+    )
+
+    request = generator.build_request(
+        tuple(items)
+    )
+
+    payload = json.loads(
+        request.input_text
+    )
+
+    assert (
+        "official_trailer_url"
+        not in payload["news"][0]
+    )
+
+    assert payload[
+        "news"
+    ][1][
+        "official_trailer_url"
+    ] == OFFICIAL_TRAILER_URL
+
+    assert (
+        "official_trailer_url"
+        not in payload["news"][2]
+    )
+
+    assert len(client.requests) == 0
+
+    print(
+        "Official trailer primary "
+        "serialization: OK"
+    )
+
+
+def test_invalid_official_trailer_url() -> None:
+    """Блокирует некорректный trailer URL."""
+
+    generator, client = build_generator()
+
+    items = list(
+        build_news_items()
+    )
+
+    items[1] = replace(
+        items[1],
+        official_trailer_url=(
+            "youtube.com/watch?v=invalid"
+        ),
+    )
+
+    assert_raises(
+        ValueError,
+        "абсолютным HTTP или HTTPS URL",
+        lambda: generator.build_request(
+            tuple(items)
+        ),
+    )
+
+    assert len(client.requests) == 0
+
+    print(
+        "Invalid official trailer URL "
+        "blocking: OK"
+    )
+
+
+def test_self_review_request_preparation() -> None:
+    """Передаёт trailer URL во второй проход."""
+
+    generator, client = build_generator()
+
+    items = list(
+        build_news_items()
+    )
+
+    items[1] = replace(
+        items[1],
+        official_trailer_url=(
+            OFFICIAL_TRAILER_URL
+        ),
+    )
+
+    request = (
+        generator.build_self_review_request(
+            tuple(items),
+            source_post_text=(
+                REVISION_SOURCE_POST_TEXT
+            ),
+        )
+    )
+
+    assert request.model == "gpt-5.6-terra"
+    assert request.allow_web_search is True
+
+    payload = json.loads(
+        request.input_text
+    )
+
+    assert payload["task"] == (
+        "self_review_russian_telegram_"
+        "movie_news_top3"
+    )
+
+    assert (
+        payload["source_post_text"]
+        == REVISION_SOURCE_POST_TEXT
+    )
+
+    expected_news_fields = {
+        "position",
+        "news_id",
+        "title",
+        "summary",
+        "source_name",
+        "source_url",
+        "source_published_at",
+    }
+
+    assert (
+        set(payload["news"][0])
+        == expected_news_fields
+    )
+
+    assert (
+        set(payload["news"][1])
+        == (
+            expected_news_fields
+            | {"official_trailer_url"}
+        )
+    )
+
+    assert (
+        set(payload["news"][2])
+        == expected_news_fields
+    )
+
+    assert (
+        "official_trailer_url"
+        not in payload["news"][0]
+    )
+
+    assert payload[
+        "news"
+    ][1][
+        "official_trailer_url"
+    ] == OFFICIAL_TRAILER_URL
+
+    assert (
+        "official_trailer_url"
+        not in payload["news"][2]
+    )
+
+    assert len(client.requests) == 0
+
+    print(
+        "Official trailer self-review "
+        "serialization: OK"
+    )
+    print(
+        "self_review_allow_web_search=true"
+    )
 
 
 async def test_invalid_json() -> None:
@@ -1354,6 +1540,9 @@ async def main() -> int:
     test_duplicate_input_news_id()
     test_naive_datetime()
     test_invalid_score()
+    test_official_trailer_request_serialization()
+    test_invalid_official_trailer_url()
+    test_self_review_request_preparation()
     test_revision_request_preparation()
     test_empty_revision_issues()
     test_empty_revision_comment()

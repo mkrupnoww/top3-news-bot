@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
@@ -10,6 +11,11 @@ from app.generation.openai_generator import (
 from app.generation.request_key import (
     GENERATION_REQUEST_KEY_VERSION,
     create_generation_request_key,
+)
+
+
+OFFICIAL_TRAILER_URL = (
+    "https://www.youtube.com/watch?v=5fHXyqQOKL8"
 )
 
 
@@ -235,6 +241,16 @@ def test_deterministic_key() -> None:
         == GENERATION_REQUEST_KEY_VERSION
     )
 
+    assert (
+        GENERATION_REQUEST_KEY_VERSION
+        == "generation_request_key_v1"
+    )
+
+    assert first_key.value == (
+        "f42336efbe832f8beb30e8ca8e91cdb3"
+        "ef25a8c2f484ffa75d0e37f2d41f3bd0"
+    )
+
     print(
         "Deterministic generation "
         "request key: OK"
@@ -310,6 +326,28 @@ def test_canonical_payload() -> None:
         "source_published_at"
     ] == "2026-07-31T10:00:00+00:00"
 
+    expected_top3_fields = {
+        "position",
+        "news_id",
+        "title",
+        "summary",
+        "source_name",
+        "source_url",
+        "source_published_at",
+        "individual_score",
+        "selection_reason",
+    }
+
+    assert all(
+        set(item) == expected_top3_fields
+        for item in payload["top3"]
+    )
+
+    assert all(
+        "official_trailer_url" not in item
+        for item in payload["top3"]
+    )
+
     assert payload[
         "generator"
     ][
@@ -346,6 +384,51 @@ def test_canonical_payload() -> None:
                 "top3_news_ids"
             ]
         )
+    )
+
+
+def test_official_trailer_canonical_payload() -> None:
+    """Проверяет trailer URL в canonical payload."""
+
+    items = list(
+        build_news_items()
+    )
+
+    items[1] = replace(
+        items[1],
+        official_trailer_url=(
+            OFFICIAL_TRAILER_URL
+        ),
+    )
+
+    request_key = build_request_key(
+        items=tuple(items)
+    )
+
+    payload = json.loads(
+        request_key.canonical_json
+    )
+
+    assert (
+        "official_trailer_url"
+        not in payload["top3"][0]
+    )
+
+    assert payload[
+        "top3"
+    ][1][
+        "official_trailer_url"
+    ] == OFFICIAL_TRAILER_URL
+
+    assert (
+        "official_trailer_url"
+        not in payload["top3"][2]
+    )
+
+    print()
+    print(
+        "Official trailer canonical "
+        "payload: OK"
     )
 
 
@@ -406,6 +489,23 @@ def test_changed_parameters_change_key() -> None:
 
     original_items = build_news_items()
 
+    changed_trailer_items = list(
+        original_items
+    )
+
+    changed_trailer_items[1] = replace(
+        changed_trailer_items[1],
+        official_trailer_url=(
+            OFFICIAL_TRAILER_URL
+        ),
+    )
+
+    changed_trailer_key = build_request_key(
+        items=tuple(
+            changed_trailer_items
+        )
+    )
+
     changed_items = (
         original_items[0],
         original_items[1],
@@ -461,6 +561,7 @@ def test_changed_parameters_change_key() -> None:
         changed_model_key,
         changed_prompt_key,
         changed_input_key,
+        changed_trailer_key,
         changed_top3_key,
     )
 
@@ -685,6 +786,43 @@ def test_naive_source_datetime_blocking() -> None:
     )
 
 
+def test_empty_official_trailer_url_blocking() -> None:
+    """Блокирует пустой trailer URL."""
+
+    valid_items = list(
+        build_news_items()
+    )
+
+    valid_items[1] = replace(
+        valid_items[1],
+        official_trailer_url="   ",
+    )
+
+    try:
+        build_request_key(
+            items=tuple(
+                valid_items
+            )
+        )
+    except ValueError as error:
+        assert (
+            "official_trailer_url"
+            in str(error)
+        )
+
+        print()
+        print(
+            "Empty official trailer URL "
+            "blocking: OK"
+        )
+        return
+
+    raise AssertionError(
+        "Пустой official_trailer_url "
+        "не был заблокирован."
+    )
+
+
 def test_model_mismatch_blocking() -> None:
     """Проверяет несовпадение моделей."""
 
@@ -723,12 +861,14 @@ def main() -> int:
 
     test_deterministic_key()
     test_canonical_payload()
+    test_official_trailer_canonical_payload()
     test_changed_parameters_change_key()
     test_duplicate_news_ids_blocking()
     test_invalid_position_order_blocking()
     test_invalid_chat_id_blocking()
     test_datetime_publication_date_blocking()
     test_naive_source_datetime_blocking()
+    test_empty_official_trailer_url_blocking()
     test_model_mismatch_blocking()
 
     print()
