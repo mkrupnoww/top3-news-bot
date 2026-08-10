@@ -55,6 +55,10 @@ SOURCE_CODES = (
 WINDOW_HOURS = 24.0
 CANDIDATE_LIMIT = 5
 
+TEST_SOURCE_ID = 0
+DEGRADED_TEST_NEWS_IDS: tuple[int, ...] = ()
+DEGRADED_OMITTED_NEWS_ID = 0
+
 TEST_SUITE_ID = uuid4().hex
 
 MACRO_TOPICS = (
@@ -348,12 +352,22 @@ def build_model_name(
 
 def build_degraded_selection(
 ) -> CandidateSelectionResult:
-    """Создаёт пять существующих DB-кандидатов."""
+    """Создаёт пять временных DB-кандидатов."""
+
+    if len(DEGRADED_TEST_NEWS_IDS) != 5:
+        raise RuntimeError(
+            "Временные degraded-news не созданы."
+        )
+
+    if TEST_SOURCE_ID <= 0:
+        raise RuntimeError(
+            "Тестовый source_id не определён."
+        )
 
     candidates = tuple(
         NewsCandidate(
             news_id=news_id,
-            source_id=8,
+            source_id=TEST_SOURCE_ID,
             source_code="variety_film",
             source_name="Variety Film",
             collection_priority=100,
@@ -374,13 +388,13 @@ def build_degraded_selection(
             age_hours=float(index + 1),
             source_url=(
                 "https://example.com/degraded/"
-                f"{news_id}"
+                f"{TEST_SUITE_ID}/{news_id}"
             ),
             primary_image_url=None,
             source_weight=3,
         )
         for index, news_id in enumerate(
-            (7, 8, 9, 10, 11)
+            DEGRADED_TEST_NEWS_IDS
         )
     )
 
@@ -403,6 +417,154 @@ def decode_jsonb(
         return json.loads(value)
 
     return value
+
+
+async def create_degraded_test_news(
+    pool: asyncpg.Pool,
+) -> None:
+    """Создаёт временные news_items degraded-сценария."""
+
+    global TEST_SOURCE_ID
+    global DEGRADED_TEST_NEWS_IDS
+    global DEGRADED_OMITTED_NEWS_ID
+
+    async with pool.acquire() as connection:
+        source = await connection.fetchrow(
+            """
+            SELECT
+                source_id
+            FROM top3_news.sources
+            WHERE source_code = 'variety_film'
+              AND is_active = true
+            ORDER BY source_id
+            LIMIT 1
+            """
+        )
+
+        if source is None:
+            raise RuntimeError(
+                "Активный source variety_film не найден."
+            )
+
+        TEST_SOURCE_ID = int(source["source_id"])
+
+        created_ids: list[int] = []
+
+        async with connection.transaction():
+            for index in range(5):
+                unique_suffix = (
+                    f"{TEST_SUITE_ID}-{index + 1}"
+                )
+                published_at = (
+                    AS_OF
+                    - timedelta(hours=index + 1)
+                )
+                record = await connection.fetchrow(
+                    """
+                    INSERT INTO top3_news.news_items (
+                        source_id,
+                        external_id,
+                        source_url,
+                        raw_title,
+                        raw_summary,
+                        author_name,
+                        source_published_at,
+                        processing_status,
+                        raw_payload,
+                        metadata
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        $5,
+                        'Pipeline Test',
+                        $6,
+                        'collected',
+                        '{}'::jsonb,
+                        jsonb_build_object(
+                            'test_suite_id',
+                            $7,
+                            'purpose',
+                            'openai_event_pipeline_degraded'
+                        )
+                    )
+                    RETURNING news_id
+                    """,
+                    TEST_SOURCE_ID,
+                    (
+                        "test-openai-event-pipeline-"
+                        f"{unique_suffix}"
+                    ),
+                    (
+                        "https://example.com/"
+                        "test-openai-event-pipeline/"
+                        f"{unique_suffix}"
+                    ),
+                    (
+                        "Synthetic degraded movie news "
+                        f"{index + 1}"
+                    ),
+                    (
+                        "Synthetic pipeline summary "
+                        f"{index + 1}."
+                    ),
+                    published_at,
+                    TEST_SUITE_ID,
+                )
+
+                if record is None:
+                    raise RuntimeError(
+                        "Не удалось создать временную "
+                        "новость degraded-сценария."
+                    )
+
+                created_ids.append(
+                    int(record["news_id"])
+                )
+
+    DEGRADED_TEST_NEWS_IDS = tuple(created_ids)
+    DEGRADED_OMITTED_NEWS_ID = (
+        DEGRADED_TEST_NEWS_IDS[-1]
+    )
+
+
+async def cleanup_degraded_test_news(
+    pool: asyncpg.Pool,
+) -> None:
+    """Удаляет временные news_items degraded-сценария."""
+
+    if not DEGRADED_TEST_NEWS_IDS:
+        return
+
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            DELETE FROM top3_news.news_items
+            WHERE news_id = ANY($1::bigint[])
+              AND metadata->>'test_suite_id' = $2
+            """,
+            list(DEGRADED_TEST_NEWS_IDS),
+            TEST_SUITE_ID,
+        )
+
+    expected = len(DEGRADED_TEST_NEWS_IDS)
+    if result != f"DELETE {expected}":
+        raise RuntimeError(
+            "Удалено неожиданное число временных "
+            f"news_items: {result}"
+        )
+
+    print()
+    print("Temporary degraded news cleanup: OK")
+    print(
+        "deleted_news_ids="
+        + ",".join(
+            str(news_id)
+            for news_id in DEGRADED_TEST_NEWS_IDS
+        )
+    )
 
 
 async def load_run_by_model(
@@ -853,7 +1015,7 @@ async def test_degraded_pipeline(
 
     fake_client = (
         FakeStructuredEventRankingClient(
-            omit_news_id=11,
+            omit_news_id=DEGRADED_OMITTED_NEWS_ID,
             preserve_missing_on_repair=True,
         )
     )
@@ -929,12 +1091,11 @@ async def test_degraded_pipeline(
         )
 
     assert diagnostics.processed_news_ids == (
-        7,
-        8,
-        9,
-        10,
+        DEGRADED_TEST_NEWS_IDS[:-1]
     )
-    assert diagnostics.missing_news_ids == (11,)
+    assert diagnostics.missing_news_ids == (
+        DEGRADED_TEST_NEWS_IDS[-1:]
+    )
     assert diagnostics.repair_attempted is True
     assert diagnostics.repair_succeeded is False
 
@@ -953,7 +1114,9 @@ async def test_degraded_pipeline(
     assert result.completion.scored_count == 4
     assert result.completion.eligible_count == 4
     assert result.completion.degraded is True
-    assert result.completion.missing_news_ids == (11,)
+    assert result.completion.missing_news_ids == (
+        DEGRADED_TEST_NEWS_IDS[-1:]
+    )
     assert result.completion.combination_count == 4
 
     selection_result = (
@@ -1020,8 +1183,12 @@ async def test_degraded_pipeline(
     assert record[
         "processed_candidate_count"
     ] == "4"
-    assert processed_news_ids == [7, 8, 9, 10]
-    assert missing_news_ids == [11]
+    assert processed_news_ids == list(
+        DEGRADED_TEST_NEWS_IDS[:-1]
+    )
+    assert missing_news_ids == [
+        DEGRADED_TEST_NEWS_IDS[-1]
+    ]
     assert coverage["repair_attempted"] is True
     assert coverage["repair_succeeded"] is False
     assert coverage["model_call_count"] == 2
@@ -1083,7 +1250,10 @@ async def test_degraded_pipeline(
     print("model_call_count=2")
     print("candidate_count=5")
     print("processed_candidate_count=4")
-    print("missing_news_ids=11")
+    print(
+        "missing_news_ids="
+        f"{DEGRADED_TEST_NEWS_IDS[-1]}"
+    )
     print("generation_status_compatible=true")
 
 
@@ -1335,6 +1505,8 @@ async def main() -> int:
 
     test_model_names: set[str] = set()
 
+    await create_degraded_test_news(pool)
+
     try:
         await test_successful_pipeline(
             pool,
@@ -1369,7 +1541,12 @@ async def main() -> int:
                 ),
             )
         finally:
-            await close_database_pool(pool)
+            try:
+                await cleanup_degraded_test_news(
+                    pool
+                )
+            finally:
+                await close_database_pool(pool)
 
     print()
     print("OpenAI requests: not performed")

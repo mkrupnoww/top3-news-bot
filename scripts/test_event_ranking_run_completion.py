@@ -59,24 +59,13 @@ from app.ranking.request_key import (
 )
 
 
-TEST_NEWS_IDS = (
-    7,
-    8,
-    9,
-    10,
-    11,
-)
+TEST_SOURCE_ID = 0
 
-DEGRADED_PROCESSED_NEWS_IDS = (
-    7,
-    8,
-    9,
-    10,
-)
+TEST_NEWS_IDS: tuple[int, ...] = ()
 
-DEGRADED_MISSING_NEWS_IDS = (
-    11,
-)
+DEGRADED_PROCESSED_NEWS_IDS: tuple[int, ...] = ()
+
+DEGRADED_MISSING_NEWS_IDS: tuple[int, ...] = ()
 
 WINDOW_END = datetime(
     2026,
@@ -152,7 +141,7 @@ def build_candidate(
 
     return NewsCandidate(
         news_id=news_id,
-        source_id=8,
+        source_id=TEST_SOURCE_ID,
         source_code="variety_film",
         source_name="Variety Film",
         collection_priority=100,
@@ -181,23 +170,23 @@ def build_selection() -> CandidateSelectionResult:
         window_hours=24.0,
         candidates=(
             build_candidate(
-                news_id=7,
+                news_id=TEST_NEWS_IDS[0],
                 age_hours=1,
             ),
             build_candidate(
-                news_id=8,
+                news_id=TEST_NEWS_IDS[1],
                 age_hours=2,
             ),
             build_candidate(
-                news_id=9,
+                news_id=TEST_NEWS_IDS[2],
                 age_hours=4,
             ),
             build_candidate(
-                news_id=10,
+                news_id=TEST_NEWS_IDS[3],
                 age_hours=3,
             ),
             build_candidate(
-                news_id=11,
+                news_id=TEST_NEWS_IDS[4],
                 age_hours=2,
             ),
         ),
@@ -249,7 +238,7 @@ def build_events() -> tuple[
 
     return (
         EventAssessment(
-            representative_news_id=7,
+            representative_news_id=TEST_NEWS_IDS[0],
             event_title=(
                 "International production "
                 "announcement"
@@ -279,13 +268,13 @@ def build_events() -> tuple[
             ),
             members=(
                 build_member(
-                    news_id=7,
+                    news_id=TEST_NEWS_IDS[0],
                     source_relation="primary",
                     is_representative=True,
                     source_weight=3,
                 ),
                 build_member(
-                    news_id=8,
+                    news_id=TEST_NEWS_IDS[1],
                     source_relation=(
                         "independent"
                     ),
@@ -295,7 +284,7 @@ def build_events() -> tuple[
             ),
         ),
         EventAssessment(
-            representative_news_id=9,
+            representative_news_id=TEST_NEWS_IDS[2],
             event_title=(
                 "Film company business decision"
             ),
@@ -324,7 +313,7 @@ def build_events() -> tuple[
             ),
             members=(
                 build_member(
-                    news_id=9,
+                    news_id=TEST_NEWS_IDS[2],
                     source_relation="primary",
                     is_representative=True,
                     source_weight=3,
@@ -332,7 +321,7 @@ def build_events() -> tuple[
             ),
         ),
         EventAssessment(
-            representative_news_id=10,
+            representative_news_id=TEST_NEWS_IDS[3],
             event_title=(
                 "Festival programme expansion"
             ),
@@ -361,7 +350,7 @@ def build_events() -> tuple[
             ),
             members=(
                 build_member(
-                    news_id=10,
+                    news_id=TEST_NEWS_IDS[3],
                     source_relation="primary",
                     is_representative=True,
                     source_weight=3,
@@ -369,7 +358,7 @@ def build_events() -> tuple[
             ),
         ),
         EventAssessment(
-            representative_news_id=11,
+            representative_news_id=TEST_NEWS_IDS[4],
             event_title=(
                 "Unverified film rumour"
             ),
@@ -396,7 +385,7 @@ def build_events() -> tuple[
             ),
             members=(
                 build_member(
-                    news_id=11,
+                    news_id=TEST_NEWS_IDS[4],
                     source_relation="primary",
                     is_representative=True,
                     source_weight=2,
@@ -414,13 +403,13 @@ def build_audience_metrics() -> tuple[
 
     return (
         EventAudienceMetrics(
-            news_id=7,
+            news_id=TEST_NEWS_IDS[0],
             view_count=1000,
             comment_count=100,
             share_count=50,
         ),
         EventAudienceMetrics(
-            news_id=9,
+            news_id=TEST_NEWS_IDS[2],
             view_count=500,
             comment_count=None,
             share_count=25,
@@ -443,7 +432,7 @@ def build_calculation(
 
 def build_degraded_calculation(
 ) -> EventFormulaCalculationResult:
-    """Выполняет расчёт без пропущенной публикации 11."""
+    """Выполняет расчёт без пропущенной публикации."""
 
     full_selection = build_selection()
 
@@ -460,7 +449,7 @@ def build_degraded_calculation(
     processed_events = tuple(
         event
         for event in build_events()
-        if event.representative_news_id != 11
+        if event.representative_news_id != TEST_NEWS_IDS[4]
     )
 
     return calculate_event_formula(
@@ -494,7 +483,10 @@ def build_verified_diagnostics(
                 original_story_cluster_key=(
                     "synthetic_broad_cluster"
                 ),
-                representative_news_ids=(7, 9),
+                representative_news_ids=(
+                    TEST_NEWS_IDS[0],
+                    TEST_NEWS_IDS[2],
+                ),
                 resulting_story_cluster_keys=(
                     "international_production",
                     "film_company_business_decision",
@@ -524,7 +516,8 @@ def build_degraded_diagnostics(
         repair_succeeded=False,
         repair_error_type="ValueError",
         repair_error_message=(
-            "Synthetic repair still omitted news_id=11."
+            "Synthetic repair still omitted news_id="
+            f"{DEGRADED_MISSING_NEWS_IDS[0]}."
         ),
         model_call_count=2,
     )
@@ -552,6 +545,185 @@ def decode_jsonb(
         return json.loads(value)
 
     return value
+
+
+async def create_test_news_items(
+    pool: asyncpg.Pool,
+) -> tuple[int, ...]:
+    """Создаёт пять временных news_items для теста."""
+
+    global TEST_SOURCE_ID
+
+    fixture_token = uuid4().hex
+    age_hours_values = (1, 2, 4, 3, 2)
+
+    async with pool.acquire() as connection:
+        source_record = await connection.fetchrow(
+            """
+            SELECT
+                source_id,
+                source_name
+            FROM top3_news.sources
+            WHERE source_code = 'variety_film'
+            """
+        )
+
+        if source_record is None:
+            raise LookupError(
+                "Тестовый источник variety_film не найден."
+            )
+
+        TEST_SOURCE_ID = int(
+            source_record["source_id"]
+        )
+
+        created_news_ids: list[int] = []
+
+        async with connection.transaction():
+            for position, age_hours in enumerate(
+                age_hours_values,
+                start=1,
+            ):
+                news_id = await connection.fetchval(
+                    """
+                    INSERT INTO top3_news.news_items (
+                        source_id,
+                        external_id,
+                        source_url,
+                        raw_title,
+                        raw_summary,
+                        author_name,
+                        source_published_at,
+                        processing_status,
+                        metadata
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        $5,
+                        'Integration Test',
+                        $6,
+                        'collected',
+                        jsonb_build_object(
+                            'integration_test',
+                            true,
+                            'fixture_token',
+                            $7
+                        )
+                    )
+                    RETURNING news_id
+                    """,
+                    TEST_SOURCE_ID,
+                    (
+                        "event-ranking-integration-"
+                        f"{fixture_token}-{position}"
+                    ),
+                    (
+                        "https://example.com/"
+                        "event-ranking-integration/"
+                        f"{fixture_token}/{position}"
+                    ),
+                    (
+                        "Integration movie news "
+                        f"{position}"
+                    ),
+                    (
+                        "Integration summary "
+                        f"{position}"
+                    ),
+                    (
+                        WINDOW_END
+                        - timedelta(
+                            hours=age_hours
+                        )
+                    ),
+                    fixture_token,
+                )
+
+                if news_id is None:
+                    raise RuntimeError(
+                        "Не удалось создать "
+                        "тестовый news_item."
+                    )
+
+                created_news_ids.append(
+                    int(news_id)
+                )
+
+    if len(created_news_ids) != 5:
+        raise RuntimeError(
+            "Ожидалось пять тестовых news_items."
+        )
+
+    return tuple(created_news_ids)
+
+
+def configure_test_news_ids(
+    news_ids: tuple[int, ...],
+) -> None:
+    """Настраивает идентификаторы временной фикстуры."""
+
+    global TEST_NEWS_IDS
+    global DEGRADED_PROCESSED_NEWS_IDS
+    global DEGRADED_MISSING_NEWS_IDS
+
+    if len(news_ids) != 5:
+        raise ValueError(
+            "Для теста требуется пять news_id."
+        )
+
+    TEST_NEWS_IDS = news_ids
+    DEGRADED_PROCESSED_NEWS_IDS = (
+        news_ids[:4]
+    )
+    DEGRADED_MISSING_NEWS_IDS = (
+        news_ids[4:]
+    )
+
+
+async def cleanup_test_news_items(
+    pool: asyncpg.Pool,
+    *,
+    news_ids: tuple[int, ...],
+) -> None:
+    """Удаляет только созданные тестом news_items."""
+
+    if not news_ids:
+        return
+
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            DELETE FROM top3_news.news_items
+            WHERE news_id = ANY($1::bigint[])
+            """,
+            list(news_ids),
+        )
+
+    expected_result = (
+        f"DELETE {len(news_ids)}"
+    )
+
+    if result != expected_result:
+        raise RuntimeError(
+            "Удалено неожиданное число "
+            "тестовых news_items: "
+            f"expected={expected_result}, "
+            f"actual={result}"
+        )
+
+    print()
+    print("Test news cleanup: OK")
+    print(
+        "temporary_news_ids="
+        + ",".join(
+            str(news_id)
+            for news_id in news_ids
+        )
+    )
+    print("temporary_news_items_deleted=true")
 
 
 async def reserve_test_run(
@@ -748,10 +920,10 @@ async def test_successful_completion(
         item.representative_news_id
         for item in result.persisted_events
     ) == (
-        7,
-        9,
-        10,
-        11,
+        TEST_NEWS_IDS[0],
+        TEST_NEWS_IDS[2],
+        TEST_NEWS_IDS[3],
+        TEST_NEWS_IDS[4],
     )
 
     print("Event ranking completion: OK")
@@ -1050,11 +1222,11 @@ async def test_successful_completion(
         for record in score_records
     }
 
-    assert score_by_news_id[11][
+    assert score_by_news_id[TEST_NEWS_IDS[4]][
         "is_eligible"
     ] is False
 
-    assert score_by_news_id[11][
+    assert score_by_news_id[TEST_NEWS_IDS[4]][
         "exclusion_reason"
     ] == "quality_zero"
 
@@ -1081,10 +1253,10 @@ async def test_successful_completion(
         )
         for record in event_detail_records
     }
-    assert event_details_by_news_id[7][
+    assert event_details_by_news_id[TEST_NEWS_IDS[0]][
         "story_cluster_key"
     ] == "international_production"
-    assert event_details_by_news_id[9][
+    assert event_details_by_news_id[TEST_NEWS_IDS[2]][
         "story_cluster_key"
     ] == "film_company_business_decision"
 
@@ -1264,7 +1436,7 @@ async def test_degraded_completion(
     assert result.degraded is True
     assert result.candidate_count == 5
     assert result.processed_candidate_count == 4
-    assert result.missing_news_ids == (11,)
+    assert result.missing_news_ids == DEGRADED_MISSING_NEWS_IDS
     assert result.scored_count == 3
     assert result.eligible_count == 3
     assert result.combination_count == 1
@@ -1360,8 +1532,8 @@ async def test_degraded_completion(
     ] == "1"
     assert run_record["repair_attempted"] == "true"
     assert run_record["repair_succeeded"] == "false"
-    assert processed_news_ids == [7, 8, 9, 10]
-    assert missing_news_ids == [11]
+    assert processed_news_ids == list(DEGRADED_PROCESSED_NEWS_IDS)
+    assert missing_news_ids == list(DEGRADED_MISSING_NEWS_IDS)
     assert coverage["model_call_count"] == 2
     assert coverage["repair_error_type"] == (
         "ValueError"
@@ -1370,11 +1542,15 @@ async def test_degraded_completion(
     assert tuple(
         int(record["news_id"])
         for record in persisted_news_ids
-    ) == (7, 8, 9, 10)
+    ) == DEGRADED_PROCESSED_NEWS_IDS
     assert tuple(
         int(record["news_id"])
         for record in scored_news_ids
-    ) == (7, 9, 10)
+    ) == (
+        TEST_NEWS_IDS[0],
+        TEST_NEWS_IDS[2],
+        TEST_NEWS_IDS[3],
+    )
 
     repeated = (
         await complete_reserved_event_ranking_run(
@@ -1395,7 +1571,7 @@ async def test_degraded_completion(
     assert repeated.already_completed is True
     assert repeated.degraded is True
     assert repeated.processed_candidate_count == 4
-    assert repeated.missing_news_ids == (11,)
+    assert repeated.missing_news_ids == DEGRADED_MISSING_NEWS_IDS
 
     print()
     print("Degraded event completion: OK")
@@ -1403,7 +1579,10 @@ async def test_degraded_completion(
     print("degraded=true")
     print("candidate_count=5")
     print("processed_candidate_count=4")
-    print("missing_news_ids=11")
+    print(
+        "missing_news_ids="
+        f"{DEGRADED_MISSING_NEWS_IDS[0]}"
+    )
     print("persisted_event_count=3")
     print("generation_status_compatible=true")
 
@@ -1640,8 +1819,17 @@ async def main() -> int:
     )
 
     created_run_ids: set[int] = set()
+    created_news_ids: tuple[int, ...] = ()
 
     try:
+        created_news_ids = (
+            await create_test_news_items(pool)
+        )
+
+        configure_test_news_ids(
+            created_news_ids
+        )
+
         await test_successful_completion(
             pool,
             created_run_ids=created_run_ids,
@@ -1668,7 +1856,13 @@ async def main() -> int:
                 created_run_ids=created_run_ids,
             )
         finally:
-            await close_database_pool(pool)
+            try:
+                await cleanup_test_news_items(
+                    pool,
+                    news_ids=created_news_ids,
+                )
+            finally:
+                await close_database_pool(pool)
 
     print()
     print("OpenAI requests: not performed")
