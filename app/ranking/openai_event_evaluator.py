@@ -1622,7 +1622,7 @@ def _aggregate_response(
 
 
 class OpenAIEventRankingEvaluator:
-    """Event-level оценщик полной формулы v3."""
+    """Event-level оценщик полной формулы v4."""
 
     def __init__(
         self,

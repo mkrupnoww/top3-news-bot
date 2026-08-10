@@ -962,7 +962,7 @@ class StructuredEventRankingClient(Protocol):
 
 @runtime_checkable
 class EventRankingEvaluator(Protocol):
-    """Интерфейс оценщика полной формулы v3."""
+    """Интерфейс оценщика полной формулы v4."""
 
     @property
     def metadata(self) -> RankingEvaluatorMetadata:

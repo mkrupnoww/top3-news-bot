@@ -15,7 +15,7 @@ from app.ranking.score_formula import (
 ScoreInput: TypeAlias = Decimal | int | float | str
 OptionalScoreInput: TypeAlias = ScoreInput | None
 
-FULL_FORMULA_VERSION = "top3_cinema_v3"
+FULL_FORMULA_VERSION = "top3_cinema_v4"
 LEGACY_TOP3_SELECTION_POLICY_VERSION = (
     "macro_topic_diversity_v1"
 )
@@ -31,7 +31,7 @@ SCORE_MIN = Decimal("0")
 SCORE_MAX = Decimal("10")
 QUALITY_MAX = Decimal("1")
 MAX_AGE_HOURS = Decimal("24")
-ELIGIBILITY_THRESHOLD = Decimal("4.500000")
+ELIGIBILITY_THRESHOLD = Decimal("3.500000")
 
 U_WEIGHT = Decimal("0.60")
 I_WEIGHT = Decimal("0.40")
@@ -61,7 +61,7 @@ RESONANCE_CONFIDENCE_PARTIAL = "partial"
 RESONANCE_CONFIDENCE_UNAVAILABLE = "unavailable"
 
 EXCLUSION_REASON_QUALITY_ZERO = "quality_zero"
-EXCLUSION_REASON_SCORE_BELOW_THRESHOLD = "individual_score_below_4_5"
+EXCLUSION_REASON_SCORE_BELOW_THRESHOLD = "individual_score_below_3_5"
 
 
 @dataclass(frozen=True, slots=True)
