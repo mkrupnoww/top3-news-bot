@@ -485,7 +485,7 @@ async def create_degraded_test_news(
                         '{}'::jsonb,
                         jsonb_build_object(
                             'test_suite_id',
-                            $7,
+                            $7::text,
                             'purpose',
                             'openai_event_pipeline_degraded'
                         )

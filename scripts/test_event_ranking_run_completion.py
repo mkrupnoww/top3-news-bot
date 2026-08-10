@@ -610,7 +610,7 @@ async def create_test_news_items(
                             'integration_test',
                             true,
                             'fixture_token',
-                            $7
+                            $7::text
                         )
                     )
                     RETURNING news_id
