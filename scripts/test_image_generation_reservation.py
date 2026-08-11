@@ -8,6 +8,9 @@ from uuid import uuid4
 import asyncpg
 
 from app.config import get_settings
+from app.db.event_ranking_run_completion import (
+    complete_reserved_event_ranking_run,
+)
 from app.db.generation_selection import (
     GenerationTop3Selection,
     load_generation_top3,
@@ -28,9 +31,15 @@ from app.generation.image_generator import (
 from app.generation.image_request_key import (
     create_image_request_key,
 )
+from app.ranking.openai_usage import (
+    calculate_openai_cost,
+    get_model_pricing,
+)
+from scripts import (
+    test_event_ranking_run_completion
+    as ranking_fixture,
+)
 
-
-TEST_RANKING_RUN_ID = 18
 
 TEST_IMAGE_MODEL_NAME = (
     "synthetic-image-model"
@@ -266,6 +275,114 @@ async def assert_migration_applied(
             "Таблица image_generation_requests "
             "не существует."
         )
+
+
+async def create_test_ranking_selection(
+    pool: asyncpg.Pool,
+    *,
+    created_run_ids: set[int],
+) -> GenerationTop3Selection:
+    """Создаёт временный completed ranking run с TOP-3."""
+
+    metadata = ranking_fixture.build_metadata()
+
+    request_key = (
+        ranking_fixture.build_request_key(
+            test_name=(
+                "image_generation_reservation_fixture"
+            )
+        )
+    )
+
+    reservation = (
+        await ranking_fixture.reserve_test_run(
+            pool,
+            request_key=request_key,
+            created_run_ids=created_run_ids,
+        )
+    )
+
+    calculation = (
+        ranking_fixture.build_calculation()
+    )
+
+    usage = ranking_fixture.build_usage()
+
+    cost_estimate = calculate_openai_cost(
+        usage,
+        get_model_pricing(
+            metadata.model_name
+            or "gpt-5.6-terra"
+        ),
+    )
+
+    result = (
+        await complete_reserved_event_ranking_run(
+            pool,
+            ranking_run_id=(
+                reservation.ranking_run_id
+            ),
+            request_key=request_key.value,
+            metadata=metadata,
+            candidate_news_ids=(
+                ranking_fixture.TEST_NEWS_IDS
+            ),
+            calculation=calculation,
+            usage=usage,
+            cost_estimate=cost_estimate,
+            coverage_diagnostics=(
+                ranking_fixture
+                .build_verified_diagnostics()
+            ),
+        )
+    )
+
+    if result.run_status != "completed":
+        raise AssertionError(
+            "Временный ranking run "
+            "не завершён."
+        )
+
+    if result.eligible_count != 3:
+        raise AssertionError(
+            "Временный ranking run должен "
+            "содержать ровно три eligible "
+            "события."
+        )
+
+    selection = await load_generation_top3(
+        pool,
+        ranking_run_id=(
+            reservation.ranking_run_id
+        ),
+    )
+
+    if len(selection.items) != 3:
+        raise AssertionError(
+            "Временный ranking run не создал "
+            "полный TOP-3."
+        )
+
+    if len(set(selection.news_ids)) != 3:
+        raise AssertionError(
+            "Временный TOP-3 содержит "
+            "дублирующиеся news_id."
+        )
+
+    print("Temporary ranking fixture: OK")
+    print(
+        "temporary_ranking_run_id="
+        f"{selection.ranking_run_id}"
+    )
+    print(
+        "temporary_top3_news_ids="
+        + ",".join(
+            str(news_id)
+            for news_id in selection.news_ids
+        )
+    )
+
+    return selection
 
 
 async def load_test_reviewer(
@@ -587,6 +704,7 @@ async def assert_test_batch_deleted(
     pool: asyncpg.Pool,
     *,
     batch_id: int,
+    ranking_run_id: int,
 ) -> None:
     """Проверяет каскадное удаление."""
 
@@ -625,7 +743,7 @@ async def assert_test_batch_deleted(
                 ) AS ranking_run_exists
             """,
             batch_id,
-            TEST_RANKING_RUN_ID,
+            ranking_run_id,
         )
 
     if record is None:
@@ -1539,6 +1657,7 @@ async def cleanup_test_batches(
     pool: asyncpg.Pool,
     *,
     created_batch_ids: set[int],
+    ranking_run_id: int,
 ) -> None:
     """Удаляет все созданные тестовые выпуски."""
 
@@ -1553,6 +1672,7 @@ async def cleanup_test_batches(
         await assert_test_batch_deleted(
             pool,
             batch_id=batch_id,
+            ranking_run_id=ranking_run_id,
         )
 
         print()
@@ -1565,7 +1685,12 @@ async def cleanup_test_batches(
             "temporary_image_requests_deleted=true"
         )
         print(
-            "ranking_run_18_preserved=true"
+            "temporary_ranking_run_id="
+            f"{ranking_run_id}"
+        )
+        print(
+            "temporary_ranking_run_preserved="
+            "true"
         )
 
 
@@ -1579,15 +1704,35 @@ async def main() -> int:
     )
 
     created_batch_ids: set[int] = set()
+    created_run_ids: set[int] = set()
+    created_news_ids: tuple[int, ...] = ()
+    fixture_ranking_run_id: int | None = None
 
     try:
         await assert_migration_applied(
             pool
         )
 
-        selection = await load_generation_top3(
-            pool,
-            ranking_run_id=TEST_RANKING_RUN_ID,
+        created_news_ids = (
+            await ranking_fixture
+            .create_test_news_items(pool)
+        )
+
+        ranking_fixture.configure_test_news_ids(
+            created_news_ids
+        )
+
+        selection = (
+            await create_test_ranking_selection(
+                pool,
+                created_run_ids=(
+                    created_run_ids
+                ),
+            )
+        )
+
+        fixture_ranking_run_id = (
+            selection.ranking_run_id
         )
 
         reviewer_telegram_user_id = (
@@ -1622,24 +1767,59 @@ async def main() -> int:
         )
     finally:
         try:
-            await cleanup_test_batches(
-                pool,
-                created_batch_ids=(
-                    created_batch_ids
-                ),
-            )
+            if created_batch_ids:
+                if fixture_ranking_run_id is None:
+                    raise RuntimeError(
+                        "Неизвестен ranking_run_id "
+                        "для очистки временных "
+                        "publication_batches."
+                    )
+
+                await cleanup_test_batches(
+                    pool,
+                    created_batch_ids=(
+                        created_batch_ids
+                    ),
+                    ranking_run_id=(
+                        fixture_ranking_run_id
+                    ),
+                )
         finally:
-            await close_database_pool(
-                pool
-            )
+            try:
+                await (
+                    ranking_fixture
+                    .cleanup_test_runs(
+                        pool,
+                        created_run_ids=(
+                            created_run_ids
+                        ),
+                    )
+                )
+            finally:
+                try:
+                    await (
+                        ranking_fixture
+                        .cleanup_test_news_items(
+                            pool,
+                            news_ids=(
+                                created_news_ids
+                            ),
+                        )
+                    )
+                finally:
+                    await close_database_pool(
+                        pool
+                    )
 
     print()
     print("API key required: no")
+    print("OpenAI requests: not performed")
     print("OpenAI Image requests: not performed")
     print("PNG files created: 0")
     print(
-        "Database changes: temporary image "
-        "reservation data inserted and deleted"
+        "Database changes: temporary ranking "
+        "fixture and image reservation data "
+        "inserted and deleted"
     )
     print("Permanent generated_posts created: 0")
     print("publication_attempts created: 0")
