@@ -28,6 +28,8 @@ class ReviewDraftPreview:
     version_number: int
     post_text: str
     text_format: str
+    image_path: str | None
+    image_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,8 @@ async def get_latest_review_draft(
             p.version_number,
             p.post_text,
             p.text_format
+            p.image_path,
+            p.image_sha256
         FROM publication_batches AS b
         JOIN generated_posts AS p
             ON p.batch_id = b.batch_id
@@ -182,6 +186,8 @@ async def get_latest_review_draft(
         ],
         post_text=record["post_text"],
         text_format=record["text_format"],
+        image_path=record["image_path"],
+        image_sha256=record["image_sha256"],
     )
 
 
