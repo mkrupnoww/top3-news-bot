@@ -12,10 +12,15 @@ class PreparedApprovedPublication:
     """Одобренный пост, подготовленный к отправке в Telegram."""
 
     publication: PublicationAttempt
+
     telegram_chat_id: int
-    post_text: str
-    text_format: str
-    parse_mode: str | None
+
+    rich_html: str
+    rich_media_id: str
+
+    image_path: str
+    image_sha256: str
+
     source_text_format: str
 
 
@@ -31,24 +36,38 @@ def _encode_json(
     )
 
 
-def _validate_prepared_text(
+def _validate_prepared_content(
     *,
-    telegram_text: str,
-    telegram_text_format: str,
+    rich_html: str,
+    rich_media_id: str,
+    image_path: str,
+    image_sha256: str,
     source_post_text: str,
     source_text_format: str,
 ) -> None:
     """Проверяет подготовленные данные публикации."""
 
-    if not telegram_text.strip():
+    if not rich_html.strip():
         raise ValueError(
-            "Подготовленный Telegram-текст "
+            "Подготовленный Rich Message HTML "
             "не может быть пустым."
         )
 
-    if not telegram_text_format.strip():
+    if not rich_media_id.strip():
         raise ValueError(
-            "Формат Telegram-текста "
+            "Rich Message media ID "
+            "не может быть пустым."
+        )
+
+    if not image_path.strip():
+        raise ValueError(
+            "Путь к изображению "
+            "не может быть пустым."
+        )
+
+    if not image_sha256.strip():
+        raise ValueError(
+            "SHA-256 изображения "
             "не может быть пустым."
         )
 
@@ -70,29 +89,36 @@ async def prepare_approved_publication(
     *,
     generated_post_id: int,
     disable_notification: bool,
-    telegram_text: str,
-    telegram_text_format: str,
-    parse_mode: str | None,
+    rich_html: str,
+    rich_media_id: str,
+    image_path: str,
+    image_sha256: str,
     source_post_text: str,
     source_text_format: str,
 ) -> PreparedApprovedPublication:
     """
     Создаёт попытку отправки существующего одобренного поста.
 
-    Исходный текст сверяется с текущим generated_post.
-    В request_payload сохраняется именно тот текст,
-    который будет передан Telegram Bot API.
+    Исходный текст и изображение сверяются
+    с текущим generated_post.
 
-    Новый publication_batch и generated_post не создаются.
-    Повторная отправка блокируется при наличии попытки
-    со статусом started, unknown или published.
+    В request_payload сохраняются данные
+    Rich Message, которые будут переданы
+    Telegram Bot API.
+
+    Новый publication_batch и generated_post
+    не создаются.
+
+    Повторная отправка блокируется при наличии
+    попытки со статусом started, unknown
+    или published.
     """
 
-    _validate_prepared_text(
-        telegram_text=telegram_text,
-        telegram_text_format=(
-            telegram_text_format
-        ),
+    _validate_prepared_content(
+        rich_html=rich_html,
+        rich_media_id=rich_media_id,
+        image_path=image_path,
+        image_sha256=image_sha256,
         source_post_text=source_post_text,
         source_text_format=source_text_format,
     )
@@ -107,6 +133,8 @@ async def prepare_approved_publication(
                     p.post_status,
                     p.post_text,
                     p.text_format,
+                    p.image_path,
+                    p.image_sha256,
                     b.publication_date,
                     b.edition,
                     b.batch_status,
@@ -129,8 +157,7 @@ async def prepare_approved_publication(
 
             if (
                 record["post_status"] == "published"
-                or record["batch_status"]
-                == "published"
+                or record["batch_status"] == "published"
             ):
                 raise ValueError(
                     "Пост уже опубликован. "
@@ -166,7 +193,7 @@ async def prepare_approved_publication(
             ):
                 raise ValueError(
                     "Текст generated_post изменился "
-                    "после подготовки Telegram-текста. "
+                    "после подготовки Rich Message. "
                     "Публикация остановлена."
                 )
 
@@ -176,7 +203,48 @@ async def prepare_approved_publication(
             ):
                 raise ValueError(
                     "Формат generated_post изменился "
-                    "после подготовки Telegram-текста. "
+                    "после подготовки Rich Message. "
+                    "Публикация остановлена."
+                )
+
+            stored_image_path = record[
+                "image_path"
+            ]
+
+            stored_image_sha256 = record[
+                "image_sha256"
+            ]
+
+            if stored_image_path is None:
+                raise ValueError(
+                    "У generated_post отсутствует "
+                    "image_path."
+                )
+
+            if stored_image_sha256 is None:
+                raise ValueError(
+                    "У generated_post отсутствует "
+                    "image_sha256."
+                )
+
+            if (
+                stored_image_path
+                != image_path
+            ):
+                raise ValueError(
+                    "image_path generated_post изменился "
+                    "после подготовки Rich Message. "
+                    "Публикация остановлена."
+                )
+
+            if (
+                stored_image_sha256
+                != image_sha256
+            ):
+                raise ValueError(
+                    "image_sha256 generated_post "
+                    "изменился после подготовки "
+                    "Rich Message. "
                     "Публикация остановлена."
                 )
 
@@ -250,15 +318,27 @@ async def prepare_approved_publication(
 
             request_payload = _encode_json(
                 {
-                    "chat_id": telegram_chat_id,
-                    "text": telegram_text,
-                    "text_format": (
-                        telegram_text_format
+                    "chat_id": (
+                        telegram_chat_id
                     ),
+                    "transport": (
+                        "rich_message"
+                    ),
+                    "rich_message": {
+                        "html": rich_html,
+                        "media_id": (
+                            rich_media_id
+                        ),
+                    },
+                    "image": {
+                        "path": image_path,
+                        "sha256": (
+                            image_sha256
+                        ),
+                    },
                     "source_text_format": (
                         source_text_format
                     ),
-                    "parse_mode": parse_mode,
                     "disable_notification": (
                         disable_notification
                     ),
@@ -322,8 +402,9 @@ async def prepare_approved_publication(
     return PreparedApprovedPublication(
         publication=publication,
         telegram_chat_id=telegram_chat_id,
-        post_text=telegram_text,
-        text_format=telegram_text_format,
-        parse_mode=parse_mode,
+        rich_html=rich_html,
+        rich_media_id=rich_media_id,
+        image_path=image_path,
+        image_sha256=image_sha256,
         source_text_format=source_text_format,
     )

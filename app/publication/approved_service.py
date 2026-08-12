@@ -1,9 +1,17 @@
+from hashlib import sha256
 import logging
+from pathlib import Path
 from typing import Any
 
 import asyncpg
 from aiogram import Bot
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ChatType
+from aiogram.types import (
+    FSInputFile,
+    InputMediaPhoto,
+    InputRichMessage,
+    InputRichMessageMedia,
+)
 
 from app.db.approved_publications import (
     prepare_approved_publication,
@@ -17,8 +25,8 @@ from app.publication.service import (
     PublicationResult,
     PublicationStateUncertainError,
 )
-from app.publication.telegram_text import (
-    prepare_telegram_text,
+from app.publication.telegram_rich_message import (
+    prepare_telegram_rich_message,
 )
 
 
@@ -50,24 +58,6 @@ def _error_text(
     )
 
 
-def _resolve_parse_mode(
-    value: str | None,
-) -> ParseMode | None:
-    """Преобразует строку parse_mode в Enum aiogram."""
-
-    if value is None:
-        return None
-
-    try:
-        return ParseMode(value)
-    except ValueError as error:
-        raise ValueError(
-            "Неподдерживаемый Telegram "
-            "parse_mode: "
-            f"{value}"
-        ) from error
-
-
 async def _close_bot_session(
     bot: Bot,
 ) -> None:
@@ -86,15 +76,24 @@ async def _load_source_post(
     pool: asyncpg.Pool,
     *,
     generated_post_id: int,
-) -> tuple[str, str]:
-    """Читает исходный текст и формат generated_post."""
+) -> tuple[
+    str,
+    str,
+    str,
+    str,
+]:
+    """
+    Читает текст, формат и изображение generated_post.
+    """
 
     async with pool.acquire() as connection:
         record = await connection.fetchrow(
             """
             SELECT
                 post_text,
-                text_format
+                text_format,
+                image_path,
+                image_sha256
             FROM generated_posts
             WHERE generated_post_id = $1
             """,
@@ -110,6 +109,8 @@ async def _load_source_post(
 
     post_text = record["post_text"]
     text_format = record["text_format"]
+    image_path = record["image_path"]
+    image_sha256 = record["image_sha256"]
 
     if not isinstance(post_text, str):
         raise ValueError(
@@ -123,9 +124,125 @@ async def _load_source_post(
             "должен быть строкой."
         )
 
+    if (
+        not isinstance(image_path, str)
+        or not image_path.strip()
+    ):
+        raise ValueError(
+            "generated_posts.image_path "
+            "не заполнен."
+        )
+
+    if (
+        not isinstance(image_sha256, str)
+        or not image_sha256.strip()
+    ):
+        raise ValueError(
+            "generated_posts.image_sha256 "
+            "не заполнен."
+        )
+
     return (
         post_text,
         text_format,
+        image_path,
+        image_sha256,
+    )
+
+
+def _resolve_image_file(
+    *,
+    image_path: str,
+    expected_sha256: str,
+) -> Path:
+    """
+    Проверяет PNG перед созданием publication_attempt.
+
+    Кроме существования файла сверяется фактический
+    SHA-256 с generated_posts.image_sha256.
+    """
+
+    resolved_path = Path(
+        image_path
+    ).expanduser()
+
+    if not resolved_path.is_absolute():
+        resolved_path = (
+            Path.cwd()
+            / resolved_path
+        )
+
+    resolved_path = resolved_path.resolve()
+
+    if not resolved_path.exists():
+        raise ValueError(
+            "PNG публикации не найден: "
+            f"{resolved_path}"
+        )
+
+    if not resolved_path.is_file():
+        raise ValueError(
+            "image_path не указывает на файл: "
+            f"{resolved_path}"
+        )
+
+    if resolved_path.suffix.lower() != ".png":
+        raise ValueError(
+            "Для публикации ожидается PNG: "
+            f"{resolved_path}"
+        )
+
+    if resolved_path.stat().st_size <= 0:
+        raise ValueError(
+            "PNG публикации пуст."
+        )
+
+    digest = sha256()
+
+    with resolved_path.open("rb") as image_file:
+        while True:
+            chunk = image_file.read(
+                1024 * 1024
+            )
+
+            if not chunk:
+                break
+
+            digest.update(chunk)
+
+    actual_sha256 = digest.hexdigest()
+
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "SHA-256 PNG не совпадает "
+            "с generated_posts.image_sha256: "
+            f"expected={expected_sha256}, "
+            f"actual={actual_sha256}"
+        )
+
+    return resolved_path
+
+
+def _build_rich_message(
+    *,
+    rich_html: str,
+    media_id: str,
+    image_file: Path,
+) -> InputRichMessage:
+    """Создаёт Telegram Rich Message с одной PNG."""
+
+    media = InputRichMessageMedia(
+        id=media_id,
+        media=InputMediaPhoto(
+            media=FSInputFile(
+                image_file
+            )
+        ),
+    )
+
+    return InputRichMessage(
+        html=rich_html,
+        media=[media],
     )
 
 
@@ -139,29 +256,58 @@ async def publish_approved_post(
     """
     Публикует существующий одобренный generated_post.
 
-    Внутренний Markdown проекта преобразуется
-    в безопасный Telegram HTML до создания
-    publication_attempt.
+    Пост отправляется одним Telegram Rich Message:
 
-    В request_payload сохраняется именно тот
-    текст, который передаётся Telegram Bot API.
+    PNG + полный форматированный текст.
+
+    До создания publication_attempt проверяются
+    наличие PNG и его фактический SHA-256.
+
+    В request_payload сохраняются точные данные
+    Rich Message и изображения.
 
     Новый batch и generated_post не создаются.
-    После получения telegram_message_id
-    повторная отправка запрещена.
+
+    До получения telegram_message_id ошибка
+    фиксируется как failed.
+
+    После получения telegram_message_id повторная
+    отправка запрещена. Если финализация PostgreSQL
+    не удалась, попытка получает статус unknown.
     """
 
     (
         source_post_text,
         source_text_format,
+        source_image_path,
+        source_image_sha256,
     ) = await _load_source_post(
         pool,
         generated_post_id=generated_post_id,
     )
 
-    prepared_text = prepare_telegram_text(
-        source_post_text,
-        text_format=source_text_format,
+    resolved_image_file = _resolve_image_file(
+        image_path=source_image_path,
+        expected_sha256=(
+            source_image_sha256
+        ),
+    )
+
+    prepared_rich_message = (
+        prepare_telegram_rich_message(
+            source_post_text,
+            text_format=source_text_format,
+        )
+    )
+
+    rich_message = _build_rich_message(
+        rich_html=(
+            prepared_rich_message.html
+        ),
+        media_id=(
+            prepared_rich_message.media_id
+        ),
+        image_file=resolved_image_file,
     )
 
     prepared = await prepare_approved_publication(
@@ -170,11 +316,16 @@ async def publish_approved_post(
         disable_notification=(
             disable_notification
         ),
-        telegram_text=prepared_text.text,
-        telegram_text_format=(
-            prepared_text.text_format
+        rich_html=(
+            prepared_rich_message.html
         ),
-        parse_mode=prepared_text.parse_mode,
+        rich_media_id=(
+            prepared_rich_message.media_id
+        ),
+        image_path=source_image_path,
+        image_sha256=(
+            source_image_sha256
+        ),
         source_post_text=source_post_text,
         source_text_format=(
             source_text_format
@@ -182,10 +333,6 @@ async def publish_approved_post(
     )
 
     publication = prepared.publication
-
-    parse_mode = _resolve_parse_mode(
-        prepared.parse_mode
-    )
 
     bot = Bot(
         token=bot_token
@@ -204,12 +351,11 @@ async def publish_approved_post(
                     f"chat_type={chat.type}"
                 )
 
-            message = await bot.send_message(
+            message = await bot.send_rich_message(
                 chat_id=(
                     prepared.telegram_chat_id
                 ),
-                text=prepared.post_text,
-                parse_mode=parse_mode,
+                rich_message=rich_message,
                 disable_notification=(
                     disable_notification
                 ),
@@ -254,16 +400,23 @@ async def publish_approved_post(
             "message_date": (
                 message.date.isoformat()
             ),
-            "existing_approved_post": True,
-            "sent_text_format": (
-                prepared.text_format
+            "transport": "rich_message",
+            "rich_html_characters": len(
+                prepared.rich_html
+            ),
+            "rich_media_id": (
+                prepared.rich_media_id
+            ),
+            "image_path": (
+                prepared.image_path
+            ),
+            "image_sha256": (
+                prepared.image_sha256
             ),
             "source_text_format": (
                 prepared.source_text_format
             ),
-            "parse_mode": (
-                prepared.parse_mode
-            ),
+            "existing_approved_post": True,
         }
 
         try:
