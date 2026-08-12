@@ -10,5 +10,6 @@ dependencies = [
     "defusedxml>=0.7.1",
     "httpx>=0.28.1,<0.29",
     "openai>=2.51.0,<3.0.0",
+    "pillow>=12.3.0",
     "pydantic-settings>=2.14.2",
 ]
