@@ -1,5 +1,6 @@
 import asyncio
 from io import BytesIO
+import json
 from pathlib import Path
 import tempfile
 
@@ -14,6 +15,7 @@ from app.db.pool import (
 from app.generation.image_generator import (
     ImageModelRequest,
     ImageModelResponse,
+    OpenAIImageUsage,
     OpenAIMovieNewsImageGenerator,
 )
 from app.generation.openai_image_pipeline import (
@@ -29,11 +31,32 @@ from scripts import (
 )
 
 
-TEST_IMAGE_MODEL = (
-    "synthetic-image-pipeline-model"
-)
+TEST_IMAGE_MODEL = "gpt-image-2"
 
 TEST_IMAGE_SIZE = "64x96"
+
+EXPECTED_USAGE_PAYLOAD = {
+    "input_tokens": 120,
+    "input_text_tokens": 120,
+    "input_image_tokens": 0,
+    "output_tokens": 900,
+    "output_text_tokens": 0,
+    "output_image_tokens": 900,
+    "total_tokens": 1020,
+}
+
+EXPECTED_COST_PAYLOAD = {
+    "model_name": "gpt-image-2",
+    "pricing_version": "2026-08-12",
+    "pricing_basis": (
+        "reported_modality_tokens_standard_rates"
+    ),
+    "input_text_cost_usd": "0.00060000",
+    "input_image_cost_usd": "0.00000000",
+    "output_text_cost_usd": "0.00000000",
+    "output_image_cost_usd": "0.02700000",
+    "total_cost_usd": "0.02760000",
+}
 
 SYNTHETIC_API_ERROR = (
     "Synthetic Image API pipeline failure."
@@ -101,7 +124,15 @@ class SyntheticImageClient:
             quality=request.quality,
             size=request.size,
             background=request.background,
-            usage=None,
+            usage=OpenAIImageUsage(
+                input_tokens=120,
+                input_text_tokens=120,
+                input_image_tokens=0,
+                output_tokens=900,
+                output_text_tokens=0,
+                output_image_tokens=900,
+                total_tokens=1020,
+            ),
             revised_prompt=None,
         )
 
@@ -115,6 +146,27 @@ def build_generator(
         client=client,
         model_name=TEST_IMAGE_MODEL,
         size=TEST_IMAGE_SIZE,
+    )
+
+
+def decode_json_object(
+    value,
+    *,
+    field_name: str,
+) -> dict:
+    """Нормализует jsonb из asyncpg в dict."""
+
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str):
+        decoded = json.loads(value)
+
+        if isinstance(decoded, dict):
+            return decoded
+
+    raise TypeError(
+        f"{field_name} должен содержать JSON object."
     )
 
 
@@ -288,8 +340,15 @@ async def test_initial_success_and_duplicate(
         state["image_prompt_version"]
         == "movie_news_image_v1"
     )
-    assert state["openai_usage"] is None
-    assert state["openai_cost"] is None
+    assert decode_json_object(
+        state["openai_usage"],
+        field_name="openai_usage",
+    ) == EXPECTED_USAGE_PAYLOAD
+
+    assert decode_json_object(
+        state["openai_cost"],
+        field_name="openai_cost",
+    ) == EXPECTED_COST_PAYLOAD
     assert state["error_type"] is None
     assert state["error_message"] is None
     assert state["completed_at"] is not None
@@ -341,6 +400,16 @@ async def test_initial_success_and_duplicate(
         == 1
     )
 
+    assert decode_json_object(
+        repeated_state["openai_usage"],
+        field_name="openai_usage",
+    ) == EXPECTED_USAGE_PAYLOAD
+
+    assert decode_json_object(
+        repeated_state["openai_cost"],
+        field_name="openai_cost",
+    ) == EXPECTED_COST_PAYLOAD
+
     print("Initial image pipeline: OK")
     print(
         "image_generation_id="
@@ -354,6 +423,7 @@ async def test_initial_success_and_duplicate(
     print("fake_image_api_calls=1")
     print("png_validated_and_stored=true")
     print("database_completion=true")
+    print("usage_and_cost_saved=true")
     print("text_post_preserved=true")
     print("duplicate_api_call_blocked=true")
 
@@ -434,6 +504,8 @@ async def test_initial_api_failure(
     assert state["image_prompt"] is None
     assert state["image_model_name"] is None
     assert state["image_prompt_version"] is None
+    assert state["openai_usage"] is None
+    assert state["openai_cost"] is None
     assert state["error_type"] == "RuntimeError"
     assert (
         state["error_message"]
@@ -535,6 +607,17 @@ async def test_storage_failure(
     assert state["post_status"] == "awaiting_review"
     assert state["image_path"] is None
     assert state["image_sha256"] is None
+
+    assert decode_json_object(
+        state["openai_usage"],
+        field_name="openai_usage",
+    ) == EXPECTED_USAGE_PAYLOAD
+
+    assert decode_json_object(
+        state["openai_cost"],
+        field_name="openai_cost",
+    ) == EXPECTED_COST_PAYLOAD
+
     assert state["completed_at"] is None
     assert state["failed_at"] is not None
 
@@ -544,6 +627,7 @@ async def test_storage_failure(
     print("wrong_dimensions_blocked=true")
     print("permanent_artifact_created=false")
     print("image_status=failed")
+    print("paid_failure_usage_and_cost_saved=true")
     print("text_post_preserved=true")
 
 
@@ -664,6 +748,17 @@ async def test_regenerate_success(
         != reservation_fixture
         .EXISTING_IMAGE_SHA256
     )
+
+    assert decode_json_object(
+        state["openai_usage"],
+        field_name="openai_usage",
+    ) == EXPECTED_USAGE_PAYLOAD
+
+    assert decode_json_object(
+        state["openai_cost"],
+        field_name="openai_cost",
+    ) == EXPECTED_COST_PAYLOAD
+
     assert state["generated_post_count"] == 1
 
     print()
@@ -676,6 +771,7 @@ async def test_regenerate_success(
     print("same_generated_post_updated=true")
     print("previous_image_replaced=true")
     print("new_png_stored=true")
+    print("usage_and_cost_saved=true")
 
 
 async def main() -> int:

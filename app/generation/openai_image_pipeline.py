@@ -24,6 +24,9 @@ from app.generation.image_generator import (
     OpenAIImageUsage,
     OpenAIMovieNewsImageGenerator,
 )
+from app.generation.image_openai_usage import (
+    build_openai_image_cost_payload,
+)
 from app.generation.image_request_key import (
     ImageRequestKey,
     create_image_request_key,
@@ -550,7 +553,7 @@ async def run_reserved_openai_image_generation(
     cost_estimator: (
         ImageCostEstimator
         | None
-    ) = None,
+    ) = build_openai_image_cost_payload,
 ) -> ReservedOpenAIImageGenerationResult:
     """
     Запускает защищённый image-generation pipeline.
