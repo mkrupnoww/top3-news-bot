@@ -140,7 +140,7 @@ async def get_latest_review_draft(
             p.generated_post_id,
             p.version_number,
             p.post_text,
-            p.text_format
+            p.text_format,
             p.image_path,
             p.image_sha256
         FROM publication_batches AS b
