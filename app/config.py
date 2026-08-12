@@ -119,6 +119,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    openai_image_model: str = Field(
+        default="gpt-image-2",
+        min_length=1,
+        max_length=128,
+        validation_alias=(
+            "OPENAI_IMAGE_MODEL"
+        ),
+    )
+
+    openai_image_size: str = Field(
+        default="1024x1536",
+        min_length=3,
+        max_length=32,
+        pattern=(
+            r"^[1-9][0-9]*x[1-9][0-9]*$"
+        ),
+        validation_alias=(
+            "OPENAI_IMAGE_SIZE"
+        ),
+    )
+
     openai_timeout_seconds: float = Field(
         default=60.0,
         gt=0,
@@ -158,6 +179,7 @@ class Settings(BaseSettings):
     @field_validator(
         "openai_ranking_model",
         "openai_generation_model",
+        "openai_image_model",
     )
     @classmethod
     def validate_openai_model_name(
@@ -175,6 +197,18 @@ class Settings(BaseSettings):
             )
 
         return normalized_value
+
+    @field_validator(
+        "openai_image_size"
+    )
+    @classmethod
+    def validate_openai_image_size(
+        cls,
+        value: str,
+    ) -> str:
+        """Нормализует размер Image API."""
+
+        return value.strip()
 
 
 @lru_cache(maxsize=1)
