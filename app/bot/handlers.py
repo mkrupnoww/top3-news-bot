@@ -16,6 +16,10 @@ from aiogram.types import (
 from app.bot.review_source_messages import (
     build_review_source_messages,
 )
+from app.bot.review_preview import (
+    ReviewImageUnavailableError,
+    send_review_draft_preview,
+)
 from app.config import get_settings
 from app.db.review_queue import (
     get_latest_review_draft,
@@ -364,12 +368,47 @@ async def handle_review(
         "Итоговый текст публикации:"
     )
 
-    await message.answer(
-        draft.post_text,
-        reply_markup=build_review_keyboard(
-            draft.generated_post_id
-        ),
-    )
+    try:
+        await send_review_draft_preview(
+            message,
+            draft=draft,
+            reply_markup=build_review_keyboard(
+                draft.generated_post_id
+            ),
+        )
+
+    except ReviewImageUnavailableError as error:
+        logger.warning(
+            "Review image unavailable: "
+            "generated_post_id=%s, error=%s",
+            draft.generated_post_id,
+            error,
+        )
+
+        await message.answer(
+            "Изображение выпуска ещё не готово.\n\n"
+            f"Generated post ID: "
+            f"{draft.generated_post_id}\n"
+            f"Причина: {error}\n\n"
+            "Одобрение заблокировано до "
+            "успешной генерации PNG."
+        )
+        return
+
+    except Exception:
+        logger.exception(
+            "Review Rich Message failed: "
+            "generated_post_id=%s",
+            draft.generated_post_id,
+        )
+
+        await message.answer(
+            "Не удалось сформировать preview "
+            "публикации с изображением.\n\n"
+            "Одобрение заблокировано. "
+            "Подробности сохранены в журнале."
+        )
+        return
 
 
 @router.callback_query(F.data.startswith("review:"))
