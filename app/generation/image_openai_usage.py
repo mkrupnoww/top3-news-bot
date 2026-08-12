@@ -529,23 +529,24 @@ def build_openai_image_cost_payload(
         "pricing_basis": (
             cost_estimate.pricing_basis
         ),
-        "input_text_cost_usd": str(
-            cost_estimate
-            .input_text_cost_usd
+        "input_text_cost_usd": format(
+            cost_estimate.input_text_cost_usd,
+            ".8f",
         ),
-        "input_image_cost_usd": str(
-            cost_estimate
-            .input_image_cost_usd
+        "input_image_cost_usd": format(
+            cost_estimate.input_image_cost_usd,
+            ".8f",
         ),
-        "output_text_cost_usd": str(
-            cost_estimate
-            .output_text_cost_usd
+        "output_text_cost_usd": format(
+            cost_estimate.output_text_cost_usd,
+            ".8f",
         ),
-        "output_image_cost_usd": str(
-            cost_estimate
-            .output_image_cost_usd
+        "output_image_cost_usd": format(
+            cost_estimate.output_image_cost_usd,
+            ".8f",
         ),
-        "total_cost_usd": str(
-            cost_estimate.total_cost_usd
+        "total_cost_usd": format(
+            cost_estimate.total_cost_usd,
+            ".8f",
         ),
     }
