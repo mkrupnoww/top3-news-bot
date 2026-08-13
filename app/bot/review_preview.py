@@ -1,22 +1,33 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram.types import (
     FSInputFile,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
-    InputRichMessage,
-    InputRichMessageMedia,
     Message,
 )
 
 from app.db.review_queue import ReviewDraftPreview
-from app.publication.telegram_rich_message import (
-    prepare_telegram_rich_message,
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
+from app.publication.telegram_text import (
+    prepare_telegram_text,
 )
 
 
 class ReviewImageUnavailableError(RuntimeError):
     """Изображение черновика отсутствует или недоступно."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedReviewPhoto:
+    """Подготовленный native photo-preview для review."""
+
+    image_path: Path
+    caption: str
+    parse_mode: str | None
+    source_text_format: str
 
 
 def _resolve_review_image_path(
@@ -64,35 +75,38 @@ def _resolve_review_image_path(
     return image_path
 
 
-def build_review_rich_message(
+def prepare_review_photo(
     draft: ReviewDraftPreview,
-) -> InputRichMessage:
+) -> PreparedReviewPhoto:
     """
-    Формирует Telegram Rich Message
-    для ручного review.
+    Подготавливает native Telegram photo-message:
+
+    PNG + caption с форматированием проекта.
     """
+
+    if len(draft.post_text) > MAXIMUM_POST_LENGTH:
+        raise ValueError(
+            "Текст review-preview превышает "
+            "допустимую длину выпуска: "
+            f"{MAXIMUM_POST_LENGTH} символов."
+        )
 
     image_path = _resolve_review_image_path(
         draft
     )
 
-    prepared = prepare_telegram_rich_message(
+    prepared_text = prepare_telegram_text(
         draft.post_text,
         text_format=draft.text_format,
     )
 
-    media = InputRichMessageMedia(
-        id=prepared.media_id,
-        media=InputMediaPhoto(
-            media=FSInputFile(
-                image_path
-            )
+    return PreparedReviewPhoto(
+        image_path=image_path,
+        caption=prepared_text.text,
+        parse_mode=prepared_text.parse_mode,
+        source_text_format=(
+            prepared_text.source_text_format
         ),
-    )
-
-    return InputRichMessage(
-        html=prepared.html,
-        media=[media],
     )
 
 
@@ -103,18 +117,22 @@ async def send_review_draft_preview(
     reply_markup: InlineKeyboardMarkup,
 ) -> Message:
     """
-    Отправляет пользователю одно review-сообщение:
+    Отправляет пользователю одно native photo-message:
 
-    PNG + полный форматированный текст +
-    существующая inline-клавиатура.
+    PNG + полный caption + существующая
+    inline-клавиатура review.
     """
 
-    rich_message = build_review_rich_message(
+    prepared = prepare_review_photo(
         draft
     )
 
-    return await message.bot.send_rich_message(
+    return await message.bot.send_photo(
         chat_id=message.chat.id,
-        rich_message=rich_message,
+        photo=FSInputFile(
+            prepared.image_path
+        ),
+        caption=prepared.caption,
+        parse_mode=prepared.parse_mode,
         reply_markup=reply_markup,
     )
