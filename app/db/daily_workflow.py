@@ -897,13 +897,16 @@ async def attach_daily_workflow_image(
             image = await connection.fetchrow(
                 """
                 SELECT
-                    image_generation_id,
-                    ranking_run_id,
-                    batch_id,
-                    generated_post_id,
-                    image_status
-                FROM image_generation_requests
-                WHERE image_generation_id = $1
+                    igr.image_generation_id,
+                    b.ranking_run_id,
+                    igr.batch_id,
+                    igr.generated_post_id,
+                    igr.image_status,
+                    igr.request_kind
+                FROM image_generation_requests AS igr
+                JOIN publication_batches AS b
+                ON b.batch_id = igr.batch_id
+                WHERE igr.image_generation_id = $1
                 """,
                 image_id,
             )
@@ -919,6 +922,12 @@ async def attach_daily_workflow_image(
                     "Для workflow требуется "
                     "completed image request."
                 )
+
+            if image["request_kind"] != "initial":
+               raise ValueError(
+                   "Daily workflow может использовать "
+                   "только initial image request."
+               )
 
             for field_name in (
                 "ranking_run_id",
