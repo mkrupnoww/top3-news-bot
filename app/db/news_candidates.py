@@ -63,6 +63,9 @@ async def select_news_candidates(
     """
     Выбирает новости из заданного временного окна.
 
+    Новости, уже входившие в реально опубликованный
+    TOP-3, повторно кандидатами не становятся.
+
     Вес источника читается из:
     sources.settings.ranking.source_weight.
 
@@ -200,6 +203,15 @@ async def select_news_candidates(
           AND n.source_published_at IS NOT NULL
           AND n.source_published_at >= $1
           AND n.source_published_at <= $2
+          AND NOT EXISTS (
+              SELECT 1
+              FROM batch_items AS bi
+              JOIN publication_batches AS pb
+                ON pb.batch_id = bi.batch_id
+              WHERE bi.news_id = n.news_id
+                AND pb.batch_status = 'published'
+                AND pb.published_at IS NOT NULL
+          )
           AND (
               $4::text[] IS NULL
               OR s.source_code = ANY($4::text[])
