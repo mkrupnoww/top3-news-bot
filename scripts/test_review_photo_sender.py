@@ -88,7 +88,7 @@ def build_draft(
             "1️⃣ **Тестовая новость**\n\n"
             "Тестовый текст."
         ),
-        text_format="telegram_markdown",
+        text_format="markdown",
         image_path=image_path,
         image_sha256=image_sha256,
     )
