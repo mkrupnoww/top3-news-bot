@@ -40,6 +40,9 @@ from app.publication import (
     publish_approved_post,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,11 +290,12 @@ async def handle_review(
         )
         return
 
-    if len(draft.post_text) > 4096:
+    if len(draft.post_text) > MAXIMUM_POST_LENGTH:
         await message.answer(
-            "Черновик превышает лимит Telegram "
-            "в 4096 символов. Его нельзя одобрить "
-            "до сокращения."
+            "Черновик превышает допустимую "
+            "длину выпуска "
+            f"в {MAXIMUM_POST_LENGTH} символов. "
+            "Его нельзя одобрить до сокращения."
         )
         return
 

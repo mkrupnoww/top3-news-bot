@@ -4,11 +4,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
+
 from app.generation.openai_generator import (
     GenerationModelRequest,
     GenerationModelResponse,
     GenerationNewsItem,
-    MAXIMUM_POST_LENGTH,
     OPENAI_POST_GENERATOR_VERSION,
     OPENAI_POST_PROMPT_VERSION,
     OPENAI_POST_REVISION_PROMPT_VERSION,
@@ -363,15 +366,15 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v3"
+        "openai_telegram_post_generator_v4"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v3"
+        "movie_news_telegram_post_prompt_v4"
     )
 
     assert OPENAI_POST_REVISION_PROMPT_VERSION == (
-        "movie_news_telegram_post_revision_prompt_v1"
+        "movie_news_telegram_post_revision_prompt_v2"
     )
 
     request = generator.build_request(
@@ -430,6 +433,11 @@ def test_metadata_and_request() -> None:
         payload["maximum_post_length"]
         == MAXIMUM_POST_LENGTH
     )
+
+    assert (
+    f"уложиться в {MAXIMUM_POST_LENGTH} символов"
+    in request.instructions
+)
 
     assert [
         item["news_id"]
@@ -1192,7 +1200,7 @@ async def test_unpaired_body_markdown() -> None:
 
 
 async def test_oversized_canonical_post() -> None:
-    """Блокирует итоговый текст длиннее 3900."""
+    """Блокирует итоговый текст длиннее допустимого лимита."""
 
     payload = json.loads(
         build_valid_response()
@@ -1210,7 +1218,10 @@ async def test_oversized_canonical_post() -> None:
 
     await assert_raises_async(
         ValueError,
-        "превышает 3900 символов",
+        (
+            "превышает "
+            f"{MAXIMUM_POST_LENGTH} символов"
+        ),
         lambda: generator.generate(
             build_news_items()
         ),
@@ -1309,6 +1320,11 @@ def test_revision_request_preparation() -> None:
         payload["maximum_post_length"]
         == MAXIMUM_POST_LENGTH
     )
+
+    assert (
+    f"уложиться в {MAXIMUM_POST_LENGTH} символов"
+    in request.instructions
+)
 
     assert (
         payload["source_post_text"]

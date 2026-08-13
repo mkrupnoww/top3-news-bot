@@ -14,6 +14,10 @@ from app.ranking.openai_usage import (
     get_model_pricing,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
+
 
 OPENAI_GENERATION_SCHEMA_NAME = (
     "movie_news_telegram_post"
@@ -29,7 +33,7 @@ OPENAI_GENERATION_RESPONSE_SCHEMA: dict[
         "post_text": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096,
+            "maxLength": MAXIMUM_POST_LENGTH,
         },
         "items": {
             "type": "array",

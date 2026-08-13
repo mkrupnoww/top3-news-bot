@@ -16,6 +16,9 @@ from app.ranking.openai_usage import (
     OpenAITokenUsage,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 
 GENERATION_COMPLETION_VERSION = (
     "reserved_generation_completion_v1"
@@ -326,10 +329,11 @@ def _prepare_generation_result(
             "post_text не может быть пустым."
         )
 
-    if len(post_text) > 4096:
+    if len(post_text) > MAXIMUM_POST_LENGTH:
         raise ValueError(
-            "post_text превышает ограничение "
-            "Telegram в 4096 символов."
+            "post_text превышает допустимую "
+            "длину выпуска: "
+            f"{MAXIMUM_POST_LENGTH} символов."
         )
 
     if len(result.payload.items) != 3:

@@ -11,6 +11,9 @@ from app.generation.openai_generator import (
     GenerationModelRequest,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 
 @dataclass(frozen=True, slots=True)
 class FakeInputTokenDetails:
@@ -352,7 +355,7 @@ async def test_successful_request() -> None:
         ][
             "maxLength"
         ]
-        == 4096
+        == MAXIMUM_POST_LENGTH
     )
 
     items_schema = (

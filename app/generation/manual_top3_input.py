@@ -13,6 +13,9 @@ from pydantic import (
     model_validator,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 
 TextFormat = Literal[
     "markdown",
@@ -202,7 +205,7 @@ class ManualTop3Input(BaseModel):
 
     post_text: str = Field(
         min_length=1,
-        max_length=4096,
+        max_length=MAXIMUM_POST_LENGTH,
     )
 
     items: list[ManualTop3NewsItem] = Field(

@@ -20,22 +20,23 @@ from app.ranking.openai_usage import (
     OpenAITokenUsage,
 )
 
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v3"
+    "openai_telegram_post_generator_v4"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
-    "movie_news_telegram_post_prompt_v3"
+    "movie_news_telegram_post_prompt_v4"
 )
 
 OPENAI_POST_REVISION_PROMPT_VERSION = (
-    "movie_news_telegram_post_revision_prompt_v1"
+    "movie_news_telegram_post_revision_prompt_v2"
 )
 
 OPENAI_POST_TEXT_FORMAT = "markdown"
-
-MAXIMUM_POST_LENGTH = 3900
 
 POST_HEADER = (
     "**TOP-3 НОВОСТЕЙ КИНО "
@@ -203,7 +204,7 @@ class OpenAIGeneratedPostPayload(
 
     post_text: str = Field(
         min_length=1,
-        max_length=4096,
+        max_length=MAXIMUM_POST_LENGTH,
     )
 
     items: list[
@@ -228,10 +229,14 @@ class OpenAIGeneratedPostPayload(
                 "post_text не может быть пустым."
             )
 
-        if len(normalized_value) > 4096:
+        if (
+            len(normalized_value)
+            > MAXIMUM_POST_LENGTH
+        ):
             raise ValueError(
-                "post_text превышает ограничение "
-                "Telegram в 4096 символов."
+                "post_text превышает допустимую "
+                "длину выпуска: "
+                f"{MAXIMUM_POST_LENGTH} символов."
             )
 
         return normalized_value
@@ -376,7 +381,7 @@ SYSTEM_INSTRUCTIONS = """
 30. items должны идти строго в порядке:
     position=1, position=2, position=3.
 31. Общая длина будущего поста должна позволять
-    уложиться в 3900 символов.
+    уложиться в __MAXIMUM_POST_LENGTH__ символов.
 
 Финальный post_text будет программно собран
 Python-кодом из headline и body.
@@ -444,7 +449,10 @@ _______________
 }
 
 Верни только JSON-объект без Markdown-обёртки.
-""".strip()
+""".replace(
+    "__MAXIMUM_POST_LENGTH__",
+    str(MAXIMUM_POST_LENGTH),
+).strip()
 
 
 REVISION_SYSTEM_INSTRUCTIONS = """
