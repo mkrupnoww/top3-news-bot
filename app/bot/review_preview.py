@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
+from aiogram import Bot
 from aiogram.types import (
     FSInputFile,
     InlineKeyboardMarkup,
@@ -28,6 +30,21 @@ class PreparedReviewPhoto:
     caption: str
     parse_mode: str | None
     source_text_format: str
+
+
+class ReviewPhotoSender(Protocol):
+    """Минимальный интерфейс Telegram sender для review."""
+
+    async def send_photo(
+        self,
+        *,
+        chat_id: int,
+        photo: FSInputFile,
+        caption: str,
+        parse_mode: str | None,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> Message:
+        """Отправляет native Telegram photo-message."""
 
 
 def _resolve_review_image_path(
@@ -110,6 +127,41 @@ def prepare_review_photo(
     )
 
 
+async def send_review_draft_photo(
+    bot: Bot | ReviewPhotoSender,
+    *,
+    chat_id: int,
+    draft: ReviewDraftPreview,
+    reply_markup: InlineKeyboardMarkup,
+) -> Message:
+    """
+    Отправляет конкретный review draft в указанный Telegram chat.
+
+    Используется как ручным /review, так и будущей
+    автоматической review delivery.
+    """
+
+    if chat_id <= 0:
+        raise ValueError(
+            "chat_id должен быть больше нуля "
+            "для личной review delivery."
+        )
+
+    prepared = prepare_review_photo(
+        draft
+    )
+
+    return await bot.send_photo(
+        chat_id=chat_id,
+        photo=FSInputFile(
+            prepared.image_path
+        ),
+        caption=prepared.caption,
+        parse_mode=prepared.parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
 async def send_review_draft_preview(
     message: Message,
     *,
@@ -117,22 +169,15 @@ async def send_review_draft_preview(
     reply_markup: InlineKeyboardMarkup,
 ) -> Message:
     """
-    Отправляет пользователю одно native photo-message:
+    Совместимый wrapper для существующего /review.
 
-    PNG + полный caption + существующая
-    inline-клавиатура review.
+    Отправляет native photo-message в тот же чат,
+    из которого пользователь вызвал команду.
     """
 
-    prepared = prepare_review_photo(
-        draft
-    )
-
-    return await message.bot.send_photo(
+    return await send_review_draft_photo(
+        message.bot,
         chat_id=message.chat.id,
-        photo=FSInputFile(
-            prepared.image_path
-        ),
-        caption=prepared.caption,
-        parse_mode=prepared.parse_mode,
+        draft=draft,
         reply_markup=reply_markup,
     )
