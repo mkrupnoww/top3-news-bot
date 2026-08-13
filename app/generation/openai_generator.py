@@ -21,19 +21,27 @@ from app.ranking.openai_usage import (
 )
 
 from app.generation.post_contract import (
+    MAXIMUM_BODY_LENGTH,
+    MAXIMUM_HEADLINE_LENGTH,
     MAXIMUM_POST_LENGTH,
+    TARGET_BODY_LENGTH_MAX,
+    TARGET_BODY_LENGTH_MIN,
+    TARGET_HEADLINE_LENGTH_MAX,
+    TARGET_HEADLINE_LENGTH_MIN,
+    TARGET_POST_LENGTH_MAX,
+    TARGET_POST_LENGTH_MIN,
 )
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v5"
+    "openai_telegram_post_generator_v6"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
-    "movie_news_telegram_post_prompt_v5"
+    "movie_news_telegram_post_prompt_v6"
 )
 
 OPENAI_POST_REVISION_PROMPT_VERSION = (
-    "movie_news_telegram_post_revision_prompt_v3"
+    "movie_news_telegram_post_revision_prompt_v4"
 )
 
 OPENAI_POST_TEXT_FORMAT = "markdown"
@@ -162,12 +170,12 @@ class OpenAIGeneratedNewsPayload(
 
     headline: str = Field(
         min_length=1,
-        max_length=300,
+        max_length=MAXIMUM_HEADLINE_LENGTH,
     )
 
     body: str = Field(
         min_length=1,
-        max_length=1400,
+        max_length=MAXIMUM_BODY_LENGTH,
     )
 
     @field_validator(
@@ -380,20 +388,29 @@ SYSTEM_INSTRUCTIONS = """
 29. Верни каждую входную новость ровно один раз.
 30. items должны идти строго в порядке:
     position=1, position=2, position=3.
-31. Целевой объём итогового post_text — примерно
-    850–950 символов с пробелами, включая заголовок
-    выпуска, разделители, номера новостей и строку
-    подписки, которые добавит Python-код.
-32. Не сокращай текст сильнее необходимого. Если
+31. Целевой объём итогового post_text —
+    __TARGET_POST_LENGTH_MIN__–__TARGET_POST_LENGTH_MAX__
+    символов с пробелами, включая заголовок выпуска,
+    разделители, номера новостей и строку подписки,
+    которые добавит Python-код.
+32. Для каждого headline ориентируйся на
+    __TARGET_HEADLINE_LENGTH_MIN__–__TARGET_HEADLINE_LENGTH_MAX__
+    символов. Абсолютный максимум headline —
+    __MAXIMUM_HEADLINE_LENGTH__ символов.
+33. Для каждого body ориентируйся на
+    __TARGET_BODY_LENGTH_MIN__–__TARGET_BODY_LENGTH_MAX__
+    символов. Абсолютный максимум body —
+    __MAXIMUM_BODY_LENGTH__ символов.
+34. Не сокращай текст сильнее необходимого. Если
     входных фактов достаточно, каждая новость должна
     содержать не только само событие, но и важный
     контекст, объясняющий читателю, что произошло.
-33. Не увеличивай объём искусственно: не добавляй
-    воду, повторы или неподтверждённые детали только
-    ради достижения целевой длины. Если исходных
-    фактов объективно мало, пост может быть короче
-    850 символов.
-34. Абсолютный максимум итогового post_text —
+35. Не увеличивай объём искусственно: не добавляй
+    воду, повторы или неподтверждённые детали ради
+    достижения целевой длины. Если исходных фактов
+    объективно мало, headline или body могут быть
+    короче целевого диапазона.
+36. Абсолютный максимум итогового post_text —
     __MAXIMUM_POST_LENGTH__ символов.
 
 Финальный post_text будет программно собран
@@ -463,6 +480,30 @@ _______________
 
 Верни только JSON-объект без Markdown-обёртки.
 """.replace(
+    "__TARGET_POST_LENGTH_MIN__",
+    str(TARGET_POST_LENGTH_MIN),
+).replace(
+    "__TARGET_POST_LENGTH_MAX__",
+    str(TARGET_POST_LENGTH_MAX),
+).replace(
+    "__TARGET_HEADLINE_LENGTH_MIN__",
+    str(TARGET_HEADLINE_LENGTH_MIN),
+).replace(
+    "__TARGET_HEADLINE_LENGTH_MAX__",
+    str(TARGET_HEADLINE_LENGTH_MAX),
+).replace(
+    "__MAXIMUM_HEADLINE_LENGTH__",
+    str(MAXIMUM_HEADLINE_LENGTH),
+).replace(
+    "__TARGET_BODY_LENGTH_MIN__",
+    str(TARGET_BODY_LENGTH_MIN),
+).replace(
+    "__TARGET_BODY_LENGTH_MAX__",
+    str(TARGET_BODY_LENGTH_MAX),
+).replace(
+    "__MAXIMUM_BODY_LENGTH__",
+    str(MAXIMUM_BODY_LENGTH),
+).replace(
     "__MAXIMUM_POST_LENGTH__",
     str(MAXIMUM_POST_LENGTH),
 ).strip()
@@ -637,21 +678,55 @@ SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
     только ради лаконичности. Второй проход должен
     исправлять реальные недостатки, а не превращать
     содержательный текст в краткую выжимку.
-17. Ориентир для итогового post_text — примерно
-    850–950 символов с пробелами. Если исходный пост
-    находится в этом диапазоне, по возможности
-    сохраняй близкий объём.
-18. Если source_post_text заметно короче 850 символов,
-    а title и summary содержат полезные подтверждённые
-    детали, используй их, чтобы сделать новости
-    содержательнее и приблизить пост к целевому
-    диапазону.
-19. Не добавляй воду, повторы или новые факты только
+17. Ориентир для итогового post_text —
+    __TARGET_POST_LENGTH_MIN__–__TARGET_POST_LENGTH_MAX__
+    символов с пробелами. Если исходный пост находится
+    в этом диапазоне, по возможности сохраняй близкий
+    объём.
+18. Для каждого headline ориентируйся на
+    __TARGET_HEADLINE_LENGTH_MIN__–__TARGET_HEADLINE_LENGTH_MAX__
+    символов, для body —
+    __TARGET_BODY_LENGTH_MIN__–__TARGET_BODY_LENGTH_MAX__
+    символов.
+19. Если source_post_text заметно короче целевого
+    диапазона, а title и summary содержат полезные
+    подтверждённые детали, используй их, чтобы сделать
+    новости содержательнее.
+20. Не добавляй воду, повторы или новые факты только
     для увеличения длины. При недостатке исходной
     фактуры допустим более короткий текст.
-20. Итоговый post_text ни при каких обстоятельствах
-    не должен превышать 1000 символов.
-""".strip()
+21. Headline не должен превышать
+    __MAXIMUM_HEADLINE_LENGTH__ символов, body —
+    __MAXIMUM_BODY_LENGTH__ символов, а итоговый
+    post_text — __MAXIMUM_POST_LENGTH__ символов.
+""".replace(
+    "__TARGET_POST_LENGTH_MIN__",
+    str(TARGET_POST_LENGTH_MIN),
+).replace(
+    "__TARGET_POST_LENGTH_MAX__",
+    str(TARGET_POST_LENGTH_MAX),
+).replace(
+    "__TARGET_HEADLINE_LENGTH_MIN__",
+    str(TARGET_HEADLINE_LENGTH_MIN),
+).replace(
+    "__TARGET_HEADLINE_LENGTH_MAX__",
+    str(TARGET_HEADLINE_LENGTH_MAX),
+).replace(
+    "__MAXIMUM_HEADLINE_LENGTH__",
+    str(MAXIMUM_HEADLINE_LENGTH),
+).replace(
+    "__TARGET_BODY_LENGTH_MIN__",
+    str(TARGET_BODY_LENGTH_MIN),
+).replace(
+    "__TARGET_BODY_LENGTH_MAX__",
+    str(TARGET_BODY_LENGTH_MAX),
+).replace(
+    "__MAXIMUM_BODY_LENGTH__",
+    str(MAXIMUM_BODY_LENGTH),
+).replace(
+    "__MAXIMUM_POST_LENGTH__",
+    str(MAXIMUM_POST_LENGTH),
+).strip()
 
 
 def _normalize_required_text(

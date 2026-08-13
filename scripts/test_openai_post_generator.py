@@ -5,7 +5,15 @@ from decimal import Decimal
 import json
 
 from app.generation.post_contract import (
+    MAXIMUM_BODY_LENGTH,
+    MAXIMUM_HEADLINE_LENGTH,
     MAXIMUM_POST_LENGTH,
+    TARGET_BODY_LENGTH_MAX,
+    TARGET_BODY_LENGTH_MIN,
+    TARGET_HEADLINE_LENGTH_MAX,
+    TARGET_HEADLINE_LENGTH_MIN,
+    TARGET_POST_LENGTH_MAX,
+    TARGET_POST_LENGTH_MIN,
 )
 
 from app.generation.openai_generator import (
@@ -366,19 +374,23 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v5"
+        "openai_telegram_post_generator_v6"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v5"
+        "movie_news_telegram_post_prompt_v6"
     )
 
     assert OPENAI_POST_REVISION_PROMPT_VERSION == (
-        "movie_news_telegram_post_revision_prompt_v3"
+        "movie_news_telegram_post_revision_prompt_v4"
     )
 
     request = generator.build_request(
         build_news_items()
+    )
+
+    normalized_instructions = " ".join(
+        request.instructions.split()
     )
 
     assert request.model == "gpt-5.6-terra"
@@ -435,18 +447,55 @@ def test_metadata_and_request() -> None:
     )
 
     assert (
-        "850–950 символов с пробелами"
-        in request.instructions
+        (
+            f"{TARGET_POST_LENGTH_MIN}–"
+            f"{TARGET_POST_LENGTH_MAX} "
+            "символов с пробелами"
+        )
+        in normalized_instructions
     )
 
     assert (
-        "Абсолютный максимум итогового post_text"
-        in request.instructions
+        (
+            f"{TARGET_HEADLINE_LENGTH_MIN}–"
+            f"{TARGET_HEADLINE_LENGTH_MAX} "
+            "символов"
+        )
+        in normalized_instructions
     )
 
     assert (
-        str(MAXIMUM_POST_LENGTH)
-        in request.instructions
+        (
+            "Абсолютный максимум headline — "
+            f"{MAXIMUM_HEADLINE_LENGTH} символов"
+        )
+        in normalized_instructions
+    )
+
+    assert (
+        (
+            f"{TARGET_BODY_LENGTH_MIN}–"
+            f"{TARGET_BODY_LENGTH_MAX} "
+            "символов"
+        )
+        in normalized_instructions
+    )
+
+    assert (
+        (
+            "Абсолютный максимум body — "
+            f"{MAXIMUM_BODY_LENGTH} символов"
+        )
+        in normalized_instructions
+    )
+
+    assert (
+        (
+            "Абсолютный максимум итогового "
+            "post_text — "
+            f"{MAXIMUM_POST_LENGTH} символов"
+        )
+        in normalized_instructions
     )
 
     assert [
@@ -1209,15 +1258,16 @@ async def test_unpaired_body_markdown() -> None:
     print("Unpaired body Markdown blocking: OK")
 
 
-async def test_oversized_canonical_post() -> None:
-    """Блокирует итоговый текст длиннее допустимого лимита."""
+async def test_oversized_headline() -> None:
+    """Блокирует headline длиннее технического лимита."""
 
     payload = json.loads(
         build_valid_response()
     )
 
-    for item in payload["items"]:
-        item["body"] = "X" * 1400
+    payload["items"][0]["headline"] = (
+        "X" * (MAXIMUM_HEADLINE_LENGTH + 1)
+    )
 
     generator, client = build_generator(
         json.dumps(
@@ -1228,10 +1278,7 @@ async def test_oversized_canonical_post() -> None:
 
     await assert_raises_async(
         ValueError,
-        (
-            "превышает "
-            f"{MAXIMUM_POST_LENGTH} символов"
-        ),
+        "не соответствует схеме",
         lambda: generator.generate(
             build_news_items()
         ),
@@ -1239,7 +1286,38 @@ async def test_oversized_canonical_post() -> None:
 
     assert len(client.requests) == 1
 
-    print("Oversized canonical post blocking: OK")
+    print("Oversized headline blocking: OK")
+
+
+async def test_oversized_body() -> None:
+    """Блокирует body длиннее технического лимита."""
+
+    payload = json.loads(
+        build_valid_response()
+    )
+
+    payload["items"][0]["body"] = (
+        "X" * (MAXIMUM_BODY_LENGTH + 1)
+    )
+
+    generator, client = build_generator(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+    )
+
+    await assert_raises_async(
+        ValueError,
+        "не соответствует схеме",
+        lambda: generator.generate(
+            build_news_items()
+        ),
+    )
+
+    assert len(client.requests) == 1
+
+    print("Oversized body blocking: OK")
 
 
 async def test_model_draft_is_ignored() -> None:
@@ -1331,19 +1409,44 @@ def test_revision_request_preparation() -> None:
         == MAXIMUM_POST_LENGTH
     )
 
-    assert (
-        "850–950 символов с пробелами"
-        in request.instructions
+    normalized_instructions = " ".join(
+        request.instructions.split()
     )
 
     assert (
-        "Абсолютный максимум итогового post_text"
-        in request.instructions
+        (
+            f"{TARGET_POST_LENGTH_MIN}–"
+            f"{TARGET_POST_LENGTH_MAX} "
+            "символов с пробелами"
+        )
+        in normalized_instructions
     )
 
     assert (
-        str(MAXIMUM_POST_LENGTH)
-        in request.instructions
+        (
+            f"{TARGET_HEADLINE_LENGTH_MIN}–"
+            f"{TARGET_HEADLINE_LENGTH_MAX} "
+            "символов"
+        )
+        in normalized_instructions
+    )
+
+    assert (
+        (
+            f"{TARGET_BODY_LENGTH_MIN}–"
+            f"{TARGET_BODY_LENGTH_MAX} "
+            "символов"
+        )
+        in normalized_instructions
+    )
+
+    assert (
+        (
+            "Абсолютный максимум итогового "
+            "post_text — "
+            f"{MAXIMUM_POST_LENGTH} символов"
+        )
+        in normalized_instructions
     )
 
     assert (
@@ -1600,7 +1703,8 @@ async def main() -> int:
     await test_hashtag_blocking()
     await test_service_fragment_in_body()
     await test_unpaired_body_markdown()
-    await test_oversized_canonical_post()
+    await test_oversized_headline()
+    await test_oversized_body()
     await test_model_draft_is_ignored()
     await test_revision_generation_success()
     await test_modified_revision_source_blocking()

@@ -15,6 +15,8 @@ from app.ranking.openai_usage import (
 )
 
 from app.generation.post_contract import (
+    MAXIMUM_BODY_LENGTH,
+    MAXIMUM_HEADLINE_LENGTH,
     MAXIMUM_POST_LENGTH,
 )
 
@@ -54,14 +56,14 @@ OPENAI_GENERATION_RESPONSE_SCHEMA: dict[
                     "headline": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 300,
+                        "maxLength": MAXIMUM_HEADLINE_LENGTH,
                     },
                     "body": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 1400,
+                        "maxLength": MAXIMUM_BODY_LENGTH,
                     },
-                },
+                    },
                 "required": [
                     "position",
                     "news_id",
