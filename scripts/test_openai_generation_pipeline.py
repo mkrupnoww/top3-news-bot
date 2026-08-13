@@ -335,11 +335,11 @@ class FakeStructuredGenerationClient:
                 )
 
             headline = (
-                normalized_title[:220]
+                normalized_title[:80]
             )
 
             body = (
-                normalized_summary[:700]
+                normalized_summary[:160]
             )
 
             if is_self_review:
