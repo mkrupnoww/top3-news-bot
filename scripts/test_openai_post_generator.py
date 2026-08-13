@@ -366,15 +366,15 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v4"
+        "openai_telegram_post_generator_v5"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v4"
+        "movie_news_telegram_post_prompt_v5"
     )
 
     assert OPENAI_POST_REVISION_PROMPT_VERSION == (
-        "movie_news_telegram_post_revision_prompt_v2"
+        "movie_news_telegram_post_revision_prompt_v3"
     )
 
     request = generator.build_request(
@@ -435,9 +435,19 @@ def test_metadata_and_request() -> None:
     )
 
     assert (
-    f"уложиться в {MAXIMUM_POST_LENGTH} символов"
-    in request.instructions
-)
+        "850–950 символов с пробелами"
+        in request.instructions
+    )
+
+    assert (
+        "Абсолютный максимум итогового post_text"
+        in request.instructions
+    )
+
+    assert (
+        str(MAXIMUM_POST_LENGTH)
+        in request.instructions
+    )
 
     assert [
         item["news_id"]
@@ -1322,9 +1332,19 @@ def test_revision_request_preparation() -> None:
     )
 
     assert (
-    f"уложиться в {MAXIMUM_POST_LENGTH} символов"
-    in request.instructions
-)
+        "850–950 символов с пробелами"
+        in request.instructions
+    )
+
+    assert (
+        "Абсолютный максимум итогового post_text"
+        in request.instructions
+    )
+
+    assert (
+        str(MAXIMUM_POST_LENGTH)
+        in request.instructions
+    )
 
     assert (
         payload["source_post_text"]

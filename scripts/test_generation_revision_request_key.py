@@ -474,7 +474,7 @@ def test_changed_revision_parameters_change_key() -> None:
         build_request_key(
             revision_prompt_version=(
                 "movie_news_telegram_post_"
-                "revision_prompt_v3"
+                "revision_prompt_v4"
             )
         ),
     )
