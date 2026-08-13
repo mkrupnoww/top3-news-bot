@@ -12,6 +12,7 @@ from app.db.review_delivery import (
     list_active_reviewers,
     mark_review_delivery_failed,
     mark_review_delivery_sent,
+    mark_review_delivery_unknown,
     reserve_review_delivery,
 )
 
@@ -247,6 +248,128 @@ async def test_lifecycle(
     assert duplicate_sent.delivery_status == "sent"
 
     print("Sent duplicate blocking: OK")
+
+    synthetic_user_id = (
+        900_000_000_000_000_001
+    )
+
+    await connection.execute(
+        """
+        INSERT INTO bot_users (
+            telegram_user_id,
+            display_name,
+            user_role,
+            is_active
+        )
+        VALUES (
+            $1,
+            'Synthetic Review Delivery User',
+            'reviewer',
+            true
+        )
+        """,
+        synthetic_user_id,
+    )
+
+    unknown_reservation = (
+        await reserve_review_delivery(
+            pool,
+            generated_post_id=(
+                draft.generated_post_id
+            ),
+            telegram_user_id=(
+                synthetic_user_id
+            ),
+            request_payload={
+                "transport": "native_photo",
+                "generated_post_id": (
+                    draft.generated_post_id
+                ),
+                "test": True,
+                "scenario": (
+                    "unknown_without_message_id"
+                ),
+            },
+        )
+    )
+
+    assert unknown_reservation.should_send is True
+
+    await mark_review_delivery_unknown(
+        pool,
+        unknown_reservation,
+        telegram_message_id=None,
+        response_payload={},
+        error_type="SyntheticNetworkTimeout",
+        error_message=(
+            "Telegram response was not received."
+        ),
+    )
+
+    unknown_record = await connection.fetchrow(
+        """
+        SELECT
+            delivery_status,
+            telegram_message_id,
+            sent_at,
+            failed_at
+        FROM review_delivery_attempts
+        WHERE review_delivery_attempt_id = $1
+        """,
+        (
+            unknown_reservation
+            .review_delivery_attempt_id
+        ),
+    )
+
+    assert unknown_record is not None
+    assert (
+        unknown_record["delivery_status"]
+        == "unknown"
+    )
+    assert (
+        unknown_record["telegram_message_id"]
+        is None
+    )
+    assert unknown_record["sent_at"] is None
+    assert unknown_record["failed_at"] is None
+
+    duplicate_unknown = (
+        await reserve_review_delivery(
+            pool,
+            generated_post_id=(
+                draft.generated_post_id
+            ),
+            telegram_user_id=(
+                synthetic_user_id
+            ),
+            request_payload={
+                "transport": "native_photo",
+                "generated_post_id": (
+                    draft.generated_post_id
+                ),
+                "test": True,
+            },
+        )
+    )
+
+    assert (
+        duplicate_unknown.created_new
+        is False
+    )
+    assert (
+        duplicate_unknown.should_send
+        is False
+    )
+    assert (
+        duplicate_unknown.delivery_status
+        == "unknown"
+    )
+
+    print(
+        "Unknown without message ID "
+        "duplicate blocking: OK"
+    )
 
     print()
     print(

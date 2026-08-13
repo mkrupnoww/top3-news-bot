@@ -536,22 +536,28 @@ async def mark_review_delivery_unknown(
     pool: asyncpg.Pool,
     reservation: ReviewDeliveryReservation,
     *,
-    telegram_message_id: int,
+    telegram_message_id: int | None,
     response_payload: Mapping[str, Any],
     error_type: str,
     error_message: str,
 ) -> None:
     """
-    Фиксирует подтверждённый Telegram message_id,
-    если финализация sent не удалась.
+    Фиксирует Telegram-доставку с неопределённым исходом.
 
-    Автоматический повтор после unknown запрещён.
+    telegram_message_id может отсутствовать, если
+    сетевой сбой произошёл после отправки запроса,
+    но до получения подтверждённого ответа Telegram.
+
+    После unknown автоматический retry запрещён.
     """
 
-    if telegram_message_id <= 0:
+    if (
+        telegram_message_id is not None
+        and telegram_message_id <= 0
+    ):
         raise ValueError(
             "telegram_message_id должен "
-            "быть больше нуля."
+            "быть больше нуля или None."
         )
 
     normalized_error_type = error_type.strip()
@@ -584,7 +590,11 @@ async def mark_review_delivery_unknown(
                 telegram_error_code = NULL,
                 error_type = $4,
                 error_message = $5,
-                sent_at = now(),
+                sent_at = CASE
+                    WHEN $2::bigint IS NOT NULL
+                    THEN now()
+                    ELSE NULL
+                END,
                 failed_at = NULL
             WHERE review_delivery_attempt_id = $1
               AND delivery_status = 'reserved'
