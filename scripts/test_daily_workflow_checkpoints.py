@@ -97,6 +97,29 @@ class _SingleConnectionPool:
         )
 
 
+async def _remove_existing_workflow_fixture(
+    pool,
+) -> None:
+    """
+    Временно удаляет daily workflow fixture
+    с тестовой publication_date.
+
+    Удаление выполняется внутри внешней
+    rollback-транзакции теста, поэтому
+    production строка автоматически
+    восстанавливается после завершения теста.
+    """
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            DELETE FROM daily_workflow_runs
+            WHERE publication_date = $1
+            """,
+            PUBLICATION_DATE,
+        )
+
+
 async def _load_ranking_identity(
     pool,
 ) -> dict[str, str]:
@@ -230,6 +253,10 @@ async def main() -> int:
             try:
                 pool = _SingleConnectionPool(
                     connection
+                )
+
+                await _remove_existing_workflow_fixture(
+                    pool
                 )
 
                 ranking_identity = (
