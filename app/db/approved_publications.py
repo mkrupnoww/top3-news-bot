@@ -9,14 +9,14 @@ from app.db.publications import PublicationAttempt
 
 @dataclass(frozen=True, slots=True)
 class PreparedApprovedPublication:
-    """Одобренный пост, подготовленный к отправке в Telegram."""
+    """Одобренный пост, подготовленный к native photo-публикации."""
 
     publication: PublicationAttempt
-
     telegram_chat_id: int
 
-    rich_html: str
-    rich_media_id: str
+    caption: str
+    caption_text_format: str
+    parse_mode: str | None
 
     image_path: str
     image_sha256: str
@@ -38,49 +38,45 @@ def _encode_json(
 
 def _validate_prepared_content(
     *,
-    rich_html: str,
-    rich_media_id: str,
+    caption: str,
+    caption_text_format: str,
     image_path: str,
     image_sha256: str,
     source_post_text: str,
     source_text_format: str,
 ) -> None:
-    """Проверяет подготовленные данные публикации."""
+    """Проверяет подготовленные данные native photo-публикации."""
 
-    if not rich_html.strip():
+    if not caption.strip():
         raise ValueError(
-            "Подготовленный Rich Message HTML "
+            "Подготовленный Telegram caption "
             "не может быть пустым."
         )
 
-    if not rich_media_id.strip():
+    if not caption_text_format.strip():
         raise ValueError(
-            "Rich Message media ID "
+            "Формат Telegram caption "
             "не может быть пустым."
         )
 
     if not image_path.strip():
         raise ValueError(
-            "Путь к изображению "
-            "не может быть пустым."
+            "Путь к изображению не может быть пустым."
         )
 
     if not image_sha256.strip():
         raise ValueError(
-            "SHA-256 изображения "
-            "не может быть пустым."
+            "SHA-256 изображения не может быть пустым."
         )
 
     if not source_post_text.strip():
         raise ValueError(
-            "Исходный текст публикации "
-            "не может быть пустым."
+            "Исходный текст публикации не может быть пустым."
         )
 
     if not source_text_format.strip():
         raise ValueError(
-            "Исходный формат публикации "
-            "не может быть пустым."
+            "Исходный формат публикации не может быть пустым."
         )
 
 
@@ -89,8 +85,9 @@ async def prepare_approved_publication(
     *,
     generated_post_id: int,
     disable_notification: bool,
-    rich_html: str,
-    rich_media_id: str,
+    caption: str,
+    caption_text_format: str,
+    parse_mode: str | None,
     image_path: str,
     image_sha256: str,
     source_post_text: str,
@@ -102,21 +99,16 @@ async def prepare_approved_publication(
     Исходный текст и изображение сверяются
     с текущим generated_post.
 
-    В request_payload сохраняются данные
-    Rich Message, которые будут переданы
-    Telegram Bot API.
-
-    Новый publication_batch и generated_post
-    не создаются.
+    В request_payload сохраняются точные данные
+    native Telegram photo-message.
 
     Повторная отправка блокируется при наличии
-    попытки со статусом started, unknown
-    или published.
+    попытки со статусом started, unknown или published.
     """
 
     _validate_prepared_content(
-        rich_html=rich_html,
-        rich_media_id=rich_media_id,
+        caption=caption,
+        caption_text_format=caption_text_format,
         image_path=image_path,
         image_sha256=image_sha256,
         source_post_text=source_post_text,
@@ -151,8 +143,7 @@ async def prepare_approved_publication(
             if record is None:
                 raise LookupError(
                     "Одобренный пост не найден: "
-                    f"generated_post_id="
-                    f"{generated_post_id}"
+                    f"generated_post_id={generated_post_id}"
                 )
 
             if (
@@ -162,89 +153,63 @@ async def prepare_approved_publication(
                 raise ValueError(
                     "Пост уже опубликован. "
                     "Повторная отправка запрещена: "
-                    f"generated_post_id="
-                    f"{generated_post_id}"
+                    f"generated_post_id={generated_post_id}"
                 )
 
-            if (
-                record["post_status"]
-                != "approved"
-            ):
+            if record["post_status"] != "approved":
                 raise ValueError(
                     "Пост не имеет статус approved: "
-                    f"post_status="
-                    f"{record['post_status']}"
+                    f"post_status={record['post_status']}"
                 )
 
-            if (
-                record["batch_status"]
-                != "approved"
-            ):
+            if record["batch_status"] != "approved":
                 raise ValueError(
-                    "Подборка не имеет статус "
-                    "approved: "
-                    f"batch_status="
-                    f"{record['batch_status']}"
+                    "Подборка не имеет статус approved: "
+                    f"batch_status={record['batch_status']}"
                 )
 
-            if (
-                record["post_text"]
-                != source_post_text
-            ):
+            if record["post_text"] != source_post_text:
                 raise ValueError(
                     "Текст generated_post изменился "
-                    "после подготовки Rich Message. "
+                    "после подготовки caption. "
                     "Публикация остановлена."
                 )
 
-            if (
-                record["text_format"]
-                != source_text_format
-            ):
+            if record["text_format"] != source_text_format:
                 raise ValueError(
                     "Формат generated_post изменился "
-                    "после подготовки Rich Message. "
+                    "после подготовки caption. "
                     "Публикация остановлена."
                 )
 
             stored_image_path = record[
                 "image_path"
             ]
-
             stored_image_sha256 = record[
                 "image_sha256"
             ]
 
             if stored_image_path is None:
                 raise ValueError(
-                    "У generated_post отсутствует "
-                    "image_path."
+                    "У generated_post отсутствует image_path."
                 )
 
             if stored_image_sha256 is None:
                 raise ValueError(
-                    "У generated_post отсутствует "
-                    "image_sha256."
+                    "У generated_post отсутствует image_sha256."
                 )
 
-            if (
-                stored_image_path
-                != image_path
-            ):
+            if stored_image_path != image_path:
                 raise ValueError(
                     "image_path generated_post изменился "
-                    "после подготовки Rich Message. "
+                    "после подготовки native photo. "
                     "Публикация остановлена."
                 )
 
-            if (
-                stored_image_sha256
-                != image_sha256
-            ):
+            if stored_image_sha256 != image_sha256:
                 raise ValueError(
-                    "image_sha256 generated_post "
-                    "изменился после подготовки "
-                    "Rich Message. "
+                    "image_sha256 generated_post изменился "
+                    "после подготовки native photo. "
                     "Публикация остановлена."
                 )
 
@@ -254,124 +219,96 @@ async def prepare_approved_publication(
 
             if telegram_chat_id is None:
                 raise ValueError(
-                    "У подборки не задан "
-                    "target_telegram_chat_id."
+                    "У подборки не задан target_telegram_chat_id."
                 )
 
-            blocking_attempt = (
-                await connection.fetchrow(
-                    """
-                    SELECT
-                        publication_attempt_id,
-                        attempt_number,
-                        attempt_status,
-                        telegram_message_id
-                    FROM publication_attempts
-                    WHERE generated_post_id = $1
-                      AND attempt_status IN (
-                          'started',
-                          'unknown',
-                          'published'
-                      )
-                    ORDER BY
-                        attempt_number DESC
-                    LIMIT 1
-                    FOR UPDATE
-                    """,
-                    generated_post_id,
-                )
+            blocking_attempt = await connection.fetchrow(
+                """
+                SELECT
+                    publication_attempt_id,
+                    attempt_number,
+                    attempt_status,
+                    telegram_message_id
+                FROM publication_attempts
+                WHERE generated_post_id = $1
+                  AND attempt_status IN (
+                      'started',
+                      'unknown',
+                      'published'
+                  )
+                ORDER BY attempt_number DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                generated_post_id,
             )
 
             if blocking_attempt is not None:
                 raise ValueError(
-                    "Для поста уже существует "
-                    "попытка, запрещающая "
-                    "повторную отправку: "
+                    "Для поста уже существует попытка, "
+                    "запрещающая повторную отправку: "
                     "publication_attempt_id="
-                    f"{blocking_attempt[
-                        'publication_attempt_id'
-                    ]}, "
+                    f"{blocking_attempt['publication_attempt_id']}, "
                     "attempt_status="
-                    f"{blocking_attempt[
-                        'attempt_status'
-                    ]}, "
+                    f"{blocking_attempt['attempt_status']}, "
                     "telegram_message_id="
-                    f"{blocking_attempt[
-                        'telegram_message_id'
-                    ]}"
+                    f"{blocking_attempt['telegram_message_id']}"
                 )
 
-            attempt_number = (
-                await connection.fetchval(
-                    """
-                    SELECT
-                        COALESCE(
-                            MAX(attempt_number),
-                            0
-                        )::integer + 1
-                    FROM publication_attempts
-                    WHERE generated_post_id = $1
-                    """,
-                    generated_post_id,
-                )
+            attempt_number = await connection.fetchval(
+                """
+                SELECT
+                    COALESCE(
+                        MAX(attempt_number),
+                        0
+                    )::integer + 1
+                FROM publication_attempts
+                WHERE generated_post_id = $1
+                """,
+                generated_post_id,
             )
 
             request_payload = _encode_json(
                 {
-                    "chat_id": (
-                        telegram_chat_id
-                    ),
-                    "transport": (
-                        "rich_message"
-                    ),
-                    "rich_message": {
-                        "html": rich_html,
-                        "media_id": (
-                            rich_media_id
-                        ),
-                    },
-                    "image": {
+                    "chat_id": telegram_chat_id,
+                    "transport": "native_photo",
+                    "photo": {
                         "path": image_path,
-                        "sha256": (
-                            image_sha256
-                        ),
+                        "sha256": image_sha256,
                     },
-                    "source_text_format": (
-                        source_text_format
-                    ),
-                    "disable_notification": (
-                        disable_notification
-                    ),
+                    "caption": {
+                        "text": caption,
+                        "text_format": caption_text_format,
+                        "parse_mode": parse_mode,
+                    },
+                    "source_text_format": source_text_format,
+                    "disable_notification": disable_notification,
                     "existing_approved_post": True,
                 }
             )
 
-            publication_attempt_id = (
-                await connection.fetchval(
-                    """
-                    INSERT INTO
-                        publication_attempts (
-                            generated_post_id,
-                            attempt_number,
-                            attempt_status,
-                            telegram_chat_id,
-                            request_payload
-                        )
-                    VALUES (
-                        $1,
-                        $2,
-                        'started',
-                        $3,
-                        $4::jsonb
-                    )
-                    RETURNING
-                        publication_attempt_id
-                    """,
+            publication_attempt_id = await connection.fetchval(
+                """
+                INSERT INTO publication_attempts (
                     generated_post_id,
                     attempt_number,
+                    attempt_status,
                     telegram_chat_id,
-                    request_payload,
+                    request_payload
                 )
+                VALUES (
+                    $1,
+                    $2,
+                    'started',
+                    $3,
+                    $4::jsonb
+                )
+                RETURNING publication_attempt_id
+                """,
+                generated_post_id,
+                attempt_number,
+                telegram_chat_id,
+                request_payload,
             )
 
             await connection.execute(
@@ -387,23 +324,18 @@ async def prepare_approved_publication(
 
     publication = PublicationAttempt(
         batch_id=record["batch_id"],
-        generated_post_id=(
-            record["generated_post_id"]
-        ),
-        publication_attempt_id=(
-            publication_attempt_id
-        ),
-        publication_date=(
-            record["publication_date"]
-        ),
+        generated_post_id=record["generated_post_id"],
+        publication_attempt_id=publication_attempt_id,
+        publication_date=record["publication_date"],
         edition=record["edition"],
     )
 
     return PreparedApprovedPublication(
         publication=publication,
         telegram_chat_id=telegram_chat_id,
-        rich_html=rich_html,
-        rich_media_id=rich_media_id,
+        caption=caption,
+        caption_text_format=caption_text_format,
+        parse_mode=parse_mode,
         image_path=image_path,
         image_sha256=image_sha256,
         source_text_format=source_text_format,

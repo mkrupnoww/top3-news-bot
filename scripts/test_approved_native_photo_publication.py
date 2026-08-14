@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from aiogram.enums import ChatType
-from aiogram.types import InputRichMessage
+from aiogram.types import FSInputFile
 from PIL import Image
 
 from app.config import get_settings
@@ -22,8 +22,8 @@ import app.publication.approved_service as approved_service
 FAKE_MESSAGE_ID = 987654321
 
 TEST_POST_TEXT = (
-    "**TOP-3 НОВОСТЕЙ КИНО ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n\n"
-    "---\n\n"
+    "**TOP-3 НОВОСТЕЙ КИНО ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n"
+    "_______________\n\n"
     "1️⃣ **Первая тестовая новость**\n\n"
     "Описание первой тестовой новости.\n\n"
     "2️⃣ **Вторая тестовая новость**\n\n"
@@ -58,12 +58,12 @@ class FakeBot:
         self.session = FakeSession()
 
         self.get_chat_calls = 0
-        self.send_rich_message_calls = 0
+        self.send_photo_calls = 0
 
         self.last_chat_id: int | None = None
-        self.last_rich_message: (
-            InputRichMessage | None
-        ) = None
+        self.last_photo: FSInputFile | None = None
+        self.last_caption: str | None = None
+        self.last_parse_mode: str | None = None
         self.last_disable_notification: (
             bool | None
         ) = None
@@ -83,17 +83,21 @@ class FakeBot:
             title="Synthetic TOP 3 channel",
         )
 
-    async def send_rich_message(
+    async def send_photo(
         self,
         *,
         chat_id: int,
-        rich_message: InputRichMessage,
+        photo: FSInputFile,
+        caption: str | None = None,
+        parse_mode: str | None = None,
         disable_notification: bool | None = None,
         **kwargs: Any,
     ) -> SimpleNamespace:
-        self.send_rich_message_calls += 1
+        self.send_photo_calls += 1
         self.last_chat_id = chat_id
-        self.last_rich_message = rich_message
+        self.last_photo = photo
+        self.last_caption = caption
+        self.last_parse_mode = parse_mode
         self.last_disable_notification = (
             disable_notification
         )
@@ -116,9 +120,9 @@ def calculate_sha256(
 
     digest = sha256()
 
-    with path.open("rb") as file:
+    with path.open("rb") as image_file:
         while True:
-            chunk = file.read(
+            chunk = image_file.read(
                 1024 * 1024
             )
 
@@ -141,10 +145,21 @@ async def create_test_post(
     Создаёт временные approved batch/post.
 
     publication_attempt здесь не создаётся:
-    его обязан создать сам production publisher.
+    его обязан создать production publisher.
     """
 
     publication_date = date.today()
+
+    metadata = json.dumps(
+        {
+            "technical_test": True,
+            "test_name": (
+                "approved_native_photo_publication"
+            ),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     async with pool.acquire() as connection:
         async with connection.transaction():
@@ -191,56 +206,40 @@ async def create_test_post(
                 publication_date,
                 edition,
                 telegram_chat_id,
-                json.dumps(
-                    {
-                        "technical_test": True,
-                        "test_name": (
-                            "approved_rich_publication"
-                        ),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+                metadata,
             )
 
-            generated_post_id = await connection.fetchval(
-                """
-                INSERT INTO generated_posts (
+            generated_post_id = (
+                await connection.fetchval(
+                    """
+                    INSERT INTO generated_posts (
+                        batch_id,
+                        version_number,
+                        post_status,
+                        post_text,
+                        text_format,
+                        image_path,
+                        image_sha256,
+                        generation_metadata
+                    )
+                    VALUES (
+                        $1,
+                        1,
+                        'approved',
+                        $2,
+                        'markdown',
+                        $3,
+                        $4,
+                        $5::jsonb
+                    )
+                    RETURNING generated_post_id
+                    """,
                     batch_id,
-                    version_number,
-                    post_status,
-                    post_text,
-                    text_format,
+                    TEST_POST_TEXT,
                     image_path,
                     image_sha256,
-                    generation_metadata
+                    metadata,
                 )
-                VALUES (
-                    $1,
-                    1,
-                    'approved',
-                    $2,
-                    'markdown',
-                    $3,
-                    $4,
-                    $5::jsonb
-                )
-                RETURNING generated_post_id
-                """,
-                batch_id,
-                TEST_POST_TEXT,
-                image_path,
-                image_sha256,
-                json.dumps(
-                    {
-                        "technical_test": True,
-                        "test_name": (
-                            "approved_rich_publication"
-                        ),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
             )
 
     return (
@@ -255,53 +254,42 @@ async def load_publication_state(
     batch_id: int,
     generated_post_id: int,
 ) -> dict[str, Any]:
-    """Читает результат publication lifecycle."""
+    """Читает итоговое состояние публикации."""
 
     async with pool.acquire() as connection:
         record = await connection.fetchrow(
             """
             SELECT
                 b.batch_status,
-                b.published_at,
                 p.post_status,
-                (
-                    SELECT count(*)
-                    FROM publication_attempts AS pa
-                    WHERE
-                        pa.generated_post_id
-                        = p.generated_post_id
-                )::integer
-                    AS publication_attempt_count,
-                pa.publication_attempt_id,
-                pa.attempt_number,
-                pa.attempt_status,
-                pa.telegram_message_id,
-                pa.request_payload::text
+                a.attempt_status,
+                a.telegram_message_id,
+                a.request_payload::text
                     AS request_payload_text,
-                pa.response_payload::text
-                    AS response_payload_text
+                a.response_payload::text
+                    AS response_payload_text,
+                (
+                    SELECT COUNT(*)::integer
+                    FROM publication_attempts AS count_attempt
+                    WHERE count_attempt.generated_post_id = $2
+                ) AS publication_attempt_count
             FROM publication_batches AS b
             JOIN generated_posts AS p
-                ON p.batch_id = b.batch_id
+              ON p.batch_id = b.batch_id
             LEFT JOIN LATERAL (
                 SELECT
-                    publication_attempt_id,
-                    attempt_number,
                     attempt_status,
                     telegram_message_id,
                     request_payload,
                     response_payload
                 FROM publication_attempts
-                WHERE
-                    generated_post_id
-                    = p.generated_post_id
+                WHERE generated_post_id = p.generated_post_id
                 ORDER BY attempt_number DESC
                 LIMIT 1
-            ) AS pa
-                ON true
-            WHERE
-                b.batch_id = $1
-                AND p.generated_post_id = $2
+            ) AS a
+              ON TRUE
+            WHERE b.batch_id = $1
+              AND p.generated_post_id = $2
             """,
             batch_id,
             generated_post_id,
@@ -309,8 +297,7 @@ async def load_publication_state(
 
     if record is None:
         raise RuntimeError(
-            "Не удалось прочитать "
-            "временный publication context."
+            "Не удалось прочитать publication state."
         )
 
     return dict(record)
@@ -322,7 +309,7 @@ async def cleanup_test_data(
     batch_id: int | None,
     generated_post_id: int | None,
 ) -> None:
-    """Удаляет только созданные этим тестом данные."""
+    """Удаляет только созданные тестом записи."""
 
     if (
         batch_id is None
@@ -356,31 +343,30 @@ async def cleanup_test_data(
                 batch_id,
             )
 
-    async with pool.acquire() as connection:
-        remaining = await connection.fetchval(
-            """
-            SELECT
-                (
-                    SELECT count(*)
-                    FROM generated_posts
-                    WHERE generated_post_id = $1
-                )
-                +
-                (
-                    SELECT count(*)
-                    FROM publication_batches
-                    WHERE batch_id = $2
-                )
-                +
-                (
-                    SELECT count(*)
-                    FROM publication_attempts
-                    WHERE generated_post_id = $1
-                )
-            """,
-            generated_post_id,
-            batch_id,
-        )
+            remaining = await connection.fetchval(
+                """
+                SELECT
+                    (
+                        SELECT COUNT(*)::integer
+                        FROM publication_attempts
+                        WHERE generated_post_id = $1
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)::integer
+                        FROM generated_posts
+                        WHERE generated_post_id = $1
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)::integer
+                        FROM publication_batches
+                        WHERE batch_id = $2
+                    )
+                """,
+                generated_post_id,
+                batch_id,
+            )
 
     if remaining != 0:
         raise RuntimeError(
@@ -392,8 +378,9 @@ async def cleanup_test_data(
 def validate_fake_telegram_call(
     *,
     expected_chat_id: int,
+    expected_image_path: Path,
 ) -> None:
-    """Проверяет фактический fake Telegram request."""
+    """Проверяет фактический fake sendPhoto request."""
 
     if len(FakeBot.instances) != 1:
         raise RuntimeError(
@@ -408,9 +395,9 @@ def validate_fake_telegram_call(
             "get_chat должен быть вызван ровно один раз."
         )
 
-    if bot.send_rich_message_calls != 1:
+    if bot.send_photo_calls != 1:
         raise RuntimeError(
-            "send_rich_message должен быть "
+            "send_photo должен быть "
             "вызван ровно один раз."
         )
 
@@ -424,66 +411,70 @@ def validate_fake_telegram_call(
             "disable_notification должен быть true."
         )
 
-    rich_message = bot.last_rich_message
-
-    if rich_message is None:
+    if bot.last_photo is None:
         raise RuntimeError(
-            "FakeBot не получил InputRichMessage."
+            "FakeBot не получил FSInputFile."
         )
 
-    if rich_message.html is None:
-        raise RuntimeError(
-            "Rich Message не содержит HTML."
-        )
+    photo_path = getattr(
+        bot.last_photo,
+        "path",
+        None,
+    )
 
-    if (
-        '<img src="tg://photo?id=top3_image"/>'
-        not in rich_message.html
-    ):
+    if photo_path is None:
         raise RuntimeError(
-            "Rich Message не содержит image media reference."
+            "FSInputFile не содержит path."
         )
 
     if (
-        "<p><b>TOP-3 НОВОСТЕЙ КИНО "
-        "ЗА ПОСЛЕДНИЕ 24 ЧАСА</b></p>"
-        not in rich_message.html
+        Path(photo_path).resolve()
+        != expected_image_path.resolve()
     ):
         raise RuntimeError(
-            "Rich Message заголовок "
-            "сформирован неверно."
+            "send_photo получил неверный PNG."
         )
 
-    if "<hr/>" not in rich_message.html:
+    if not isinstance(
+        bot.last_caption,
+        str,
+    ):
         raise RuntimeError(
-            "Rich Message не содержит разделитель."
+            "send_photo не получил caption."
         )
 
-    if not rich_message.media:
+    if bot.last_parse_mode != "HTML":
         raise RuntimeError(
-            "Rich Message не содержит media."
+            "Для Markdown-поста ожидается parse_mode=HTML: "
+            f"actual={bot.last_parse_mode!r}"
         )
 
-    if len(rich_message.media) != 1:
+    if (
+        "<b>TOP-3 НОВОСТЕЙ КИНО "
+        "ЗА ПОСЛЕДНИЕ 24 ЧАСА</b>"
+        not in bot.last_caption
+    ):
         raise RuntimeError(
-            "Rich Message должен содержать "
-            "ровно один media-элемент."
+            "Caption не содержит "
+            "форматированный заголовок."
         )
 
-    media_item = rich_message.media[0]
-
-    if media_item.id != "top3_image":
+    if "_______________" not in bot.last_caption:
         raise RuntimeError(
-            "Некорректный Rich Message media ID: "
-            f"{media_item.id!r}"
+            "Caption потерял текстовый разделитель."
+        )
+
+    if "**" in bot.last_caption:
+        raise RuntimeError(
+            "Caption содержит необработанный "
+            "Markdown-маркер **."
         )
 
 
 async def main() -> int:
-    """Запускает DB + fake Telegram integration test."""
+    """Запускает DB + fake Telegram native photo integration test."""
 
     settings = get_settings()
-
     pool = await create_database_pool(
         settings
     )
@@ -499,7 +490,7 @@ async def main() -> int:
         with TemporaryDirectory() as directory:
             image_file = (
                 Path(directory)
-                / "approved_rich_test.png"
+                / "approved_native_photo_test.png"
             )
 
             image = Image.new(
@@ -568,7 +559,8 @@ async def main() -> int:
             validate_fake_telegram_call(
                 expected_chat_id=(
                     settings.telegram_channel_id
-                )
+                ),
+                expected_image_path=image_file,
             )
 
             state = await load_publication_state(
@@ -625,65 +617,85 @@ async def main() -> int:
 
             if (
                 request_payload.get("transport")
-                != "rich_message"
+                != "native_photo"
             ):
                 raise RuntimeError(
                     "request_payload.transport "
-                    "должен быть rich_message."
+                    "должен быть native_photo."
                 )
 
-            request_rich_message = (
-                request_payload.get(
-                    "rich_message"
-                )
+            request_photo = request_payload.get(
+                "photo"
             )
 
             if not isinstance(
-                request_rich_message,
+                request_photo,
                 dict,
             ):
                 raise RuntimeError(
-                    "request_payload.rich_message "
-                    "отсутствует."
+                    "request_payload.photo отсутствует."
                 )
 
             if (
-                request_rich_message.get(
-                    "media_id"
-                )
-                != "top3_image"
-            ):
-                raise RuntimeError(
-                    "request media_id неверен."
-                )
-
-            request_image = request_payload.get(
-                "image"
-            )
-
-            if not isinstance(
-                request_image,
-                dict,
-            ):
-                raise RuntimeError(
-                    "request_payload.image отсутствует."
-                )
-
-            if (
-                request_image.get("sha256")
+                request_photo.get("sha256")
                 != image_sha256
             ):
                 raise RuntimeError(
-                    "request image SHA-256 неверен."
+                    "request photo SHA-256 неверен."
+                )
+
+            request_caption = request_payload.get(
+                "caption"
+            )
+
+            if not isinstance(
+                request_caption,
+                dict,
+            ):
+                raise RuntimeError(
+                    "request_payload.caption отсутствует."
+                )
+
+            if (
+                request_caption.get("text_format")
+                != "html"
+            ):
+                raise RuntimeError(
+                    "request caption text_format "
+                    "должен быть html."
+                )
+
+            if (
+                request_caption.get("parse_mode")
+                != "HTML"
+            ):
+                raise RuntimeError(
+                    "request caption parse_mode "
+                    "должен быть HTML."
+                )
+
+            caption_text = request_caption.get(
+                "text"
+            )
+
+            if (
+                not isinstance(
+                    caption_text,
+                    str,
+                )
+                or "<b>TOP-3" not in caption_text
+            ):
+                raise RuntimeError(
+                    "request caption text неверен."
                 )
 
             if (
                 response_payload.get("transport")
-                != "rich_message"
+                != "native_photo"
             ):
                 raise RuntimeError(
                     "response_payload.transport "
-                    "должен быть rich_message."
+                    "должен быть native_photo."
                 )
 
             if (
@@ -694,6 +706,27 @@ async def main() -> int:
             ):
                 raise RuntimeError(
                     "response image SHA-256 неверен."
+                )
+
+            if (
+                response_payload.get(
+                    "parse_mode"
+                )
+                != "HTML"
+            ):
+                raise RuntimeError(
+                    "response parse_mode должен быть HTML."
+                )
+
+            if (
+                response_payload.get(
+                    "caption_text_format"
+                )
+                != "html"
+            ):
+                raise RuntimeError(
+                    "response caption_text_format "
+                    "должен быть html."
                 )
 
             duplicate_blocked = False
@@ -720,7 +753,7 @@ async def main() -> int:
 
             if (
                 FakeBot.instances[0]
-                .send_rich_message_calls
+                .send_photo_calls
                 != 1
             ):
                 raise RuntimeError(
@@ -756,7 +789,7 @@ async def main() -> int:
                 )
 
             print(
-                "Approved Rich Message publication "
+                "Approved native photo publication "
                 "integration test: OK"
             )
             print(f"batch_id={batch_id}")
@@ -772,8 +805,9 @@ async def main() -> int:
                 "telegram_message_id="
                 f"{result.telegram_message_id}"
             )
-            print("transport=rich_message")
-            print("media_id=top3_image")
+            print("transport=native_photo")
+            print("caption_text_format=html")
+            print("parse_mode=HTML")
             print(
                 "publication_attempt_count=1"
             )
@@ -781,7 +815,7 @@ async def main() -> int:
                 "duplicate_request_blocked=true"
             )
             print(
-                "fake_send_rich_message_calls=1"
+                "fake_send_photo_calls=1"
             )
             print(
                 "database_status=published"
@@ -799,7 +833,9 @@ async def main() -> int:
                 ),
             )
         finally:
-            await close_database_pool(pool)
+            await close_database_pool(
+                pool
+            )
 
     print(
         "Database changes: temporary publication "
@@ -809,7 +845,7 @@ async def main() -> int:
     print("Telegram requests: not performed")
     print("Permanent publication data created: 0")
     print(
-        "Approved Rich Message publication "
+        "Approved native photo publication "
         "test: OK"
     )
 

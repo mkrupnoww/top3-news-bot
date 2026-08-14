@@ -6,12 +6,7 @@ from typing import Any
 import asyncpg
 from aiogram import Bot
 from aiogram.enums import ChatType
-from aiogram.types import (
-    FSInputFile,
-    InputMediaPhoto,
-    InputRichMessage,
-    InputRichMessageMedia,
-)
+from aiogram.types import FSInputFile
 
 from app.db.approved_publications import (
     prepare_approved_publication,
@@ -21,12 +16,15 @@ from app.db.publications import (
     mark_publication_published,
     mark_publication_unknown,
 )
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
+)
 from app.publication.service import (
     PublicationResult,
     PublicationStateUncertainError,
 )
-from app.publication.telegram_rich_message import (
-    prepare_telegram_rich_message,
+from app.publication.telegram_text import (
+    prepare_telegram_text,
 )
 
 
@@ -82,9 +80,7 @@ async def _load_source_post(
     str,
     str,
 ]:
-    """
-    Читает текст, формат и изображение generated_post.
-    """
+    """Читает текст, формат и изображение generated_post."""
 
     async with pool.acquire() as connection:
         record = await connection.fetchrow(
@@ -103,8 +99,7 @@ async def _load_source_post(
     if record is None:
         raise LookupError(
             "Пост не найден: "
-            f"generated_post_id="
-            f"{generated_post_id}"
+            f"generated_post_id={generated_post_id}"
         )
 
     post_text = record["post_text"]
@@ -114,14 +109,12 @@ async def _load_source_post(
 
     if not isinstance(post_text, str):
         raise ValueError(
-            "generated_posts.post_text "
-            "должен быть строкой."
+            "generated_posts.post_text должен быть строкой."
         )
 
     if not isinstance(text_format, str):
         raise ValueError(
-            "generated_posts.text_format "
-            "должен быть строкой."
+            "generated_posts.text_format должен быть строкой."
         )
 
     if (
@@ -129,8 +122,7 @@ async def _load_source_post(
         or not image_path.strip()
     ):
         raise ValueError(
-            "generated_posts.image_path "
-            "не заполнен."
+            "generated_posts.image_path не заполнен."
         )
 
     if (
@@ -138,8 +130,7 @@ async def _load_source_post(
         or not image_sha256.strip()
     ):
         raise ValueError(
-            "generated_posts.image_sha256 "
-            "не заполнен."
+            "generated_posts.image_sha256 не заполнен."
         )
 
     return (
@@ -155,12 +146,7 @@ def _resolve_image_file(
     image_path: str,
     expected_sha256: str,
 ) -> Path:
-    """
-    Проверяет PNG перед созданием publication_attempt.
-
-    Кроме существования файла сверяется фактический
-    SHA-256 с generated_posts.image_sha256.
-    """
+    """Проверяет PNG и его SHA-256 перед publication_attempt."""
 
     resolved_path = Path(
         image_path
@@ -223,29 +209,6 @@ def _resolve_image_file(
     return resolved_path
 
 
-def _build_rich_message(
-    *,
-    rich_html: str,
-    media_id: str,
-    image_file: Path,
-) -> InputRichMessage:
-    """Создаёт Telegram Rich Message с одной PNG."""
-
-    media = InputRichMessageMedia(
-        id=media_id,
-        media=InputMediaPhoto(
-            media=FSInputFile(
-                image_file
-            )
-        ),
-    )
-
-    return InputRichMessage(
-        html=rich_html,
-        media=[media],
-    )
-
-
 async def publish_approved_post(
     pool: asyncpg.Pool,
     *,
@@ -256,24 +219,14 @@ async def publish_approved_post(
     """
     Публикует существующий одобренный generated_post.
 
-    Пост отправляется одним Telegram Rich Message:
+    Пост отправляется одним native Telegram photo-message:
+    PNG + полный форматированный caption.
 
-    PNG + полный форматированный текст.
-
-    До создания publication_attempt проверяются
-    наличие PNG и его фактический SHA-256.
-
-    В request_payload сохраняются точные данные
-    Rich Message и изображения.
+    До создания publication_attempt проверяются длина текста,
+    наличие PNG и фактический SHA-256.
 
     Новый batch и generated_post не создаются.
-
-    До получения telegram_message_id ошибка
-    фиксируется как failed.
-
-    После получения telegram_message_id повторная
-    отправка запрещена. Если финализация PostgreSQL
-    не удалась, попытка получает статус unknown.
+    После получения telegram_message_id повторная отправка запрещена.
     """
 
     (
@@ -286,57 +239,38 @@ async def publish_approved_post(
         generated_post_id=generated_post_id,
     )
 
+    if len(source_post_text) > MAXIMUM_POST_LENGTH:
+        raise ValueError(
+            "Текст публикации превышает "
+            "допустимую длину выпуска: "
+            f"{MAXIMUM_POST_LENGTH} символов."
+        )
+
     resolved_image_file = _resolve_image_file(
         image_path=source_image_path,
-        expected_sha256=(
-            source_image_sha256
-        ),
+        expected_sha256=source_image_sha256,
     )
 
-    prepared_rich_message = (
-        prepare_telegram_rich_message(
-            source_post_text,
-            text_format=source_text_format,
-        )
-    )
-
-    rich_message = _build_rich_message(
-        rich_html=(
-            prepared_rich_message.html
-        ),
-        media_id=(
-            prepared_rich_message.media_id
-        ),
-        image_file=resolved_image_file,
+    prepared_text = prepare_telegram_text(
+        source_post_text,
+        text_format=source_text_format,
     )
 
     prepared = await prepare_approved_publication(
         pool,
         generated_post_id=generated_post_id,
-        disable_notification=(
-            disable_notification
-        ),
-        rich_html=(
-            prepared_rich_message.html
-        ),
-        rich_media_id=(
-            prepared_rich_message.media_id
-        ),
+        disable_notification=disable_notification,
+        caption=prepared_text.text,
+        caption_text_format=prepared_text.text_format,
+        parse_mode=prepared_text.parse_mode,
         image_path=source_image_path,
-        image_sha256=(
-            source_image_sha256
-        ),
+        image_sha256=source_image_sha256,
         source_post_text=source_post_text,
-        source_text_format=(
-            source_text_format
-        ),
+        source_text_format=source_text_format,
     )
 
     publication = prepared.publication
-
-    bot = Bot(
-        token=bot_token
-    )
+    bot = Bot(token=bot_token)
 
     try:
         try:
@@ -351,35 +285,29 @@ async def publish_approved_post(
                     f"chat_type={chat.type}"
                 )
 
-            message = await bot.send_rich_message(
-                chat_id=(
-                    prepared.telegram_chat_id
+            message = await bot.send_photo(
+                chat_id=prepared.telegram_chat_id,
+                photo=FSInputFile(
+                    resolved_image_file
                 ),
-                rich_message=rich_message,
-                disable_notification=(
-                    disable_notification
-                ),
+                caption=prepared.caption,
+                parse_mode=prepared.parse_mode,
+                disable_notification=disable_notification,
             )
 
         except Exception as error:
-            error_message = _error_text(
-                error
-            )
+            error_message = _error_text(error)
 
             try:
                 await mark_publication_failed(
                     pool,
                     publication,
-                    error_message=(
-                        error_message
-                    ),
+                    error_message=error_message,
                 )
             except Exception as database_error:
                 raise RuntimeError(
-                    "Telegram-публикация "
-                    "завершилась ошибкой, "
-                    "и статус failed не удалось "
-                    "записать: "
+                    "Telegram-публикация завершилась ошибкой, "
+                    "и статус failed не удалось записать: "
                     "publication_attempt_id="
                     f"{publication.publication_attempt_id}"
                 ) from database_error
@@ -387,29 +315,24 @@ async def publish_approved_post(
             raise
 
         response_payload = {
-            "message_id": (
-                message.message_id
-            ),
+            "message_id": message.message_id,
             "chat_id": message.chat.id,
             "chat_type": _enum_value(
                 message.chat.type
             ),
-            "chat_title": (
-                message.chat.title
-            ),
+            "chat_title": message.chat.title,
             "message_date": (
                 message.date.isoformat()
             ),
-            "transport": "rich_message",
-            "rich_html_characters": len(
-                prepared.rich_html
+            "transport": "native_photo",
+            "caption_characters": len(
+                prepared.caption
             ),
-            "rich_media_id": (
-                prepared.rich_media_id
+            "caption_text_format": (
+                prepared.caption_text_format
             ),
-            "image_path": (
-                prepared.image_path
-            ),
+            "parse_mode": prepared.parse_mode,
+            "image_path": prepared.image_path,
             "image_sha256": (
                 prepared.image_sha256
             ),
@@ -423,12 +346,8 @@ async def publish_approved_post(
             await mark_publication_published(
                 pool,
                 publication,
-                telegram_message_id=(
-                    message.message_id
-                ),
-                response_payload=(
-                    response_payload
-                ),
+                telegram_message_id=message.message_id,
+                response_payload=response_payload,
             )
 
         except Exception as finalization_error:
@@ -440,76 +359,43 @@ async def publish_approved_post(
                 await mark_publication_unknown(
                     pool,
                     publication,
-                    telegram_message_id=(
-                        message.message_id
-                    ),
-                    response_payload=(
-                        response_payload
-                    ),
-                    error_message=(
-                        error_message
-                    ),
+                    telegram_message_id=message.message_id,
+                    response_payload=response_payload,
+                    error_message=error_message,
                 )
             except Exception as unknown_status_error:
                 raise PublicationStateUncertainError(
                     publication_attempt_id=(
-                        publication
-                        .publication_attempt_id
+                        publication.publication_attempt_id
                     ),
-                    telegram_message_id=(
-                        message.message_id
-                    ),
+                    telegram_message_id=message.message_id,
                 ) from unknown_status_error
 
             return PublicationResult(
-                batch_id=(
-                    publication.batch_id
-                ),
-                generated_post_id=(
-                    publication
-                    .generated_post_id
-                ),
+                batch_id=publication.batch_id,
+                generated_post_id=publication.generated_post_id,
                 publication_attempt_id=(
-                    publication
-                    .publication_attempt_id
+                    publication.publication_attempt_id
                 ),
-                publication_date=(
-                    publication
-                    .publication_date
-                ),
-                edition=(
-                    publication.edition
-                ),
-                telegram_message_id=(
-                    message.message_id
-                ),
+                publication_date=publication.publication_date,
+                edition=publication.edition,
+                telegram_message_id=message.message_id,
                 database_status="unknown",
                 requires_review=True,
             )
 
         return PublicationResult(
-            batch_id=(
-                publication.batch_id
-            ),
-            generated_post_id=(
-                publication.generated_post_id
-            ),
+            batch_id=publication.batch_id,
+            generated_post_id=publication.generated_post_id,
             publication_attempt_id=(
-                publication
-                .publication_attempt_id
+                publication.publication_attempt_id
             ),
-            publication_date=(
-                publication.publication_date
-            ),
+            publication_date=publication.publication_date,
             edition=publication.edition,
-            telegram_message_id=(
-                message.message_id
-            ),
+            telegram_message_id=message.message_id,
             database_status="published",
             requires_review=False,
         )
 
     finally:
-        await _close_bot_session(
-            bot
-        )
+        await _close_bot_session(bot)
