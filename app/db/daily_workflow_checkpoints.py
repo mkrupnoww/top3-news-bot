@@ -656,8 +656,18 @@ async def recover_batch_id(
     pool: asyncpg.Pool,
     *,
     daily_workflow_run_id: int,
+    generation_request_key: str,
 ) -> int | None:
-    """Ищет publication batch для уже закреплённого ranking."""
+    """
+    Восстанавливает publication batch
+    по точному generation_request_key.
+
+    Именно generation_request_key определяет
+    identity защищённого generation-запуска.
+    Ranking/date/chat используются как
+    дополнительная проверка принадлежности
+    найденной reservation daily workflow.
+    """
 
     workflow = await load_daily_workflow(
         pool,
@@ -672,38 +682,94 @@ async def recover_batch_id(
     if workflow.ranking_run_id is None:
         return None
 
-    async with pool.acquire() as connection:
-        records = await connection.fetch(
-            """
-            SELECT batch_id
-            FROM publication_batches
-            WHERE ranking_run_id = $1
-              AND publication_date = $2
-              AND target_telegram_chat_id = $3
-            ORDER BY batch_id
-            """,
-            workflow.ranking_run_id,
-            workflow.publication_date,
-            workflow.target_telegram_chat_id,
+    normalized_request_key = (
+        generation_request_key.strip()
+    )
+
+    if (
+        len(normalized_request_key) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character
+            in normalized_request_key
+        )
+    ):
+        raise ValueError(
+            "generation_request_key должен "
+            "быть lowercase SHA-256."
         )
 
-    if not records:
+    async with pool.acquire() as connection:
+        record = await connection.fetchrow(
+            """
+            SELECT
+                batch_id,
+                ranking_run_id,
+                publication_date,
+                target_telegram_chat_id,
+                generation_request_key
+            FROM publication_batches
+            WHERE generation_request_key = $1
+            """,
+            normalized_request_key,
+        )
+
+    if record is None:
         return None
 
-    if len(records) > 1:
-        ids = tuple(
-            int(record["batch_id"])
-            for record in records
+    differences: list[str] = []
+
+    if (
+        record["ranking_run_id"]
+        != workflow.ranking_run_id
+    ):
+        differences.append(
+            "ranking_run_id: "
+            f"expected={workflow.ranking_run_id!r}, "
+            f"actual={record['ranking_run_id']!r}"
         )
 
-        raise DailyWorkflowRecoveryAmbiguousError(
-            "Найдено несколько publication batch "
-            "для daily workflow: "
-            f"{ids}"
+    if (
+        record["publication_date"]
+        != workflow.publication_date
+    ):
+        differences.append(
+            "publication_date: "
+            f"expected="
+            f"{workflow.publication_date!r}, "
+            f"actual="
+            f"{record['publication_date']!r}"
+        )
+
+    if (
+        record["target_telegram_chat_id"]
+        != workflow.target_telegram_chat_id
+    ):
+        differences.append(
+            "target_telegram_chat_id: "
+            f"expected="
+            f"{workflow.target_telegram_chat_id!r}, "
+            f"actual="
+            f"{record['target_telegram_chat_id']!r}"
+        )
+
+    if (
+        record["generation_request_key"]
+        != normalized_request_key
+    ):
+        differences.append(
+            "generation_request_key differs"
+        )
+
+    if differences:
+        raise ValueError(
+            "Найденный publication batch "
+            "не принадлежит daily workflow: "
+            + "; ".join(differences)
         )
 
     return int(
-        records[0]["batch_id"]
+        record["batch_id"]
     )
 
 

@@ -46,6 +46,16 @@ BATCH_ID = 60
 GENERATED_POST_ID = 60
 IMAGE_GENERATION_ID = 20
 
+GENERATION_REQUEST_KEY = (
+    "5ad1e9e41f95eddbf38a4c6493676d1"
+    "eebb59e148fc24d0dca8949d623daf0a5"
+)
+
+OLD_GENERATION_REQUEST_KEY = (
+    "7525d5a4c8c5a15df123f6cb5372be38"
+    "c7b037479472c7cc498b415a4080ccef"
+)
+
 
 class _SingleConnectionAcquire:
     """Context manager одной connection."""
@@ -166,6 +176,7 @@ async def main() -> int:
                     workflow.ranking_run_id
                     == RANKING_RUN_ID
                 )
+
                 assert (
                     workflow.current_stage
                     == "ranking"
@@ -175,10 +186,30 @@ async def main() -> int:
                     "Ranking reservation checkpoint: OK"
                 )
 
+                old_batch_id = await recover_batch_id(
+                    pool,
+                    daily_workflow_run_id=(
+                        workflow.daily_workflow_run_id
+                    ),
+                    generation_request_key=(
+                        OLD_GENERATION_REQUEST_KEY
+                    ),
+                )
+
+                assert old_batch_id == 59
+
+                print(
+                    "Generation recovery distinguishes "
+                    "different request keys: OK"
+                )
+
                 batch_id = await recover_batch_id(
                     pool,
                     daily_workflow_run_id=(
                         workflow.daily_workflow_run_id
+                    ),
+                    generation_request_key=(
+                        GENERATION_REQUEST_KEY
                     ),
                 )
 
@@ -200,6 +231,7 @@ async def main() -> int:
                 )
 
                 assert workflow.batch_id == BATCH_ID
+
                 assert (
                     workflow.current_stage
                     == "generation"
@@ -282,6 +314,7 @@ async def main() -> int:
                     workflow.image_generation_id
                     == IMAGE_GENERATION_ID
                 )
+
                 assert (
                     workflow.current_stage
                     == "image"
@@ -302,6 +335,11 @@ async def main() -> int:
                     )
                 )
 
+                assert (
+                    workflow.current_stage
+                    == "review_delivery"
+                )
+
                 workflow = (
                     await complete_daily_workflow(
                         pool,
@@ -313,6 +351,11 @@ async def main() -> int:
                 )
 
                 assert workflow.awaiting_review is True
+
+                assert (
+                    workflow.current_stage
+                    == "awaiting_review"
+                )
 
                 print(
                     "Workflow final transition: OK"
