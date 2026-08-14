@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 
 import asyncpg
 
@@ -16,13 +17,18 @@ from app.db.pool import (
     close_database_pool,
     create_database_pool,
 )
+from app.generation.image_generator import (
+    OPENAI_IMAGE_PROMPT_VERSION,
+)
 
 
 WORKFLOW_ID = 12
 RANKING_RUN_ID = 141
 BATCH_ID = 65
 GENERATED_POST_ID = 61
-FAILED_IMAGE_GENERATION_ID = 21
+LINKED_FAILED_IMAGE_ID = 23
+OLD_PROMPT_VERSION = "movie_news_image_v1"
+EXPECTED_CURRENT_PROMPT_VERSION = "movie_news_image_v2"
 
 
 class _SingleConnectionAcquire:
@@ -65,10 +71,27 @@ class _SingleConnectionPool:
         )
 
 
+def _synthetic_request_key(
+    *,
+    attempt_number: int,
+) -> str:
+    """Создаёт уникальный synthetic request key."""
+
+    payload = (
+        "daily-workflow-v2-retry-test:"
+        f"{WORKFLOW_ID}:"
+        f"{attempt_number}"
+    )
+
+    return hashlib.sha256(
+        payload.encode("utf-8")
+    ).hexdigest()
+
+
 async def _assert_production_fixture(
     pool,
 ) -> None:
-    """Проверяет, что production fixture всё ещё соответствует incident."""
+    """Проверяет неизменный production incident fixture."""
 
     workflow = await load_daily_workflow(
         pool,
@@ -85,70 +108,93 @@ async def _assert_production_fixture(
     )
     assert (
         workflow.image_generation_id
-        == FAILED_IMAGE_GENERATION_ID
+        == LINKED_FAILED_IMAGE_ID
     )
 
     async with pool.acquire() as connection:
-        state = await connection.fetchrow(
+        generation = await connection.fetchrow(
             """
             SELECT
                 b.batch_status,
                 p.post_status,
                 p.image_path,
-                p.image_sha256,
-                i.image_status,
-                i.request_kind,
-                i.error_type,
-                i.error_message,
-                i.failed_at,
-                (
-                    SELECT COUNT(*)::integer
-                    FROM image_generation_requests AS x
-                    WHERE x.batch_id = $1
-                      AND x.generated_post_id = $2
-                      AND x.request_kind = 'initial'
-                ) AS initial_attempt_count
+                p.image_sha256
             FROM publication_batches AS b
             JOIN generated_posts AS p
               ON p.batch_id = b.batch_id
-            JOIN image_generation_requests AS i
-              ON i.image_generation_id = $3
             WHERE b.batch_id = $1
               AND p.generated_post_id = $2
             """,
             BATCH_ID,
             GENERATED_POST_ID,
-            FAILED_IMAGE_GENERATION_ID,
         )
 
-    if state is None:
+        attempts = await connection.fetch(
+            """
+            SELECT
+                image_generation_id,
+                image_status,
+                prompt_version,
+                error_type,
+                error_message,
+                failed_at
+            FROM image_generation_requests
+            WHERE batch_id = $1
+              AND generated_post_id = $2
+              AND request_kind = 'initial'
+            ORDER BY image_generation_id
+            """,
+            BATCH_ID,
+            GENERATED_POST_ID,
+        )
+
+    if generation is None:
         raise AssertionError(
-            "Production moderation fixture не найдена."
+            "Production batch/post fixture не найдена."
         )
 
-    assert state["batch_status"] == "awaiting_review"
-    assert state["post_status"] == "awaiting_review"
-    assert state["image_path"] is None
-    assert state["image_sha256"] is None
-    assert state["image_status"] == "failed"
-    assert state["request_kind"] == "initial"
-    assert state["error_type"] == "BadRequestError"
-    assert "moderation_blocked" in (
-        str(state["error_message"]).lower()
-    )
-    assert state["failed_at"] is not None
-    assert int(state["initial_attempt_count"]) == 1
+    assert generation["batch_status"] == "awaiting_review"
+    assert generation["post_status"] == "awaiting_review"
+    assert generation["image_path"] is None
+    assert generation["image_sha256"] is None
+
+    old_attempts = [
+        row
+        for row in attempts
+        if row["prompt_version"] == OLD_PROMPT_VERSION
+    ]
+
+    current_attempts = [
+        row
+        for row in attempts
+        if (
+            row["prompt_version"]
+            == EXPECTED_CURRENT_PROMPT_VERSION
+        )
+    ]
+
+    assert len(old_attempts) == 2
+    assert len(current_attempts) == 0
+
+    for row in old_attempts:
+        assert row["image_status"] == "failed"
+        assert row["error_type"] == "BadRequestError"
+        assert row["failed_at"] is not None
+        assert "moderation_blocked" in (
+            str(row["error_message"]).lower()
+        )
 
 
-async def _insert_synthetic_retry_reservation(
+async def _insert_synthetic_v2_reservation(
     pool,
+    *,
+    attempt_number: int,
 ) -> int:
-    """
-    Создаёт вторую reserved image attempt только внутри rollback test.
+    """Создаёт synthetic v2 reservation внутри rollback transaction."""
 
-    Поля точного Image API request копируются из failed attempt 21.
-    Никакого Image API вызова не выполняется.
-    """
+    request_key = _synthetic_request_key(
+        attempt_number=attempt_number
+    )
 
     async with pool.acquire() as connection:
         image_generation_id = await connection.fetchval(
@@ -178,7 +224,7 @@ async def _insert_synthetic_retry_reservation(
                 batch_id,
                 generated_post_id,
                 review_action_id,
-                image_request_key,
+                $2,
                 request_key_version,
                 'reserved',
                 request_kind,
@@ -186,7 +232,7 @@ async def _insert_synthetic_retry_reservation(
                 issues,
                 model_name,
                 generator_version,
-                prompt_version,
+                $3,
                 image_size,
                 image_quality,
                 output_format,
@@ -198,19 +244,63 @@ async def _insert_synthetic_retry_reservation(
             WHERE image_generation_id = $1
             RETURNING image_generation_id
             """,
-            FAILED_IMAGE_GENERATION_ID,
+            LINKED_FAILED_IMAGE_ID,
+            request_key,
+            EXPECTED_CURRENT_PROMPT_VERSION,
         )
 
     if image_generation_id is None:
         raise RuntimeError(
-            "Не удалось создать synthetic retry reservation."
+            "Не удалось создать synthetic v2 reservation."
         )
 
     return int(image_generation_id)
 
 
+async def _mark_synthetic_moderation_failed(
+    pool,
+    *,
+    image_generation_id: int,
+) -> None:
+    """Переводит synthetic reservation в definitive moderation failure."""
+
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE image_generation_requests
+            SET
+                image_status = 'failed',
+                error_type = 'BadRequestError',
+                error_message = (
+                    'Synthetic Error code: 400 '
+                    'moderation_blocked'
+                ),
+                failed_at = now()
+            WHERE image_generation_id = $1
+              AND image_status = 'reserved'
+            """,
+            image_generation_id,
+        )
+
+    if result != "UPDATE 1":
+        raise RuntimeError(
+            "Не удалось перевести synthetic image "
+            "reservation в failed."
+        )
+
+
 async def main() -> int:
-    """Проверяет reopen + replacement + one-retry limit с полным rollback."""
+    """Проверяет version-aware budget без OpenAI/Telegram."""
+
+    if (
+        OPENAI_IMAGE_PROMPT_VERSION
+        != EXPECTED_CURRENT_PROMPT_VERSION
+    ):
+        raise AssertionError(
+            "Тест требует current prompt_version="
+            f"{EXPECTED_CURRENT_PROMPT_VERSION}, "
+            f"actual={OPENAI_IMAGE_PROMPT_VERSION}"
+        )
 
     settings = get_settings()
     database_pool = await create_database_pool(
@@ -231,24 +321,23 @@ async def main() -> int:
                     pool
                 )
 
-                eligible_image_id = (
+                attempts_used = (
                     await
                     require_daily_workflow_image_moderation_retry(
                         pool,
                         daily_workflow_run_id=(
                             WORKFLOW_ID
                         ),
+                        prompt_version=(
+                            OPENAI_IMAGE_PROMPT_VERSION
+                        ),
                     )
                 )
 
-                assert (
-                    eligible_image_id
-                    == FAILED_IMAGE_GENERATION_ID
-                )
+                assert attempts_used == 0
 
                 print(
-                    "Definitive moderation failure "
-                    "eligibility: OK"
+                    "New prompt version has fresh budget: OK"
                 )
 
                 workflow = (
@@ -258,6 +347,9 @@ async def main() -> int:
                         daily_workflow_run_id=(
                             WORKFLOW_ID
                         ),
+                        prompt_version=(
+                            OPENAI_IMAGE_PROMPT_VERSION
+                        ),
                     )
                 )
 
@@ -265,22 +357,18 @@ async def main() -> int:
                 assert workflow.current_stage == "image"
                 assert (
                     workflow.image_generation_id
-                    == FAILED_IMAGE_GENERATION_ID
+                    == LINKED_FAILED_IMAGE_ID
                 )
 
                 print(
-                    "Failed workflow reopen to image: OK"
+                    "Failed v1 workflow reopens for v2: OK"
                 )
 
-                retry_image_id = (
-                    await _insert_synthetic_retry_reservation(
-                        pool
+                first_v2_id = (
+                    await _insert_synthetic_v2_reservation(
+                        pool,
+                        attempt_number=1,
                     )
-                )
-
-                assert (
-                    retry_image_id
-                    != FAILED_IMAGE_GENERATION_ID
                 )
 
                 workflow = (
@@ -290,19 +378,72 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         image_generation_id=(
-                            retry_image_id
+                            first_v2_id
                         ),
                     )
                 )
 
                 assert (
                     workflow.image_generation_id
-                    == retry_image_id
+                    == first_v2_id
                 )
-                assert workflow.current_stage == "image"
+
+                await _mark_synthetic_moderation_failed(
+                    pool,
+                    image_generation_id=(
+                        first_v2_id
+                    ),
+                )
+
+                attempts_used = (
+                    await
+                    require_daily_workflow_image_moderation_retry(
+                        pool,
+                        daily_workflow_run_id=(
+                            WORKFLOW_ID
+                        ),
+                        prompt_version=(
+                            OPENAI_IMAGE_PROMPT_VERSION
+                        ),
+                    )
+                )
+
+                assert attempts_used == 1
 
                 print(
-                    "Failed image checkpoint replacement: OK"
+                    "Second v2 attempt allowed after "
+                    "first moderation block: OK"
+                )
+
+                second_v2_id = (
+                    await _insert_synthetic_v2_reservation(
+                        pool,
+                        attempt_number=2,
+                    )
+                )
+
+                workflow = (
+                    await checkpoint_image_reservation(
+                        pool,
+                        daily_workflow_run_id=(
+                            WORKFLOW_ID
+                        ),
+                        image_generation_id=(
+                            second_v2_id
+                        ),
+                    )
+                )
+
+                assert (
+                    workflow.image_generation_id
+                    == second_v2_id
+                )
+
+                await _mark_synthetic_moderation_failed(
+                    pool,
+                    image_generation_id=(
+                        second_v2_id
+                    ),
                 )
 
                 try:
@@ -312,24 +453,26 @@ async def main() -> int:
                             daily_workflow_run_id=(
                                 WORKFLOW_ID
                             ),
+                            prompt_version=(
+                                OPENAI_IMAGE_PROMPT_VERSION
+                            ),
                         )
                     )
                 except (
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third automatic image attempt blocked: OK"
+                        "Third v2 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После второй initial attempt "
-                        "третий automatic retry не был заблокирован."
+                        "После двух v2 moderation failures "
+                        "третья попытка не была заблокирована."
                     )
 
             finally:
                 await transaction.rollback()
 
-        # Проверяем rollback уже через обычный pool.
         await _assert_production_fixture(
             database_pool
         )
@@ -339,7 +482,7 @@ async def main() -> int:
         print("OpenAI requests=not_performed")
         print("Telegram requests=not_performed")
         print(
-            "Daily workflow image moderation retry test: OK"
+            "Version-aware image moderation retry test: OK"
         )
 
         return 0

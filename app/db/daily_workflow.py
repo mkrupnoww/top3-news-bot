@@ -5,6 +5,7 @@ import asyncpg
 
 
 DAILY_WORKFLOW_VERSION = "daily_workflow_v1"
+MAX_IMAGE_ATTEMPTS_PER_PROMPT_VERSION = 2
 
 
 class DailyWorkflowImageModerationRetryNotAllowedError(
@@ -223,25 +224,74 @@ def _build_workflow(
     )
 
 
+def _normalize_image_prompt_version(
+    value: str,
+) -> str:
+    """Проверяет prompt_version Image API."""
+
+    if not isinstance(value, str):
+        raise TypeError(
+            "prompt_version должен быть str."
+        )
+
+    normalized = value.strip()
+
+    if not normalized:
+        raise ValueError(
+            "prompt_version не может быть пустым."
+        )
+
+    return normalized
+
+
+def _is_definitive_image_moderation_failure(
+    record: asyncpg.Record,
+) -> bool:
+    """Проверяет доказанный BadRequestError/moderation_blocked."""
+
+    if (
+        record["image_status"] != "failed"
+        or record["failed_at"] is None
+    ):
+        return False
+
+    error_type = str(
+        record["error_type"] or ""
+    ).strip()
+
+    error_message = str(
+        record["error_message"] or ""
+    ).strip().lower()
+
+    return (
+        error_type == "BadRequestError"
+        and "moderation_blocked" in error_message
+    )
+
+
 async def _require_image_moderation_retry_locked(
     connection: asyncpg.Connection,
     *,
     workflow: asyncpg.Record,
+    prompt_version: str,
 ) -> int:
     """
-    Проверяет право ровно на один повторный initial Image API call.
+    Проверяет право на следующий initial Image API call
+    для конкретной версии промпта.
 
-    Retry разрешён только когда:
-    - workflow уже содержит ranking/batch/post/image IDs;
-    - batch/post остаются awaiting_review;
-    - у post нет сохранённого PNG;
-    - существует ровно одна initial image attempt;
-    - она совпадает с workflow.image_generation_id;
-    - она однозначно failed как BadRequestError/moderation_blocked.
+    Для одной prompt_version разрешено максимум две попытки.
+    Новая prompt_version получает собственный лимит.
 
-    Вторая initial attempt автоматически означает, что retry уже был
-    использован и третьего платного вызова быть не должно.
+    При этом новая попытка допустима только после доказанного
+    moderation_blocked предыдущего linked image request. Любые
+    reserved/unknown/completed initial requests блокируют новый call.
     """
+
+    normalized_prompt_version = (
+        _normalize_image_prompt_version(
+            prompt_version
+        )
+    )
 
     required_ids = (
         "ranking_run_id",
@@ -267,7 +317,9 @@ async def _require_image_moderation_retry_locked(
 
     batch_id = int(workflow["batch_id"])
     post_id = int(workflow["generated_post_id"])
-    image_id = int(workflow["image_generation_id"])
+    linked_image_id = int(
+        workflow["image_generation_id"]
+    )
 
     generation = await connection.fetchrow(
         """
@@ -330,19 +382,71 @@ async def _require_image_moderation_retry_locked(
             )
         )
 
-    attempts = await connection.fetch(
+    linked_image = await connection.fetchrow(
         """
         SELECT
             image_generation_id,
+            batch_id,
+            generated_post_id,
             image_status,
             request_kind,
+            prompt_version,
             error_type,
             error_message,
             failed_at
         FROM image_generation_requests
+        WHERE image_generation_id = $1
+        FOR UPDATE
+        """,
+        linked_image_id,
+    )
+
+    if linked_image is None:
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "linked image request не найден."
+            )
+        )
+
+    if (
+        linked_image["batch_id"] != batch_id
+        or linked_image["generated_post_id"] != post_id
+        or linked_image["request_kind"] != "initial"
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "linked image request не соответствует "
+                "workflow batch/post/initial."
+            )
+        )
+
+    if not _is_definitive_image_moderation_failure(
+        linked_image
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "linked image request не является "
+                "доказанным moderation_blocked."
+            )
+        )
+
+    active_or_completed = await connection.fetch(
+        """
+        SELECT
+            image_generation_id,
+            image_status,
+            prompt_version
+        FROM image_generation_requests
         WHERE batch_id = $1
           AND generated_post_id = $2
           AND request_kind = 'initial'
+          AND image_status IN (
+              'reserved',
+              'completed'
+          )
         ORDER BY image_generation_id
         FOR UPDATE
         """,
@@ -350,68 +454,91 @@ async def _require_image_moderation_retry_locked(
         post_id,
     )
 
-    if len(attempts) != 1:
+    if active_or_completed:
+        details = ", ".join(
+            (
+                f"{row['image_generation_id']}:"
+                f"{row['image_status']}:"
+                f"{row['prompt_version']}"
+            )
+            for row in active_or_completed
+        )
+
         raise (
             DailyWorkflowImageModerationRetryNotAllowedError(
                 "Image moderation retry запрещён: "
-                "должна существовать ровно одна "
-                "initial image attempt; "
-                f"actual={len(attempts)}."
+                "существует active/completed initial request: "
+                + details
             )
         )
 
-    attempt = attempts[0]
+    version_attempts = await connection.fetch(
+        """
+        SELECT
+            image_generation_id,
+            image_status,
+            prompt_version,
+            error_type,
+            error_message,
+            failed_at
+        FROM image_generation_requests
+        WHERE batch_id = $1
+          AND generated_post_id = $2
+          AND request_kind = 'initial'
+          AND prompt_version = $3
+        ORDER BY image_generation_id
+        FOR UPDATE
+        """,
+        batch_id,
+        post_id,
+        normalized_prompt_version,
+    )
 
-    if int(attempt["image_generation_id"]) != image_id:
-        raise (
-            DailyWorkflowImageModerationRetryNotAllowedError(
-                "Image moderation retry запрещён: "
-                "единственная initial attempt не совпадает "
-                "с workflow.image_generation_id."
+    for attempt in version_attempts:
+        if not _is_definitive_image_moderation_failure(
+            attempt
+        ):
+            raise (
+                DailyWorkflowImageModerationRetryNotAllowedError(
+                    "Image moderation retry запрещён: "
+                    "для текущей prompt_version есть "
+                    "неоднозначная/не-moderation failed attempt: "
+                    f"image_generation_id="
+                    f"{attempt['image_generation_id']}"
+                )
             )
-        )
+
+    attempt_count = len(
+        version_attempts
+    )
 
     if (
-        attempt["image_status"] != "failed"
-        or attempt["failed_at"] is None
+        attempt_count
+        >= MAX_IMAGE_ATTEMPTS_PER_PROMPT_VERSION
     ):
         raise (
             DailyWorkflowImageModerationRetryNotAllowedError(
                 "Image moderation retry запрещён: "
-                "initial attempt не имеет доказанный failed status."
+                "лимит попыток для prompt_version исчерпан: "
+                f"prompt_version={normalized_prompt_version}, "
+                f"attempts={attempt_count}, "
+                f"limit="
+                f"{MAX_IMAGE_ATTEMPTS_PER_PROMPT_VERSION}"
             )
         )
 
-    error_type = str(
-        attempt["error_type"] or ""
-    ).strip()
-
-    error_message = str(
-        attempt["error_message"] or ""
-    ).strip().lower()
-
-    if (
-        error_type != "BadRequestError"
-        or "moderation_blocked" not in error_message
-    ):
-        raise (
-            DailyWorkflowImageModerationRetryNotAllowedError(
-                "Image moderation retry запрещён: "
-                "failure не является однозначным "
-                "BadRequestError/moderation_blocked."
-            )
-        )
-
-    return image_id
+    return attempt_count
 
 
 async def require_daily_workflow_image_moderation_retry(
     pool: asyncpg.Pool,
     *,
     daily_workflow_run_id: int,
+    prompt_version: str,
 ) -> int:
     """
-    Проверяет право workflow на единственный moderation retry.
+    Возвращает число уже использованных попыток
+    для текущей Image API prompt_version.
 
     PostgreSQL не изменяется.
     """
@@ -419,6 +546,12 @@ async def require_daily_workflow_image_moderation_retry(
     workflow_id = _positive_integer(
         daily_workflow_run_id,
         field_name="daily_workflow_run_id",
+    )
+
+    normalized_prompt_version = (
+        _normalize_image_prompt_version(
+            prompt_version
+        )
     )
 
     async with pool.acquire() as connection:
@@ -483,6 +616,9 @@ async def require_daily_workflow_image_moderation_retry(
             return await _require_image_moderation_retry_locked(
                 connection,
                 workflow=workflow,
+                prompt_version=(
+                    normalized_prompt_version
+                ),
             )
 
 
@@ -490,16 +626,25 @@ async def reopen_daily_workflow_for_image_moderation_retry(
     pool: asyncpg.Pool,
     *,
     daily_workflow_run_id: int,
+    prompt_version: str,
 ) -> DailyWorkflowRun:
     """
-    Reopen failed workflow только для единственного image moderation retry.
+    Reopen failed workflow для следующей попытки
+    текущей Image API prompt_version.
 
-    Старый failed image_generation_id сохраняется до новой reservation.
+    Исторический failed image_generation_id остаётся
+    закреплён до reservation нового запроса.
     """
 
     workflow_id = _positive_integer(
         daily_workflow_run_id,
         field_name="daily_workflow_run_id",
+    )
+
+    normalized_prompt_version = (
+        _normalize_image_prompt_version(
+            prompt_version
+        )
     )
 
     async with pool.acquire() as connection:
@@ -546,6 +691,9 @@ async def reopen_daily_workflow_for_image_moderation_retry(
             await _require_image_moderation_retry_locked(
                 connection,
                 workflow=workflow,
+                prompt_version=(
+                    normalized_prompt_version
+                ),
             )
 
             updated = await connection.fetchrow(

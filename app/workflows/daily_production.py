@@ -47,6 +47,9 @@ from app.generation.openai_factory import (
     OpenAIGenerationRuntime,
     create_openai_generation_runtime,
 )
+from app.generation.image_generator import (
+    OPENAI_IMAGE_PROMPT_VERSION,
+)
 from app.generation.openai_image_factory import (
     OpenAIImageGenerationRuntime,
     create_openai_image_generation_runtime,
@@ -598,8 +601,9 @@ async def run_daily_production_workflow(
 
     Failed и orphan/uncertain child states
     автоматически не переигрываются, кроме
-    ровно одного initial image retry после
-    однозначного BadRequestError/moderation_blocked.
+    Image API moderation_blocked: для каждой
+    prompt_version допускается максимум две
+    доказанные initial attempts.
     """
 
     if (
@@ -660,7 +664,8 @@ async def run_daily_production_workflow(
                 workflow
             )
 
-        image_moderation_retry_consumed = False
+        image_recovery_from_failed_request = False
+        image_prompt_attempts_used = 0
 
         if workflow.failed:
             try:
@@ -671,6 +676,22 @@ async def run_daily_production_workflow(
                         daily_workflow_run_id=(
                             workflow.daily_workflow_run_id
                         ),
+                        prompt_version=(
+                            OPENAI_IMAGE_PROMPT_VERSION
+                        ),
+                    )
+                )
+
+                image_prompt_attempts_used = (
+                    await
+                    require_daily_workflow_image_moderation_retry(
+                        pool,
+                        daily_workflow_run_id=(
+                            workflow.daily_workflow_run_id
+                        ),
+                        prompt_version=(
+                            OPENAI_IMAGE_PROMPT_VERSION
+                        ),
                     )
                 )
             except (
@@ -679,19 +700,25 @@ async def run_daily_production_workflow(
                 raise (
                     DailyProductionWorkflowTerminalError(
                         "Daily workflow уже failed "
-                        "и не допускает automatic retry: "
+                        "и не допускает automatic image attempt "
+                        "для текущей prompt_version: "
                         f"daily_workflow_run_id="
                         f"{workflow.daily_workflow_run_id}; "
+                        f"prompt_version="
+                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
                         f"reason={retry_error}"
                     )
                 ) from retry_error
 
-            image_moderation_retry_consumed = True
+            image_recovery_from_failed_request = True
 
             _report_progress(
                 progress,
                 "[daily] reopen failed workflow "
-                "for one image moderation retry",
+                "for image prompt version "
+                f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                f"attempts_used="
+                f"{image_prompt_attempts_used}",
             )
 
         if not workflow.running:
@@ -1066,14 +1093,14 @@ async def run_daily_production_workflow(
 
             async def run_initial_image_once(
                 *,
-                moderation_retry: bool,
+                recovery_from_failed_request: bool,
             ) -> int:
                 """Выполняет ровно одну protected initial image attempt."""
 
                 nonlocal image_runtime
                 nonlocal image_model_called
 
-                if not moderation_retry:
+                if not recovery_from_failed_request:
                     generation_state = (
                         await load_generation_workflow_state(
                             pool,
@@ -1110,6 +1137,25 @@ async def run_daily_production_workflow(
                         )
                     )
 
+                actual_prompt_version = (
+                    image_runtime
+                    .generator
+                    .metadata
+                    .prompt_version
+                )
+
+                if (
+                    actual_prompt_version
+                    != OPENAI_IMAGE_PROMPT_VERSION
+                ):
+                    raise DailyProductionWorkflowError(
+                        "Image runtime prompt_version "
+                        "не совпадает с production constant: "
+                        f"runtime={actual_prompt_version}, "
+                        f"expected="
+                        f"{OPENAI_IMAGE_PROMPT_VERSION}"
+                    )
+
                 async def image_observer(
                     reservation,
                 ) -> None:
@@ -1126,7 +1172,9 @@ async def run_daily_production_workflow(
 
                 _report_progress(
                     progress,
-                    "[image] run protected Image API",
+                    "[image] run protected Image API "
+                    f"prompt_version="
+                    f"{OPENAI_IMAGE_PROMPT_VERSION}",
                 )
 
                 image_result = (
@@ -1210,11 +1258,15 @@ async def run_daily_production_workflow(
 
                 if image_status == "failed":
                     try:
-                        await (
+                        image_prompt_attempts_used = (
+                            await
                             require_daily_workflow_image_moderation_retry(
                                 pool,
                                 daily_workflow_run_id=(
                                     workflow_id
+                                ),
+                                prompt_version=(
+                                    OPENAI_IMAGE_PROMPT_VERSION
                                 ),
                             )
                         )
@@ -1223,19 +1275,24 @@ async def run_daily_production_workflow(
                     ) as retry_error:
                         raise DailyProductionWorkflowError(
                             "Initial image child stage "
-                            "failed и automatic retry "
-                            "запрещён: "
+                            "failed и automatic attempt "
+                            "для текущей prompt_version запрещён: "
                             f"image_generation_id="
                             f"{image_generation_id}; "
+                            f"prompt_version="
+                            f"{OPENAI_IMAGE_PROMPT_VERSION}; "
                             f"reason={retry_error}"
                         ) from retry_error
 
-                    image_moderation_retry_consumed = True
+                    image_recovery_from_failed_request = True
 
                     _report_progress(
                         progress,
-                        "[image] retry once after "
-                        "definitive moderation_blocked",
+                        "[image] next attempt for "
+                        f"prompt_version="
+                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                        f"attempts_used="
+                        f"{image_prompt_attempts_used}",
                     )
 
                     image_generation_id = None
@@ -1260,18 +1317,29 @@ async def run_daily_production_workflow(
                     )
 
             if image_generation_id is None:
+                workflow_before_call = (
+                    await load_daily_workflow(
+                        pool,
+                        daily_workflow_run_id=(
+                            workflow_id
+                        ),
+                    )
+                )
+
+                linked_image_before_call = (
+                    workflow_before_call
+                    .image_generation_id
+                )
+
                 try:
                     image_generation_id = (
                         await run_initial_image_once(
-                            moderation_retry=(
-                                image_moderation_retry_consumed
+                            recovery_from_failed_request=(
+                                image_recovery_from_failed_request
                             ),
                         )
                     )
                 except Exception as image_error:
-                    if image_moderation_retry_consumed:
-                        raise
-
                     workflow_after_error = (
                         await load_daily_workflow(
                             pool,
@@ -1281,19 +1349,28 @@ async def run_daily_production_workflow(
                         )
                     )
 
-                    if (
+                    failed_image_id = (
                         workflow_after_error
                         .image_generation_id
-                        is None
+                    )
+
+                    if (
+                        failed_image_id is None
+                        or failed_image_id
+                        == linked_image_before_call
                     ):
                         raise
 
                     try:
-                        await (
+                        image_prompt_attempts_used = (
+                            await
                             require_daily_workflow_image_moderation_retry(
                                 pool,
                                 daily_workflow_run_id=(
                                     workflow_id
+                                ),
+                                prompt_version=(
+                                    OPENAI_IMAGE_PROMPT_VERSION
                                 ),
                             )
                         )
@@ -1303,17 +1380,21 @@ async def run_daily_production_workflow(
                         raise image_error
 
                     image_model_called = True
-                    image_moderation_retry_consumed = True
+                    image_recovery_from_failed_request = True
 
                     _report_progress(
                         progress,
                         "[image] moderation_blocked; "
-                        "retry initial image once",
+                        "one more attempt allowed for "
+                        f"prompt_version="
+                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                        f"attempts_used="
+                        f"{image_prompt_attempts_used}",
                     )
 
                     image_generation_id = (
                         await run_initial_image_once(
-                            moderation_retry=True,
+                            recovery_from_failed_request=True,
                         )
                     )
 
