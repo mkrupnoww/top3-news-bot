@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -57,6 +58,11 @@ from app.ranking.request_key import (
 
 
 REQUIRED_WINDOW_HOURS = Decimal("24")
+
+RankingReservationObserver = Callable[
+    [RankingRunReservation],
+    Awaitable[None],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +389,10 @@ async def run_reserved_openai_event_ranking(
         EventAudienceMetrics,
         ...,
     ] = (),
+    reservation_observer: (
+        RankingReservationObserver
+        | None
+    ) = None,
 ) -> ReservedOpenAIEventRankingResult:
     """
     Выполняет защищённое полное ранжирование v2.
@@ -474,6 +484,11 @@ async def run_reserved_openai_event_ranking(
         ),
         news_ids=news_ids,
     )
+
+    if reservation_observer is not None:
+        await reservation_observer(
+            reservation
+        )
 
     if not reservation.should_call_model:
         return ReservedOpenAIEventRankingResult(

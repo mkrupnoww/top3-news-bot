@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -46,6 +46,11 @@ ImageRequestKind = Literal[
 ImageCostEstimator = Callable[
     [str, OpenAIImageUsage],
     Mapping[str, Any],
+]
+
+ImageGenerationReservationObserver = Callable[
+    [ImageGenerationReservation],
+    Awaitable[None],
 ]
 
 
@@ -554,6 +559,10 @@ async def run_reserved_openai_image_generation(
         ImageCostEstimator
         | None
     ) = build_openai_image_cost_payload,
+    reservation_observer: (
+        ImageGenerationReservationObserver
+        | None
+    ) = None,
 ) -> ReservedOpenAIImageGenerationResult:
     """
     Запускает защищённый image-generation pipeline.
@@ -663,6 +672,11 @@ async def run_reserved_openai_image_generation(
         model_request=model_request,
         items=items,
     )
+
+    if reservation_observer is not None:
+        await reservation_observer(
+            reservation
+        )
 
     if not reservation.should_call_model:
         return (

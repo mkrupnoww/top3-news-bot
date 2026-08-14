@@ -43,6 +43,11 @@ OfficialTrailerEnricher = Callable[
     Awaitable[OfficialTrailerEnrichmentResult],
 ]
 
+GenerationReservationObserver = Callable[
+    [GenerationReservation],
+    Awaitable[None],
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ReservedOpenAIGenerationResult:
@@ -422,6 +427,10 @@ async def run_reserved_openai_generation(
     trailer_enricher: OfficialTrailerEnricher = (
         enrich_official_trailer
     ),
+    reservation_observer: (
+        GenerationReservationObserver
+        | None
+    ) = None,
 ) -> ReservedOpenAIGenerationResult:
     """
     Запускает защищённую генерацию поста.
@@ -494,6 +503,11 @@ async def run_reserved_openai_generation(
         metadata=generator.metadata,
         model_request=model_request,
     )
+
+    if reservation_observer is not None:
+        await reservation_observer(
+            reservation
+        )
 
     if not reservation.should_call_model:
         return ReservedOpenAIGenerationResult(
