@@ -16,6 +16,10 @@ _RUNNING_STAGE_ORDER = {
     "review_delivery": 4,
 }
 
+_SHA256_ALPHABET = frozenset(
+    "0123456789abcdef"
+)
+
 
 class DailyWorkflowRecoveryAmbiguousError(
     RuntimeError
@@ -46,6 +50,55 @@ def _positive_integer(
         )
 
     return value
+
+
+def _normalize_required_text(
+    value: str,
+    *,
+    field_name: str,
+) -> str:
+    """Проверяет обязательный непустой текст."""
+
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{field_name} должен быть str."
+        )
+
+    normalized = value.strip()
+
+    if not normalized:
+        raise ValueError(
+            f"{field_name} не может быть пустым."
+        )
+
+    return normalized
+
+
+def _normalize_sha256(
+    value: str,
+    *,
+    field_name: str,
+) -> str:
+    """Проверяет lowercase SHA-256."""
+
+    normalized = _normalize_required_text(
+        value,
+        field_name=field_name,
+    )
+
+    if (
+        len(normalized) != 64
+        or any(
+            character not in _SHA256_ALPHABET
+            for character in normalized
+        )
+    ):
+        raise ValueError(
+            f"{field_name} должен быть "
+            "lowercase SHA-256."
+        )
+
+    return normalized
 
 
 def _advance_stage(
@@ -595,13 +648,30 @@ async def recover_ranking_run_id(
     pool: asyncpg.Pool,
     *,
     daily_workflow_run_id: int,
+    formula_version: str,
+    model_name: str,
+    prompt_version: str,
+    run_mode: str,
+    evaluator_name: str,
+    evaluator_version: str,
+    request_key_version: str,
 ) -> int | None:
     """
-    Ищет ranking reservation после crash-gap:
+    Восстанавливает ranking reservation
+    после crash-gap между reserve_ranking_run()
+    и checkpoint observer.
 
-    ranking reservation committed
-    -> process died
-    -> observer did not checkpoint ID.
+    Workflow cutoff/window и полная identity
+    текущего ranking runtime используются
+    для поиска совместимой reservation.
+
+    Candidate set намеренно не вычисляется
+    повторно: после reservation в БД могли
+    появиться late-arriving RSS items.
+
+    Если найдено несколько совместимых runs,
+    recovery считается неоднозначным и
+    автоматически продолжаться не может.
     """
 
     workflow = await load_daily_workflow(
@@ -614,37 +684,109 @@ async def recover_ranking_run_id(
     if workflow.ranking_run_id is not None:
         return workflow.ranking_run_id
 
+    normalized_formula_version = (
+        _normalize_required_text(
+            formula_version,
+            field_name="formula_version",
+        )
+    )
+
+    normalized_model_name = (
+        _normalize_required_text(
+            model_name,
+            field_name="model_name",
+        )
+    )
+
+    normalized_prompt_version = (
+        _normalize_required_text(
+            prompt_version,
+            field_name="prompt_version",
+        )
+    )
+
+    normalized_run_mode = (
+        _normalize_required_text(
+            run_mode,
+            field_name="run_mode",
+        )
+    )
+
+    normalized_evaluator_name = (
+        _normalize_required_text(
+            evaluator_name,
+            field_name="evaluator_name",
+        )
+    )
+
+    normalized_evaluator_version = (
+        _normalize_required_text(
+            evaluator_version,
+            field_name="evaluator_version",
+        )
+    )
+
+    normalized_request_key_version = (
+        _normalize_required_text(
+            request_key_version,
+            field_name="request_key_version",
+        )
+    )
+
     expected_start = (
         workflow.as_of
-        - timedelta(hours=workflow.window_hours)
+        - timedelta(
+            hours=workflow.window_hours
+        )
     )
 
     async with pool.acquire() as connection:
         records = await connection.fetch(
             """
-            SELECT ranking_run_id
+            SELECT
+                ranking_run_id,
+                request_key,
+                run_status
             FROM ranking_runs
             WHERE window_started_at = $1
               AND window_finished_at = $2
+              AND formula_version = $3
+              AND model_name = $4
+              AND prompt_version = $5
+              AND parameters->>'run_mode' = $6
+              AND parameters->>'evaluator_name' = $7
+              AND parameters->>'evaluator_version' = $8
+              AND parameters->>'request_key_version' = $9
             ORDER BY ranking_run_id
             """,
             expected_start,
             workflow.as_of,
+            normalized_formula_version,
+            normalized_model_name,
+            normalized_prompt_version,
+            normalized_run_mode,
+            normalized_evaluator_name,
+            normalized_evaluator_version,
+            normalized_request_key_version,
         )
 
     if not records:
         return None
 
     if len(records) > 1:
-        ids = tuple(
-            int(record["ranking_run_id"])
+        details = tuple(
+            (
+                int(record["ranking_run_id"]),
+                record["request_key"],
+                record["run_status"],
+            )
             for record in records
         )
 
         raise DailyWorkflowRecoveryAmbiguousError(
-            "Найдено несколько ranking_run "
-            "для точного daily window: "
-            f"{ids}"
+            "Найдено несколько совместимых "
+            "ranking_run для daily workflow: "
+            f"{details}"
         )
 
     return int(
@@ -682,22 +824,10 @@ async def recover_batch_id(
     if workflow.ranking_run_id is None:
         return None
 
-    normalized_request_key = (
-        generation_request_key.strip()
+    normalized_request_key = _normalize_sha256(
+        generation_request_key,
+        field_name="generation_request_key",
     )
-
-    if (
-        len(normalized_request_key) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character
-            in normalized_request_key
-        )
-    ):
-        raise ValueError(
-            "generation_request_key должен "
-            "быть lowercase SHA-256."
-        )
 
     async with pool.acquire() as connection:
         record = await connection.fetchrow(
@@ -799,8 +929,9 @@ async def recover_generated_post_id(
             SELECT generated_post_id
             FROM generated_posts
             WHERE batch_id = $1
-            ORDER BY version_number,
-                     generated_post_id
+            ORDER BY
+                version_number,
+                generated_post_id
             """,
             workflow.batch_id,
         )
@@ -900,8 +1031,8 @@ async def recover_image_generation_id(
             ]
         )
 
-    # Если все попытки failed, фиксируем последнюю:
-    # orchestrator увидит failed и не станет
+    # Если все попытки failed, фиксируем последнюю.
+    # Orchestrator увидит failed и не станет
     # выполнять неизвестный повтор автоматически.
     return int(
         records[0]["image_generation_id"]

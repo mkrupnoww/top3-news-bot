@@ -97,6 +97,68 @@ class _SingleConnectionPool:
         )
 
 
+async def _load_ranking_identity(
+    pool,
+) -> dict[str, str]:
+    """Читает identity production ranking fixture."""
+
+    async with pool.acquire() as connection:
+        record = await connection.fetchrow(
+            """
+            SELECT
+                formula_version,
+                model_name,
+                prompt_version,
+                parameters->>'run_mode'
+                    AS run_mode,
+                parameters->>'evaluator_name'
+                    AS evaluator_name,
+                parameters->>'evaluator_version'
+                    AS evaluator_version,
+                parameters->>'request_key_version'
+                    AS request_key_version
+            FROM ranking_runs
+            WHERE ranking_run_id = $1
+            """,
+            RANKING_RUN_ID,
+        )
+
+    if record is None:
+        raise LookupError(
+            "Production ranking fixture "
+            f"не найден: {RANKING_RUN_ID}"
+        )
+
+    fields = (
+        "formula_version",
+        "model_name",
+        "prompt_version",
+        "run_mode",
+        "evaluator_name",
+        "evaluator_version",
+        "request_key_version",
+    )
+
+    result: dict[str, str] = {}
+
+    for field_name in fields:
+        value = record[field_name]
+
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+        ):
+            raise ValueError(
+                "Ranking fixture identity "
+                "неполная: "
+                f"field={field_name}"
+            )
+
+        result[field_name] = value.strip()
+
+    return result
+
+
 async def main() -> int:
     """Проверяет checkpoint/recovery с rollback."""
 
@@ -126,6 +188,12 @@ async def main() -> int:
                     connection
                 )
 
+                ranking_identity = (
+                    await _load_ranking_identity(
+                        pool
+                    )
+                )
+
                 workflow = await reserve_daily_workflow(
                     pool,
                     publication_date=PUBLICATION_DATE,
@@ -140,12 +208,100 @@ async def main() -> int:
 
                 assert workflow.created_new is True
 
+                wrong_ranking_run_id = (
+                    await recover_ranking_run_id(
+                        pool,
+                        daily_workflow_run_id=(
+                            workflow
+                            .daily_workflow_run_id
+                        ),
+                        formula_version=(
+                            ranking_identity[
+                                "formula_version"
+                            ]
+                        ),
+                        model_name=(
+                            ranking_identity[
+                                "model_name"
+                            ]
+                        ),
+                        prompt_version=(
+                            ranking_identity[
+                                "prompt_version"
+                            ]
+                            + "-wrong"
+                        ),
+                        run_mode=(
+                            ranking_identity[
+                                "run_mode"
+                            ]
+                        ),
+                        evaluator_name=(
+                            ranking_identity[
+                                "evaluator_name"
+                            ]
+                        ),
+                        evaluator_version=(
+                            ranking_identity[
+                                "evaluator_version"
+                            ]
+                        ),
+                        request_key_version=(
+                            ranking_identity[
+                                "request_key_version"
+                            ]
+                        ),
+                    )
+                )
+
+                assert wrong_ranking_run_id is None
+
+                print(
+                    "Ranking recovery distinguishes "
+                    "runtime identity: OK"
+                )
+
                 ranking_run_id = (
                     await recover_ranking_run_id(
                         pool,
                         daily_workflow_run_id=(
                             workflow
                             .daily_workflow_run_id
+                        ),
+                        formula_version=(
+                            ranking_identity[
+                                "formula_version"
+                            ]
+                        ),
+                        model_name=(
+                            ranking_identity[
+                                "model_name"
+                            ]
+                        ),
+                        prompt_version=(
+                            ranking_identity[
+                                "prompt_version"
+                            ]
+                        ),
+                        run_mode=(
+                            ranking_identity[
+                                "run_mode"
+                            ]
+                        ),
+                        evaluator_name=(
+                            ranking_identity[
+                                "evaluator_name"
+                            ]
+                        ),
+                        evaluator_version=(
+                            ranking_identity[
+                                "evaluator_version"
+                            ]
+                        ),
+                        request_key_version=(
+                            ranking_identity[
+                                "request_key_version"
+                            ]
                         ),
                     )
                 )
