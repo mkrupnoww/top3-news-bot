@@ -1,0 +1,21 @@
+[Unit]
+Description=TOP 3 NEWS Daily Production Workflow
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=michael
+Group=michael
+WorkingDirectory=/opt/top3-news-bot
+
+ExecStart=/opt/top3-news-bot/.venv/bin/python /opt/top3-news-bot/scripts/run_scheduled_daily_production.py
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/top3-news-bot
+
+TimeoutStartSec=45min
+
+NoNewPrivileges=true
+PrivateTmp=true

@@ -10,6 +10,7 @@ BOT_SERVICE_NAME="top3-news-bot.service"
 TIMER_NAMES=(
     "top3-news-collector.timer"
     "top3-news-cleanup.timer"
+    "top3-news-daily.timer"
 )
 
 UNIT_NAMES=(
@@ -18,6 +19,8 @@ UNIT_NAMES=(
     "top3-news-collector.timer"
     "top3-news-cleanup.service"
     "top3-news-cleanup.timer"
+    "top3-news-daily.service"
+    "top3-news-daily.timer"
 )
 
 SYSTEMD_SOURCE_DIR="${PROJECT_DIR}/config/systemd"
@@ -153,3 +156,4 @@ log "Commit: ${CURRENT_COMMIT}"
 log "Bot service: active"
 log "Collector timer: active"
 log "Cleanup timer: active"
+log "Daily timer: active"
