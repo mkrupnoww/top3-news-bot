@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import asyncpg
 
@@ -159,6 +159,50 @@ async def _load_ranking_identity(
     return result
 
 
+async def _align_workflow_start_to_ranking_fixture(
+    pool,
+    *,
+    daily_workflow_run_id: int,
+) -> None:
+    """
+    Сдвигает started_at тестового workflow
+    к production fixture ranking_run=137.
+
+    Это нужно только rollback-тесту: production
+    workflow создаётся до своей ranking reservation.
+    """
+
+    async with pool.acquire() as connection:
+        ranking_created_at = await connection.fetchval(
+            """
+            SELECT created_at
+            FROM ranking_runs
+            WHERE ranking_run_id = $1
+            """,
+            RANKING_RUN_ID,
+        )
+
+        if not isinstance(
+            ranking_created_at,
+            datetime,
+        ):
+            raise LookupError(
+                "Production ranking fixture "
+                "created_at отсутствует."
+            )
+
+        await connection.execute(
+            """
+            UPDATE daily_workflow_runs
+            SET started_at = $2
+            WHERE daily_workflow_run_id = $1
+            """,
+            daily_workflow_run_id,
+            ranking_created_at
+            - timedelta(seconds=1),
+        )
+
+
 async def main() -> int:
     """Проверяет checkpoint/recovery с rollback."""
 
@@ -207,6 +251,16 @@ async def main() -> int:
                 )
 
                 assert workflow.created_new is True
+
+                await (
+                    _align_workflow_start_to_ranking_fixture(
+                        pool,
+                        daily_workflow_run_id=(
+                            workflow
+                            .daily_workflow_run_id
+                        ),
+                    )
+                )
 
                 wrong_ranking_run_id = (
                     await recover_ranking_run_id(

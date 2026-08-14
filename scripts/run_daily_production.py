@@ -102,12 +102,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _progress(
+    message: str,
+) -> None:
+    """Печатает этап немедленно для terminal/systemd journal."""
+
+    print(
+        message,
+        flush=True,
+    )
+
+
 async def async_main() -> int:
     """Запускает production daily workflow."""
 
     args = build_parser().parse_args()
 
     settings = get_settings()
+
+    _progress(
+        "Daily production workflow started"
+    )
+    _progress(
+        "publication_date="
+        f"{args.publication_date}"
+    )
+    _progress(
+        "as_of="
+        f"{args.as_of.isoformat()}"
+    )
 
     pool = await create_database_pool(
         settings
@@ -125,6 +148,7 @@ async def async_main() -> int:
                 candidate_limit=(
                     args.candidate_limit
                 ),
+                progress=_progress,
             )
         )
     finally:

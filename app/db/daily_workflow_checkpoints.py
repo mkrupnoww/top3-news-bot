@@ -661,8 +661,9 @@ async def recover_ranking_run_id(
     после crash-gap между reserve_ranking_run()
     и checkpoint observer.
 
-    Workflow cutoff/window и полная identity
-    текущего ranking runtime используются
+    Workflow cutoff/window, полная identity
+    текущего ranking runtime и короткое окно
+    после workflow.started_at используются
     для поиска совместимой reservation.
 
     Candidate set намеренно не вычисляется
@@ -744,20 +745,27 @@ async def recover_ranking_run_id(
         records = await connection.fetch(
             """
             SELECT
-                ranking_run_id,
-                request_key,
-                run_status
-            FROM ranking_runs
-            WHERE window_started_at = $1
-              AND window_finished_at = $2
-              AND formula_version = $3
-              AND model_name = $4
-              AND prompt_version = $5
-              AND parameters->>'run_mode' = $6
-              AND parameters->>'evaluator_name' = $7
-              AND parameters->>'evaluator_version' = $8
-              AND parameters->>'request_key_version' = $9
-            ORDER BY ranking_run_id
+                rr.ranking_run_id,
+                rr.request_key,
+                rr.run_status
+            FROM ranking_runs AS rr
+            JOIN daily_workflow_runs AS dw
+              ON dw.daily_workflow_run_id = $10
+            WHERE rr.window_started_at = $1
+              AND rr.window_finished_at = $2
+              AND rr.formula_version = $3
+              AND rr.model_name = $4
+              AND rr.prompt_version = $5
+              AND rr.parameters->>'run_mode' = $6
+              AND rr.parameters->>'evaluator_name' = $7
+              AND rr.parameters->>'evaluator_version' = $8
+              AND rr.parameters->>'request_key_version' = $9
+              AND rr.created_at >= dw.started_at
+              AND rr.created_at <= (
+                  dw.started_at
+                  + INTERVAL '15 minutes'
+              )
+            ORDER BY rr.ranking_run_id
             """,
             expected_start,
             workflow.as_of,
@@ -768,6 +776,7 @@ async def recover_ranking_run_id(
             normalized_evaluator_name,
             normalized_evaluator_version,
             normalized_request_key_version,
+            workflow.daily_workflow_run_id,
         )
 
     if not records:

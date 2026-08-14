@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import asyncpg
 from aiogram import Bot
@@ -58,6 +58,9 @@ from app.generation.request_key import (
     GenerationRequestKey,
     create_generation_request_key,
 )
+from app.ranking.event_request_key import (
+    EVENT_REQUEST_KEY_VERSION,
+)
 from app.ranking.full_formula import (
     FULL_FORMULA_VERSION,
 )
@@ -68,12 +71,22 @@ from app.ranking.openai_event_factory import (
 from app.ranking.openai_event_pipeline import (
     run_reserved_openai_event_ranking,
 )
-from app.ranking.request_key import (
-    REQUEST_KEY_VERSION,
-)
 
 
 logger = logging.getLogger(__name__)
+
+ProgressReporter = Callable[[str], None]
+
+
+def _report_progress(
+    progress: ProgressReporter | None,
+    message: str,
+) -> None:
+    """Best-effort сообщает текущий этап вызывающему коду."""
+
+    if progress is not None:
+        progress(message)
+
 
 _DAILY_WORKFLOW_LOCK_BASE = (
     730_000_000_000_000_000
@@ -371,7 +384,7 @@ def _ranking_recovery_identity(
         ),
         "request_key_version": (
             _required_text(
-                REQUEST_KEY_VERSION,
+                EVENT_REQUEST_KEY_VERSION,
                 field_name="request_key_version",
             )
         ),
@@ -560,6 +573,7 @@ async def run_daily_production_workflow(
     publication_date: date,
     as_of: datetime,
     candidate_limit: int = 500,
+    progress: ProgressReporter | None = None,
 ) -> DailyProductionResult:
     """
     Выполняет production pipeline до Telegram review.
@@ -618,6 +632,11 @@ async def run_daily_production_workflow(
         pool,
         publication_date=publication_date,
     ):
+        _report_progress(
+            progress,
+            "[daily] reserve/load workflow",
+        )
+
         workflow = await reserve_daily_workflow(
             pool,
             publication_date=publication_date,
@@ -660,6 +679,11 @@ async def run_daily_production_workflow(
             # ============================================================
             # Ranking
             # ============================================================
+
+            _report_progress(
+                progress,
+                "[ranking] resolve reservation/state",
+            )
 
             ranking_runtime = (
                 create_openai_event_ranking_runtime(
@@ -714,6 +738,11 @@ async def run_daily_production_workflow(
                             .ranking_run_id
                         ),
                     )
+
+                _report_progress(
+                    progress,
+                    "[ranking] run protected OpenAI ranking",
+                )
 
                 ranking_result = (
                     await run_reserved_openai_event_ranking(
@@ -781,6 +810,11 @@ async def run_daily_production_workflow(
                     f"{ranking_state.top3_news_ids!r}"
                 )
 
+            _report_progress(
+                progress,
+                f"[ranking] completed ranking_run_id={ranking_run_id}",
+            )
+
             selection = await load_generation_top3(
                 pool,
                 ranking_run_id=(
@@ -791,6 +825,11 @@ async def run_daily_production_workflow(
             # ============================================================
             # Text generation + automatic self-review
             # ============================================================
+
+            _report_progress(
+                progress,
+                "[generation] resolve reservation/state",
+            )
 
             generation_runtime = (
                 create_openai_generation_runtime(
@@ -849,6 +888,11 @@ async def run_daily_production_workflow(
                             reservation.batch_id
                         ),
                     )
+
+                _report_progress(
+                    progress,
+                    "[generation] run text + self-review",
+                )
 
                 generation_result = (
                     await run_reserved_openai_generation(
@@ -934,6 +978,11 @@ async def run_daily_production_workflow(
                 )
             )
 
+            _report_progress(
+                progress,
+                f"[generation] ready generated_post_id={generated_post_id}",
+            )
+
             await checkpoint_generated_post(
                 pool,
                 daily_workflow_run_id=(
@@ -947,6 +996,11 @@ async def run_daily_production_workflow(
             # ============================================================
             # Initial image
             # ============================================================
+
+            _report_progress(
+                progress,
+                "[image] resolve reservation/state",
+            )
 
             workflow = await load_daily_workflow(
                 pool,
@@ -1080,6 +1134,11 @@ async def run_daily_production_workflow(
                         ),
                     )
 
+                _report_progress(
+                    progress,
+                    "[image] run protected Image API",
+                )
+
                 image_result = (
                     await run_reserved_openai_image_generation(
                         pool,
@@ -1138,6 +1197,11 @@ async def run_daily_production_workflow(
                         f"image_status={image_status}"
                     )
 
+            _report_progress(
+                progress,
+                f"[image] completed image_generation_id={image_generation_id}",
+            )
+
             generation_state = (
                 await load_generation_workflow_state(
                     pool,
@@ -1165,6 +1229,11 @@ async def run_daily_production_workflow(
             # ============================================================
             # Native Telegram review delivery
             # ============================================================
+
+            _report_progress(
+                progress,
+                "[telegram] deliver native photo review",
+            )
 
             await mark_daily_workflow_stage(
                 pool,
@@ -1201,6 +1270,11 @@ async def run_daily_production_workflow(
                 delivery_result
             )
 
+            _report_progress(
+                progress,
+                "[telegram] delivery state verified",
+            )
+
             workflow = (
                 await complete_daily_workflow(
                     pool,
@@ -1215,6 +1289,11 @@ async def run_daily_production_workflow(
                     "Daily workflow не перешёл "
                     "в awaiting_review."
                 )
+
+            _report_progress(
+                progress,
+                "[daily] workflow awaiting_review",
+            )
 
             return DailyProductionResult(
                 daily_workflow_run_id=(
