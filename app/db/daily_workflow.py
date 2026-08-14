@@ -6,6 +6,13 @@ import asyncpg
 
 DAILY_WORKFLOW_VERSION = "daily_workflow_v1"
 
+
+class DailyWorkflowImageModerationRetryNotAllowedError(
+    ValueError
+):
+    """Workflow не удовлетворяет строгим условиям image moderation retry."""
+
+
 _RUNNING_STAGES = (
     "reserved",
     "ranking",
@@ -213,6 +220,370 @@ def _build_workflow(
             else None
         ),
         created_new=created_new,
+    )
+
+
+async def _require_image_moderation_retry_locked(
+    connection: asyncpg.Connection,
+    *,
+    workflow: asyncpg.Record,
+) -> int:
+    """
+    Проверяет право ровно на один повторный initial Image API call.
+
+    Retry разрешён только когда:
+    - workflow уже содержит ranking/batch/post/image IDs;
+    - batch/post остаются awaiting_review;
+    - у post нет сохранённого PNG;
+    - существует ровно одна initial image attempt;
+    - она совпадает с workflow.image_generation_id;
+    - она однозначно failed как BadRequestError/moderation_blocked.
+
+    Вторая initial attempt автоматически означает, что retry уже был
+    использован и третьего платного вызова быть не должно.
+    """
+
+    required_ids = (
+        "ranking_run_id",
+        "batch_id",
+        "generated_post_id",
+        "image_generation_id",
+    )
+
+    missing = [
+        field_name
+        for field_name in required_ids
+        if workflow[field_name] is None
+    ]
+
+    if missing:
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "не закреплены "
+                + ", ".join(missing)
+            )
+        )
+
+    batch_id = int(workflow["batch_id"])
+    post_id = int(workflow["generated_post_id"])
+    image_id = int(workflow["image_generation_id"])
+
+    generation = await connection.fetchrow(
+        """
+        SELECT
+            b.batch_id,
+            b.ranking_run_id,
+            b.batch_status,
+            p.generated_post_id,
+            p.post_status,
+            p.image_path,
+            p.image_sha256
+        FROM publication_batches AS b
+        JOIN generated_posts AS p
+          ON p.batch_id = b.batch_id
+        WHERE b.batch_id = $1
+          AND p.generated_post_id = $2
+        """,
+        batch_id,
+        post_id,
+    )
+
+    if generation is None:
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "batch/generated_post не найден."
+            )
+        )
+
+    if (
+        int(generation["ranking_run_id"])
+        != int(workflow["ranking_run_id"])
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "batch связан с другим ranking_run."
+            )
+        )
+
+    if (
+        generation["batch_status"] != "awaiting_review"
+        or generation["post_status"] != "awaiting_review"
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry разрешён "
+                "только для awaiting_review batch/post."
+            )
+        )
+
+    if (
+        generation["image_path"] is not None
+        or generation["image_sha256"] is not None
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "у generated_post уже есть image artifact."
+            )
+        )
+
+    attempts = await connection.fetch(
+        """
+        SELECT
+            image_generation_id,
+            image_status,
+            request_kind,
+            error_type,
+            error_message,
+            failed_at
+        FROM image_generation_requests
+        WHERE batch_id = $1
+          AND generated_post_id = $2
+          AND request_kind = 'initial'
+        ORDER BY image_generation_id
+        FOR UPDATE
+        """,
+        batch_id,
+        post_id,
+    )
+
+    if len(attempts) != 1:
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "должна существовать ровно одна "
+                "initial image attempt; "
+                f"actual={len(attempts)}."
+            )
+        )
+
+    attempt = attempts[0]
+
+    if int(attempt["image_generation_id"]) != image_id:
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "единственная initial attempt не совпадает "
+                "с workflow.image_generation_id."
+            )
+        )
+
+    if (
+        attempt["image_status"] != "failed"
+        or attempt["failed_at"] is None
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "initial attempt не имеет доказанный failed status."
+            )
+        )
+
+    error_type = str(
+        attempt["error_type"] or ""
+    ).strip()
+
+    error_message = str(
+        attempt["error_message"] or ""
+    ).strip().lower()
+
+    if (
+        error_type != "BadRequestError"
+        or "moderation_blocked" not in error_message
+    ):
+        raise (
+            DailyWorkflowImageModerationRetryNotAllowedError(
+                "Image moderation retry запрещён: "
+                "failure не является однозначным "
+                "BadRequestError/moderation_blocked."
+            )
+        )
+
+    return image_id
+
+
+async def require_daily_workflow_image_moderation_retry(
+    pool: asyncpg.Pool,
+    *,
+    daily_workflow_run_id: int,
+) -> int:
+    """
+    Проверяет право workflow на единственный moderation retry.
+
+    PostgreSQL не изменяется.
+    """
+
+    workflow_id = _positive_integer(
+        daily_workflow_run_id,
+        field_name="daily_workflow_run_id",
+    )
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            workflow = await connection.fetchrow(
+                """
+                SELECT
+                    daily_workflow_run_id,
+                    workflow_status,
+                    current_stage,
+                    ranking_run_id,
+                    batch_id,
+                    generated_post_id,
+                    image_generation_id
+                FROM daily_workflow_runs
+                WHERE daily_workflow_run_id = $1
+                FOR UPDATE
+                """,
+                workflow_id,
+            )
+
+            if workflow is None:
+                raise LookupError(
+                    "daily_workflow_run не найден: "
+                    f"daily_workflow_run_id={workflow_id}"
+                )
+
+            if workflow["workflow_status"] not in {
+                "running",
+                "failed",
+            }:
+                raise (
+                    DailyWorkflowImageModerationRetryNotAllowedError(
+                        "Image moderation retry запрещён "
+                        "для workflow_status="
+                        f"{workflow['workflow_status']}."
+                    )
+                )
+
+            if (
+                workflow["workflow_status"] == "running"
+                and workflow["current_stage"] != "image"
+            ):
+                raise (
+                    DailyWorkflowImageModerationRetryNotAllowedError(
+                        "Running workflow может retry image "
+                        "только на current_stage=image."
+                    )
+                )
+
+            if (
+                workflow["workflow_status"] == "failed"
+                and workflow["current_stage"] != "failed"
+            ):
+                raise (
+                    DailyWorkflowImageModerationRetryNotAllowedError(
+                        "Failed workflow имеет некорректную "
+                        f"current_stage={workflow['current_stage']}."
+                    )
+                )
+
+            return await _require_image_moderation_retry_locked(
+                connection,
+                workflow=workflow,
+            )
+
+
+async def reopen_daily_workflow_for_image_moderation_retry(
+    pool: asyncpg.Pool,
+    *,
+    daily_workflow_run_id: int,
+) -> DailyWorkflowRun:
+    """
+    Reopen failed workflow только для единственного image moderation retry.
+
+    Старый failed image_generation_id сохраняется до новой reservation.
+    """
+
+    workflow_id = _positive_integer(
+        daily_workflow_run_id,
+        field_name="daily_workflow_run_id",
+    )
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            workflow = await connection.fetchrow(
+                """
+                SELECT
+                    daily_workflow_run_id,
+                    publication_date,
+                    workflow_version,
+                    workflow_status,
+                    current_stage,
+                    as_of,
+                    window_hours,
+                    target_telegram_chat_id,
+                    ranking_run_id,
+                    batch_id,
+                    generated_post_id,
+                    image_generation_id
+                FROM daily_workflow_runs
+                WHERE daily_workflow_run_id = $1
+                FOR UPDATE
+                """,
+                workflow_id,
+            )
+
+            if workflow is None:
+                raise LookupError(
+                    "daily_workflow_run не найден: "
+                    f"daily_workflow_run_id={workflow_id}"
+                )
+
+            if (
+                workflow["workflow_status"] != "failed"
+                or workflow["current_stage"] != "failed"
+            ):
+                raise (
+                    DailyWorkflowImageModerationRetryNotAllowedError(
+                        "Reopen разрешён только для "
+                        "failed/failed daily workflow."
+                    )
+                )
+
+            await _require_image_moderation_retry_locked(
+                connection,
+                workflow=workflow,
+            )
+
+            updated = await connection.fetchrow(
+                """
+                UPDATE daily_workflow_runs
+                SET
+                    workflow_status = 'running',
+                    current_stage = 'image',
+                    error_type = NULL,
+                    error_message = NULL,
+                    finished_at = NULL
+                WHERE daily_workflow_run_id = $1
+                RETURNING
+                    daily_workflow_run_id,
+                    publication_date,
+                    workflow_version,
+                    workflow_status,
+                    current_stage,
+                    as_of,
+                    window_hours,
+                    target_telegram_chat_id,
+                    ranking_run_id,
+                    batch_id,
+                    generated_post_id,
+                    image_generation_id
+                """,
+                workflow_id,
+            )
+
+    if updated is None:
+        raise RuntimeError(
+            "Не удалось reopen daily workflow "
+            "для image moderation retry."
+        )
+
+    return _build_workflow(
+        updated,
+        created_new=False,
     )
 
 

@@ -16,11 +16,14 @@ from app.bot.review_delivery_service import (
 from app.config import Settings
 from app.db.daily_workflow import (
     DAILY_WORKFLOW_VERSION,
+    DailyWorkflowImageModerationRetryNotAllowedError,
     DailyWorkflowRun,
     complete_daily_workflow,
     fail_daily_workflow,
     load_daily_workflow,
     mark_daily_workflow_stage,
+    reopen_daily_workflow_for_image_moderation_retry,
+    require_daily_workflow_image_moderation_retry,
     reserve_daily_workflow,
 )
 from app.db.daily_workflow_checkpoints import (
@@ -594,7 +597,9 @@ async def run_daily_production_workflow(
     OpenAI/Telegram не вызывают.
 
     Failed и orphan/uncertain child states
-    автоматически не переигрываются.
+    автоматически не переигрываются, кроме
+    ровно одного initial image retry после
+    однозначного BadRequestError/moderation_blocked.
     """
 
     if (
@@ -655,13 +660,38 @@ async def run_daily_production_workflow(
                 workflow
             )
 
+        image_moderation_retry_consumed = False
+
         if workflow.failed:
-            raise (
-                DailyProductionWorkflowTerminalError(
-                    "Daily workflow уже failed: "
-                    f"daily_workflow_run_id="
-                    f"{workflow.daily_workflow_run_id}"
+            try:
+                workflow = (
+                    await
+                    reopen_daily_workflow_for_image_moderation_retry(
+                        pool,
+                        daily_workflow_run_id=(
+                            workflow.daily_workflow_run_id
+                        ),
+                    )
                 )
+            except (
+                DailyWorkflowImageModerationRetryNotAllowedError
+            ) as retry_error:
+                raise (
+                    DailyProductionWorkflowTerminalError(
+                        "Daily workflow уже failed "
+                        "и не допускает automatic retry: "
+                        f"daily_workflow_run_id="
+                        f"{workflow.daily_workflow_run_id}; "
+                        f"reason={retry_error}"
+                    )
+                ) from retry_error
+
+            image_moderation_retry_consumed = True
+
+            _report_progress(
+                progress,
+                "[daily] reopen failed workflow "
+                "for one image moderation retry",
             )
 
         if not workflow.running:
@@ -1034,91 +1064,51 @@ async def run_daily_production_workflow(
                         ),
                     )
 
-            if image_generation_id is not None:
-                image_generation_id = (
-                    _positive_integer(
-                        image_generation_id,
-                        field_name=(
-                            "image_generation_id"
-                        ),
-                    )
-                )
+            async def run_initial_image_once(
+                *,
+                moderation_retry: bool,
+            ) -> int:
+                """Выполняет ровно одну protected initial image attempt."""
 
-                image_status = (
-                    await _load_image_request_status(
-                        pool,
-                        image_generation_id=(
-                            image_generation_id
-                        ),
-                        expected_batch_id=batch_id,
-                        expected_generated_post_id=(
-                            generated_post_id
-                        ),
-                    )
-                )
+                nonlocal image_runtime
+                nonlocal image_model_called
 
-                if image_status == "failed":
-                    raise DailyProductionWorkflowError(
-                        "Initial image child stage "
-                        "failed: "
-                        f"image_generation_id="
-                        f"{image_generation_id}"
-                    )
-
-                if image_status == "reserved":
-                    raise (
-                        DailyProductionWorkflowOrphanError(
-                            "Initial image reservation "
-                            "осталась reserved. "
-                            "Автоматический повтор "
-                            "Image API запрещён: "
-                            f"image_generation_id="
-                            f"{image_generation_id}"
+                if not moderation_retry:
+                    generation_state = (
+                        await load_generation_workflow_state(
+                            pool,
+                            batch_id=batch_id,
                         )
                     )
 
-                if image_status != "completed":
-                    raise DailyProductionWorkflowError(
-                        "Неподдерживаемый "
-                        "image_status: "
-                        f"{image_status!r}"
-                    )
+                    if (
+                        generation_state
+                        .image_state_inconsistent
+                    ):
+                        raise DailyProductionWorkflowError(
+                            "Generation/image state "
+                            "несогласован до Image API: "
+                            f"batch_id={batch_id}"
+                        )
 
-            else:
-                generation_state = (
-                    await load_generation_workflow_state(
-                        pool,
-                        batch_id=batch_id,
-                    )
-                )
+                    if (
+                        not generation_state
+                        .ready_for_image
+                    ):
+                        raise DailyProductionWorkflowError(
+                            "Post не готов к initial "
+                            "image generation: "
+                            f"batch_id={batch_id}, "
+                            f"generated_post_id="
+                            f"{generated_post_id}"
+                        )
 
-                if (
-                    generation_state
-                    .image_state_inconsistent
-                ):
-                    raise DailyProductionWorkflowError(
-                        "Generation/image state "
-                        "несогласован до Image API: "
-                        f"batch_id={batch_id}"
+                if image_runtime is None:
+                    image_runtime = (
+                        create_openai_image_generation_runtime(
+                            settings
+                        )
                     )
-
-                if (
-                    not generation_state
-                    .ready_for_image
-                ):
-                    raise DailyProductionWorkflowError(
-                        "Post не готов к initial "
-                        "image generation: "
-                        f"batch_id={batch_id}, "
-                        f"generated_post_id="
-                        f"{generated_post_id}"
-                    )
-
-                image_runtime = (
-                    create_openai_image_generation_runtime(
-                        settings
-                    )
-                )
 
                 async def image_observer(
                     reservation,
@@ -1158,14 +1148,44 @@ async def run_daily_production_workflow(
                 )
 
                 image_model_called = (
-                    image_result.model_called
+                    image_model_called
+                    or image_result.model_called
                 )
 
-                image_generation_id = (
-                    image_result
-                    .image_generation_id
+                result_image_id = (
+                    _positive_integer(
+                        image_result.image_generation_id,
+                        field_name=(
+                            "image_generation_id"
+                        ),
+                    )
                 )
 
+                result_status = (
+                    await _load_image_request_status(
+                        pool,
+                        image_generation_id=(
+                            result_image_id
+                        ),
+                        expected_batch_id=batch_id,
+                        expected_generated_post_id=(
+                            generated_post_id
+                        ),
+                    )
+                )
+
+                if result_status != "completed":
+                    raise DailyProductionWorkflowError(
+                        "Image pipeline не завершился "
+                        "в completed: "
+                        f"image_generation_id="
+                        f"{result_image_id}, "
+                        f"image_status={result_status}"
+                    )
+
+                return result_image_id
+
+            if image_generation_id is not None:
                 image_generation_id = (
                     _positive_integer(
                         image_generation_id,
@@ -1188,14 +1208,121 @@ async def run_daily_production_workflow(
                     )
                 )
 
-                if image_status != "completed":
-                    raise DailyProductionWorkflowError(
-                        "Image pipeline не завершился "
-                        "в completed: "
-                        f"image_generation_id="
-                        f"{image_generation_id}, "
-                        f"image_status={image_status}"
+                if image_status == "failed":
+                    try:
+                        await (
+                            require_daily_workflow_image_moderation_retry(
+                                pool,
+                                daily_workflow_run_id=(
+                                    workflow_id
+                                ),
+                            )
+                        )
+                    except (
+                        DailyWorkflowImageModerationRetryNotAllowedError
+                    ) as retry_error:
+                        raise DailyProductionWorkflowError(
+                            "Initial image child stage "
+                            "failed и automatic retry "
+                            "запрещён: "
+                            f"image_generation_id="
+                            f"{image_generation_id}; "
+                            f"reason={retry_error}"
+                        ) from retry_error
+
+                    image_moderation_retry_consumed = True
+
+                    _report_progress(
+                        progress,
+                        "[image] retry once after "
+                        "definitive moderation_blocked",
                     )
+
+                    image_generation_id = None
+
+                elif image_status == "reserved":
+                    raise (
+                        DailyProductionWorkflowOrphanError(
+                            "Initial image reservation "
+                            "осталась reserved. "
+                            "Автоматический повтор "
+                            "Image API запрещён: "
+                            f"image_generation_id="
+                            f"{image_generation_id}"
+                        )
+                    )
+
+                elif image_status != "completed":
+                    raise DailyProductionWorkflowError(
+                        "Неподдерживаемый "
+                        "image_status: "
+                        f"{image_status!r}"
+                    )
+
+            if image_generation_id is None:
+                try:
+                    image_generation_id = (
+                        await run_initial_image_once(
+                            moderation_retry=(
+                                image_moderation_retry_consumed
+                            ),
+                        )
+                    )
+                except Exception as image_error:
+                    if image_moderation_retry_consumed:
+                        raise
+
+                    workflow_after_error = (
+                        await load_daily_workflow(
+                            pool,
+                            daily_workflow_run_id=(
+                                workflow_id
+                            ),
+                        )
+                    )
+
+                    if (
+                        workflow_after_error
+                        .image_generation_id
+                        is None
+                    ):
+                        raise
+
+                    try:
+                        await (
+                            require_daily_workflow_image_moderation_retry(
+                                pool,
+                                daily_workflow_run_id=(
+                                    workflow_id
+                                ),
+                            )
+                        )
+                    except (
+                        DailyWorkflowImageModerationRetryNotAllowedError
+                    ):
+                        raise image_error
+
+                    image_model_called = True
+                    image_moderation_retry_consumed = True
+
+                    _report_progress(
+                        progress,
+                        "[image] moderation_blocked; "
+                        "retry initial image once",
+                    )
+
+                    image_generation_id = (
+                        await run_initial_image_once(
+                            moderation_retry=True,
+                        )
+                    )
+
+            image_generation_id = (
+                _positive_integer(
+                    image_generation_id,
+                    field_name="image_generation_id",
+                )
+            )
 
             _report_progress(
                 progress,

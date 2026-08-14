@@ -613,12 +613,50 @@ async def checkpoint_image_reservation(
                 and int(existing_image_id)
                 != normalized_image_id
             ):
-                raise ValueError(
-                    "Daily workflow уже связан "
-                    "с другим image_generation_id: "
-                    f"existing={existing_image_id}, "
-                    f"new={normalized_image_id}"
+                existing_image = await connection.fetchrow(
+                    """
+                    SELECT
+                        image_generation_id,
+                        batch_id,
+                        generated_post_id,
+                        request_kind,
+                        image_status
+                    FROM image_generation_requests
+                    WHERE image_generation_id = $1
+                    FOR UPDATE
+                    """,
+                    int(existing_image_id),
                 )
+
+                if existing_image is None:
+                    raise ValueError(
+                        "Daily workflow связан "
+                        "с отсутствующим previous "
+                        "image_generation_id: "
+                        f"{existing_image_id}"
+                    )
+
+                replace_allowed = (
+                    existing_image["request_kind"]
+                    == "initial"
+                    and existing_image["image_status"]
+                    == "failed"
+                    and existing_image["batch_id"]
+                    == workflow["batch_id"]
+                    and existing_image[
+                        "generated_post_id"
+                    ]
+                    == workflow["generated_post_id"]
+                )
+
+                if not replace_allowed:
+                    raise ValueError(
+                        "Daily workflow уже связан "
+                        "с другим active/non-failed "
+                        "image_generation_id: "
+                        f"existing={existing_image_id}, "
+                        f"new={normalized_image_id}"
+                    )
 
             target_stage = _advance_stage(
                 workflow["current_stage"],
