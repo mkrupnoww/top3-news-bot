@@ -48,6 +48,7 @@ from app.generation.openai_factory import (
     create_openai_generation_runtime,
 )
 from app.generation.image_generator import (
+    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
     OPENAI_IMAGE_PROMPT_VERSION,
 )
 from app.generation.openai_image_factory import (
@@ -601,9 +602,12 @@ async def run_daily_production_workflow(
 
     Failed и orphan/uncertain child states
     автоматически не переигрываются, кроме
-    Image API moderation_blocked: для каждой
-    prompt_version допускается максимум две
-    доказанные initial attempts.
+    доказанного Image API moderation_blocked.
+
+    Обычная генерация использует основной image prompt.
+    После moderation_blocked повтор выполняется через отдельный
+    moderation-safe editorial fallback с собственной prompt_version
+    и собственным request key.
     """
 
     if (
@@ -665,7 +669,8 @@ async def run_daily_production_workflow(
             )
 
         image_recovery_from_failed_request = False
-        image_prompt_attempts_used = 0
+        image_use_moderation_safe_fallback = False
+        image_fallback_attempts_used = 0
 
         if workflow.failed:
             try:
@@ -677,12 +682,12 @@ async def run_daily_production_workflow(
                             workflow.daily_workflow_run_id
                         ),
                         prompt_version=(
-                            OPENAI_IMAGE_PROMPT_VERSION
+                            OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                         ),
                     )
                 )
 
-                image_prompt_attempts_used = (
+                image_fallback_attempts_used = (
                     await
                     require_daily_workflow_image_moderation_retry(
                         pool,
@@ -690,7 +695,7 @@ async def run_daily_production_workflow(
                             workflow.daily_workflow_run_id
                         ),
                         prompt_version=(
-                            OPENAI_IMAGE_PROMPT_VERSION
+                            OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                         ),
                     )
                 )
@@ -700,25 +705,27 @@ async def run_daily_production_workflow(
                 raise (
                     DailyProductionWorkflowTerminalError(
                         "Daily workflow уже failed "
-                        "и не допускает automatic image attempt "
-                        "для текущей prompt_version: "
+                        "и не допускает moderation-safe "
+                        "image fallback: "
                         f"daily_workflow_run_id="
                         f"{workflow.daily_workflow_run_id}; "
-                        f"prompt_version="
-                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                        f"fallback_prompt_version="
+                        f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}; "
                         f"reason={retry_error}"
                     )
                 ) from retry_error
 
             image_recovery_from_failed_request = True
+            image_use_moderation_safe_fallback = True
 
             _report_progress(
                 progress,
                 "[daily] reopen failed workflow "
-                "for image prompt version "
-                f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                "for moderation-safe image fallback "
+                f"prompt_version="
+                f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}; "
                 f"attempts_used="
-                f"{image_prompt_attempts_used}",
+                f"{image_fallback_attempts_used}",
             )
 
         if not workflow.running:
@@ -1094,6 +1101,7 @@ async def run_daily_production_workflow(
             async def run_initial_image_once(
                 *,
                 recovery_from_failed_request: bool,
+                use_moderation_safe_fallback: bool,
             ) -> int:
                 """Выполняет ровно одну protected initial image attempt."""
 
@@ -1137,6 +1145,16 @@ async def run_daily_production_workflow(
                         )
                     )
 
+                image_runtime.generator.set_moderation_safe_editorial_fallback(
+                    use_moderation_safe_fallback
+                )
+
+                expected_prompt_version = (
+                    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
+                    if use_moderation_safe_fallback
+                    else OPENAI_IMAGE_PROMPT_VERSION
+                )
+
                 actual_prompt_version = (
                     image_runtime
                     .generator
@@ -1146,14 +1164,14 @@ async def run_daily_production_workflow(
 
                 if (
                     actual_prompt_version
-                    != OPENAI_IMAGE_PROMPT_VERSION
+                    != expected_prompt_version
                 ):
                     raise DailyProductionWorkflowError(
                         "Image runtime prompt_version "
-                        "не совпадает с production constant: "
+                        "не совпадает с выбранным режимом: "
                         f"runtime={actual_prompt_version}, "
                         f"expected="
-                        f"{OPENAI_IMAGE_PROMPT_VERSION}"
+                        f"{expected_prompt_version}"
                     )
 
                 async def image_observer(
@@ -1174,7 +1192,9 @@ async def run_daily_production_workflow(
                     progress,
                     "[image] run protected Image API "
                     f"prompt_version="
-                    f"{OPENAI_IMAGE_PROMPT_VERSION}",
+                    f"{expected_prompt_version}; "
+                    f"moderation_safe_fallback="
+                    f"{use_moderation_safe_fallback}",
                 )
 
                 image_result = (
@@ -1258,7 +1278,7 @@ async def run_daily_production_workflow(
 
                 if image_status == "failed":
                     try:
-                        image_prompt_attempts_used = (
+                        image_fallback_attempts_used = (
                             await
                             require_daily_workflow_image_moderation_retry(
                                 pool,
@@ -1266,7 +1286,7 @@ async def run_daily_production_workflow(
                                     workflow_id
                                 ),
                                 prompt_version=(
-                                    OPENAI_IMAGE_PROMPT_VERSION
+                                    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                                 ),
                             )
                         )
@@ -1275,24 +1295,25 @@ async def run_daily_production_workflow(
                     ) as retry_error:
                         raise DailyProductionWorkflowError(
                             "Initial image child stage "
-                            "failed и automatic attempt "
-                            "для текущей prompt_version запрещён: "
+                            "failed и moderation-safe fallback "
+                            "запрещён: "
                             f"image_generation_id="
                             f"{image_generation_id}; "
-                            f"prompt_version="
-                            f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                            f"fallback_prompt_version="
+                            f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}; "
                             f"reason={retry_error}"
                         ) from retry_error
 
                     image_recovery_from_failed_request = True
+                    image_use_moderation_safe_fallback = True
 
                     _report_progress(
                         progress,
-                        "[image] next attempt for "
+                        "[image] next moderation-safe fallback "
                         f"prompt_version="
-                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                        f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}; "
                         f"attempts_used="
-                        f"{image_prompt_attempts_used}",
+                        f"{image_fallback_attempts_used}",
                     )
 
                     image_generation_id = None
@@ -1337,6 +1358,9 @@ async def run_daily_production_workflow(
                             recovery_from_failed_request=(
                                 image_recovery_from_failed_request
                             ),
+                            use_moderation_safe_fallback=(
+                                image_use_moderation_safe_fallback
+                            ),
                         )
                     )
                 except Exception as image_error:
@@ -1362,7 +1386,7 @@ async def run_daily_production_workflow(
                         raise
 
                     try:
-                        image_prompt_attempts_used = (
+                        image_fallback_attempts_used = (
                             await
                             require_daily_workflow_image_moderation_retry(
                                 pool,
@@ -1370,7 +1394,7 @@ async def run_daily_production_workflow(
                                     workflow_id
                                 ),
                                 prompt_version=(
-                                    OPENAI_IMAGE_PROMPT_VERSION
+                                    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                                 ),
                             )
                         )
@@ -1381,20 +1405,22 @@ async def run_daily_production_workflow(
 
                     image_model_called = True
                     image_recovery_from_failed_request = True
+                    image_use_moderation_safe_fallback = True
 
                     _report_progress(
                         progress,
                         "[image] moderation_blocked; "
-                        "one more attempt allowed for "
+                        "switch to moderation-safe editorial fallback "
                         f"prompt_version="
-                        f"{OPENAI_IMAGE_PROMPT_VERSION}; "
+                        f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}; "
                         f"attempts_used="
-                        f"{image_prompt_attempts_used}",
+                        f"{image_fallback_attempts_used}",
                     )
 
                     image_generation_id = (
                         await run_initial_image_once(
                             recovery_from_failed_request=True,
+                            use_moderation_safe_fallback=True,
                         )
                     )
 

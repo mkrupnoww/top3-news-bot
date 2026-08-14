@@ -18,7 +18,12 @@ from app.db.pool import (
     create_database_pool,
 )
 from app.generation.image_generator import (
+    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
     OPENAI_IMAGE_PROMPT_VERSION,
+    ImageGenerationNewsItem,
+    ImageModelRequest,
+    ImageModelResponse,
+    OpenAIMovieNewsImageGenerator,
 )
 
 
@@ -26,9 +31,25 @@ WORKFLOW_ID = 12
 RANKING_RUN_ID = 141
 BATCH_ID = 65
 GENERATED_POST_ID = 61
-LINKED_FAILED_IMAGE_ID = 23
-OLD_PROMPT_VERSION = "movie_news_image_v1"
-EXPECTED_CURRENT_PROMPT_VERSION = "movie_news_image_v2"
+LINKED_FAILED_IMAGE_ID = 27
+
+OLD_PROMPT_VERSION_V1 = "movie_news_image_v1"
+NORMAL_PROMPT_VERSION = "movie_news_image_v2"
+EXPECTED_FALLBACK_PROMPT_VERSION = (
+    "movie_news_image_moderation_fallback_v1"
+)
+
+
+class _NeverCalledImageClient:
+    """Image client, который не должен вызываться в rollback test."""
+
+    async def create_image(
+        self,
+        request: ImageModelRequest,
+    ) -> ImageModelResponse:
+        raise AssertionError(
+            "Image API не должен вызываться."
+        )
 
 
 class _SingleConnectionAcquire:
@@ -78,7 +99,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-v2-retry-test:"
+        "daily-workflow-moderation-fallback-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -88,10 +109,100 @@ def _synthetic_request_key(
     ).hexdigest()
 
 
+def _assert_generator_fallback_identity() -> None:
+    """Проверяет, что fallback реально меняет prompt и metadata identity."""
+
+    generator = OpenAIMovieNewsImageGenerator(
+        client=_NeverCalledImageClient(),
+        model_name="gpt-image-2",
+        size="1024x1536",
+        quality="medium",
+    )
+
+    items = (
+        ImageGenerationNewsItem(
+            position=1,
+            news_id=892,
+            title=(
+                "The War Over Warner Bros. "
+                "Is Splintering Hollywood’s Labor World"
+            ),
+            summary=(
+                "Rob Bonta and David Ellison are dividing "
+                "the unions around the antitrust battle."
+            ),
+        ),
+        ImageGenerationNewsItem(
+            position=2,
+            news_id=832,
+            title=(
+                "Spider-Man: Brand New Day Becomes Fastest "
+                "Movie to Hit $700M at Domestic Box Office"
+            ),
+            summary=(
+                "Tom Holland's blockbuster continues "
+                "to make history for Sony."
+            ),
+        ),
+        ImageGenerationNewsItem(
+            position=3,
+            news_id=888,
+            title=(
+                "NY Film Festival Sets Currents Lineup "
+                "Led by Bardi World Premiere"
+            ),
+            summary=(
+                "The section includes 15 features "
+                "and 28 shorts."
+            ),
+        ),
+    )
+
+    normal_metadata = generator.metadata
+    normal_request = generator.build_request(
+        items=items
+    )
+
+    assert (
+        normal_metadata.prompt_version
+        == NORMAL_PROMPT_VERSION
+    )
+
+    generator.set_moderation_safe_editorial_fallback(
+        True
+    )
+
+    fallback_metadata = generator.metadata
+    fallback_request = generator.build_request(
+        items=items
+    )
+
+    assert (
+        fallback_metadata.prompt_version
+        == EXPECTED_FALLBACK_PROMPT_VERSION
+    )
+    assert (
+        fallback_request.prompt
+        != normal_request.prompt
+    )
+    assert (
+        "БЕЗОПАСНЫЙ РЕДАКЦИОННЫЙ FALLBACK"
+        in fallback_request.prompt
+    )
+    assert (
+        '"moderation_safe_editorial_fallback"'
+        in fallback_request.prompt
+    )
+
+    print(
+        "Fallback changes model request and prompt identity: OK"
+    )
+
+
 async def _assert_production_fixture(
     pool,
 ) -> None:
-    """Проверяет неизменный production incident fixture."""
+    """Проверяет текущий production incident fixture."""
 
     workflow = await load_daily_workflow(
         pool,
@@ -158,25 +269,41 @@ async def _assert_production_fixture(
     assert generation["image_path"] is None
     assert generation["image_sha256"] is None
 
-    old_attempts = [
-        row
-        for row in attempts
-        if row["prompt_version"] == OLD_PROMPT_VERSION
-    ]
-
-    current_attempts = [
+    v1_attempts = [
         row
         for row in attempts
         if (
             row["prompt_version"]
-            == EXPECTED_CURRENT_PROMPT_VERSION
+            == OLD_PROMPT_VERSION_V1
         )
     ]
 
-    assert len(old_attempts) == 2
-    assert len(current_attempts) == 0
+    normal_attempts = [
+        row
+        for row in attempts
+        if (
+            row["prompt_version"]
+            == NORMAL_PROMPT_VERSION
+        )
+    ]
 
-    for row in old_attempts:
+    fallback_attempts = [
+        row
+        for row in attempts
+        if (
+            row["prompt_version"]
+            == EXPECTED_FALLBACK_PROMPT_VERSION
+        )
+    ]
+
+    assert len(v1_attempts) == 2
+    assert len(normal_attempts) == 2
+    assert len(fallback_attempts) == 0
+
+    for row in (
+        *v1_attempts,
+        *normal_attempts,
+    ):
         assert row["image_status"] == "failed"
         assert row["error_type"] == "BadRequestError"
         assert row["failed_at"] is not None
@@ -185,12 +312,12 @@ async def _assert_production_fixture(
         )
 
 
-async def _insert_synthetic_v2_reservation(
+async def _insert_synthetic_fallback_reservation(
     pool,
     *,
     attempt_number: int,
 ) -> int:
-    """Создаёт synthetic v2 reservation внутри rollback transaction."""
+    """Создаёт synthetic fallback reservation внутри rollback transaction."""
 
     request_key = _synthetic_request_key(
         attempt_number=attempt_number
@@ -231,7 +358,7 @@ async def _insert_synthetic_v2_reservation(
                 editorial_comment,
                 issues,
                 model_name,
-                generator_version,
+                'openai_movie_news_image_generator_v2',
                 $3,
                 image_size,
                 image_quality,
@@ -246,12 +373,12 @@ async def _insert_synthetic_v2_reservation(
             """,
             LINKED_FAILED_IMAGE_ID,
             request_key,
-            EXPECTED_CURRENT_PROMPT_VERSION,
+            EXPECTED_FALLBACK_PROMPT_VERSION,
         )
 
     if image_generation_id is None:
         raise RuntimeError(
-            "Не удалось создать synthetic v2 reservation."
+            "Не удалось создать synthetic fallback reservation."
         )
 
     return int(image_generation_id)
@@ -284,23 +411,33 @@ async def _mark_synthetic_moderation_failed(
 
     if result != "UPDATE 1":
         raise RuntimeError(
-            "Не удалось перевести synthetic image "
+            "Не удалось перевести synthetic fallback "
             "reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет version-aware budget без OpenAI/Telegram."""
+    """Проверяет safe fallback identity и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
-        != EXPECTED_CURRENT_PROMPT_VERSION
+        != NORMAL_PROMPT_VERSION
     ):
         raise AssertionError(
-            "Тест требует current prompt_version="
-            f"{EXPECTED_CURRENT_PROMPT_VERSION}, "
-            f"actual={OPENAI_IMAGE_PROMPT_VERSION}"
+            "Неожиданная normal prompt_version: "
+            f"{OPENAI_IMAGE_PROMPT_VERSION}"
         )
+
+    if (
+        OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
+        != EXPECTED_FALLBACK_PROMPT_VERSION
+    ):
+        raise AssertionError(
+            "Неожиданная fallback prompt_version: "
+            f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}"
+        )
+
+    _assert_generator_fallback_identity()
 
     settings = get_settings()
     database_pool = await create_database_pool(
@@ -329,7 +466,7 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         prompt_version=(
-                            OPENAI_IMAGE_PROMPT_VERSION
+                            OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                         ),
                     )
                 )
@@ -337,7 +474,7 @@ async def main() -> int:
                 assert attempts_used == 0
 
                 print(
-                    "New prompt version has fresh budget: OK"
+                    "Fallback prompt version has fresh budget: OK"
                 )
 
                 workflow = (
@@ -348,7 +485,7 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         prompt_version=(
-                            OPENAI_IMAGE_PROMPT_VERSION
+                            OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                         ),
                     )
                 )
@@ -361,11 +498,11 @@ async def main() -> int:
                 )
 
                 print(
-                    "Failed v1 workflow reopens for v2: OK"
+                    "Failed normal workflow reopens for fallback: OK"
                 )
 
-                first_v2_id = (
-                    await _insert_synthetic_v2_reservation(
+                first_fallback_id = (
+                    await _insert_synthetic_fallback_reservation(
                         pool,
                         attempt_number=1,
                     )
@@ -378,20 +515,20 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         image_generation_id=(
-                            first_v2_id
+                            first_fallback_id
                         ),
                     )
                 )
 
                 assert (
                     workflow.image_generation_id
-                    == first_v2_id
+                    == first_fallback_id
                 )
 
                 await _mark_synthetic_moderation_failed(
                     pool,
                     image_generation_id=(
-                        first_v2_id
+                        first_fallback_id
                     ),
                 )
 
@@ -403,7 +540,7 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         prompt_version=(
-                            OPENAI_IMAGE_PROMPT_VERSION
+                            OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                         ),
                     )
                 )
@@ -411,12 +548,11 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second v2 attempt allowed after "
-                    "first moderation block: OK"
+                    "Second fallback attempt allowed: OK"
                 )
 
-                second_v2_id = (
-                    await _insert_synthetic_v2_reservation(
+                second_fallback_id = (
+                    await _insert_synthetic_fallback_reservation(
                         pool,
                         attempt_number=2,
                     )
@@ -429,20 +565,20 @@ async def main() -> int:
                             WORKFLOW_ID
                         ),
                         image_generation_id=(
-                            second_v2_id
+                            second_fallback_id
                         ),
                     )
                 )
 
                 assert (
                     workflow.image_generation_id
-                    == second_v2_id
+                    == second_fallback_id
                 )
 
                 await _mark_synthetic_moderation_failed(
                     pool,
                     image_generation_id=(
-                        second_v2_id
+                        second_fallback_id
                     ),
                 )
 
@@ -454,7 +590,7 @@ async def main() -> int:
                                 WORKFLOW_ID
                             ),
                             prompt_version=(
-                                OPENAI_IMAGE_PROMPT_VERSION
+                                OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
                             ),
                         )
                     )
@@ -462,11 +598,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third v2 attempt blocked: OK"
+                        "Third fallback attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух v2 moderation failures "
+                        "После двух fallback failures "
                         "третья попытка не была заблокирована."
                     )
 
@@ -482,7 +618,7 @@ async def main() -> int:
         print("OpenAI requests=not_performed")
         print("Telegram requests=not_performed")
         print(
-            "Version-aware image moderation retry test: OK"
+            "Moderation-safe image fallback test: OK"
         )
 
         return 0

@@ -5,11 +5,15 @@ from typing import Literal, Protocol, runtime_checkable
 
 
 OPENAI_IMAGE_GENERATOR_VERSION = (
-    "openai_movie_news_image_generator_v1"
+    "openai_movie_news_image_generator_v2"
 )
 
 OPENAI_IMAGE_PROMPT_VERSION = (
     "movie_news_image_v2"
+)
+
+OPENAI_IMAGE_FALLBACK_PROMPT_VERSION = (
+    "movie_news_image_moderation_fallback_v1"
 )
 
 DEFAULT_IMAGE_QUALITY = "medium"
@@ -527,6 +531,61 @@ IMAGE_PROMPT_INSTRUCTIONS = """
 """.strip()
 
 
+MODERATION_SAFE_EDITORIAL_FALLBACK_INSTRUCTIONS = """
+============================================================
+13. БЕЗОПАСНЫЙ РЕДАКЦИОННЫЙ FALLBACK ПОСЛЕ MODERATION_BLOCKED
+============================================================
+
+Этот режим включён только потому, что предыдущая обычная генерация
+этого же набора киноновостей была отклонена системой безопасности
+на стадии готового изображения.
+
+Не меняй факты новостей и не перестраивай без необходимости те зоны,
+которые можно визуализировать обычным допустимым способом.
+
+Определи только ту или те зоны, где буквальное изображение конкретной
+франшизы, узнаваемого защищённого персонажа, официального визуального
+образа, фирменной символики или узнаваемой внешности публичного человека
+может привести к повторному отклонению готового изображения.
+
+Для таких зон используй безопасную оригинальную редакционную замену,
+которая передаёт именно НОВОСТНОЙ СМЫСЛ, а не буквальное воспроизведение
+персонажа, актёра, постера или брендового оформления.
+
+Например, если новость посвящена кассовому успеху известного
+супергеройского фильма, допустимо передать её через:
+
+- большой современный кинотеатр и зрителей;
+- атмосферу крупного кинорелиза;
+- динамичный городской фон;
+- кинопроизводство и экран кинотеатра без копирования кадров;
+- визуальное ощущение рекорда, масштаба, скорости и успеха;
+- жанровые цветовые и световые акценты без точного костюма,
+  эмблемы, маски, логотипа или другого фирменного образа.
+
+В fallback-зоне не изображай узнаваемую внешность конкретного реального
+актёра и не воспроизводи буквальный узнаваемый образ защищённого
+персонажа или его точный костюм.
+
+Это ограничение относится ТОЛЬКО к зоне, которую необходимо безопасно
+переформулировать после moderation_blocked. Оно не является общим
+запретом на изображение актёров, режиссёров или персонажей в обычных
+генерациях проекта.
+
+Сохрани:
+
+- позицию новости в соответствующей горизонтальной зоне;
+- смысл и факты новости;
+- кинематографичность;
+- визуальную выразительность;
+- общий стиль изображения;
+- остальные безопасные зоны максимально близкими к исходному замыслу.
+
+Не добавляй текст о модерации, безопасности, авторских правах,
+fallback-режиме или внутренних правилах на само изображение.
+""".strip()
+
+
 def _normalize_required_text(
     value: str,
     *,
@@ -761,6 +820,7 @@ def build_image_prompt(
     ],
     editorial_comment: str | None = None,
     issues: tuple[str, ...] = (),
+    moderation_safe_editorial_fallback: bool = False,
 ) -> str:
     """Формирует единый русский промпт изображения."""
 
@@ -776,11 +836,33 @@ def build_image_prompt(
         issues=issues,
     )
 
+    if not isinstance(
+        moderation_safe_editorial_fallback,
+        bool,
+    ):
+        raise TypeError(
+            "moderation_safe_editorial_fallback "
+            "должен быть bool."
+        )
+
     payload: dict[str, object] = {
         "top3": _build_news_payload(
             normalized_items
         ),
     }
+
+    fallback_instructions = ""
+
+    if moderation_safe_editorial_fallback:
+        payload["moderation_safe_editorial_fallback"] = {
+            "enabled": True,
+            "reason": "retry_after_output_moderation_blocked",
+        }
+
+        fallback_instructions = (
+            "\n\n"
+            + MODERATION_SAFE_EDITORIAL_FALLBACK_INSTRUCTIONS
+        )
 
     revision_instructions = ""
 
@@ -793,7 +875,7 @@ def build_image_prompt(
         revision_instructions = """
 
 ============================================================
-13. РЕДАКЦИОННЫЕ ПРАВКИ
+14. РЕДАКЦИОННЫЕ ПРАВКИ
 ============================================================
 
 Во входных данных присутствует объект editorial_revision.
@@ -813,6 +895,7 @@ def build_image_prompt(
 
     return (
         IMAGE_PROMPT_INSTRUCTIONS
+        + fallback_instructions
         + revision_instructions
         + "\n\n"
         + "============================================================\n"
@@ -864,6 +947,33 @@ class OpenAIMovieNewsImageGenerator:
             )
 
         self._quality: ImageQuality = quality
+        self._moderation_safe_editorial_fallback = False
+
+    def set_moderation_safe_editorial_fallback(
+        self,
+        enabled: bool,
+    ) -> None:
+        """
+        Переключает runtime-local fallback для следующего image request.
+
+        Генератор не должен совместно использоваться несколькими
+        конкурентными image pipeline вызовами, пока этот флаг включён.
+        """
+
+        if not isinstance(enabled, bool):
+            raise TypeError(
+                "enabled должен быть bool."
+            )
+
+        self._moderation_safe_editorial_fallback = enabled
+
+    @property
+    def moderation_safe_editorial_fallback(
+        self,
+    ) -> bool:
+        """Показывает, включён ли moderation-safe fallback."""
+
+        return self._moderation_safe_editorial_fallback
 
     @property
     def metadata(
@@ -879,7 +989,9 @@ class OpenAIMovieNewsImageGenerator:
                 OPENAI_IMAGE_GENERATOR_VERSION
             ),
             prompt_version=(
-                OPENAI_IMAGE_PROMPT_VERSION
+                OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
+                if self._moderation_safe_editorial_fallback
+                else OPENAI_IMAGE_PROMPT_VERSION
             ),
             model_name=self._model_name,
         )
@@ -900,6 +1012,9 @@ class OpenAIMovieNewsImageGenerator:
             items=items,
             editorial_comment=editorial_comment,
             issues=issues,
+            moderation_safe_editorial_fallback=(
+                self._moderation_safe_editorial_fallback
+            ),
         )
 
         return ImageModelRequest(
