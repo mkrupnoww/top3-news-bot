@@ -34,6 +34,39 @@ class GenerationTop3Selection:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RankedGenerationCombination:
+    """Одна сохранённая ranking combination для генерации."""
+
+    combination_id: int
+    combination_rank: int
+    final_top_score: Decimal
+    is_winner: bool
+    selection: GenerationTop3Selection
+
+    @property
+    def news_ids(self) -> tuple[int, int, int]:
+        """Возвращает news_id комбинации в сохранённом порядке."""
+
+        return self.selection.news_ids
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationCombinationReplacement:
+    """Следующая допустимая комбинация для replacement cascade."""
+
+    combination: RankedGenerationCombination
+    overlap_count: int
+    removed_news_ids: tuple[int, ...]
+    added_news_ids: tuple[int, ...]
+
+    @property
+    def selection(self) -> GenerationTop3Selection:
+        """Возвращает готовую selection для text/image pipeline."""
+
+        return self.combination.selection
+
+
 def _normalize_positive_integer(
     value: int,
     *,
@@ -75,6 +108,87 @@ def _normalize_required_text(
         )
 
     return normalized_value
+
+
+def _normalize_top3_news_ids(
+    news_ids: tuple[int, int, int],
+    *,
+    field_name: str,
+) -> tuple[int, int, int]:
+    """Проверяет ровно три уникальных положительных news_id."""
+
+    if not isinstance(news_ids, tuple):
+        raise TypeError(
+            f"{field_name} должен быть tuple."
+        )
+
+    if len(news_ids) != 3:
+        raise ValueError(
+            f"{field_name} должен содержать "
+            "ровно три news_id."
+        )
+
+    normalized = tuple(
+        _normalize_positive_integer(
+            news_id,
+            field_name=(
+                f"{field_name}[{index}]"
+            ),
+        )
+        for index, news_id in enumerate(
+            news_ids,
+            start=1,
+        )
+    )
+
+    if len(set(normalized)) != 3:
+        raise ValueError(
+            f"{field_name} содержит "
+            "повторяющиеся news_id."
+        )
+
+    return (
+        normalized[0],
+        normalized[1],
+        normalized[2],
+    )
+
+
+def _normalize_combination_ids(
+    combination_ids: tuple[int, ...],
+    *,
+    field_name: str,
+) -> tuple[int, ...]:
+    """Проверяет список уже использованных combination_id."""
+
+    if not isinstance(
+        combination_ids,
+        tuple,
+    ):
+        raise TypeError(
+            f"{field_name} должен быть tuple."
+        )
+
+    normalized = tuple(
+        _normalize_positive_integer(
+            combination_id,
+            field_name=(
+                f"{field_name}[{index}]"
+            ),
+        )
+        for index, combination_id in enumerate(
+            combination_ids,
+            start=1,
+        )
+    )
+
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(
+            f"{field_name} содержит "
+            "повторяющиеся combination_id."
+        )
+
+    return normalized
 
 
 def _resolve_saved_top3_mode(
@@ -370,12 +484,12 @@ def _build_selection(
     )
 
 
-async def _load_generation_top3(
+async def _load_run_record(
     connection: asyncpg.Connection,
     *,
     ranking_run_id: int,
-) -> GenerationTop3Selection:
-    """Читает завершённый TOP-3 через соединение."""
+) -> asyncpg.Record:
+    """Читает обязательный ranking_run."""
 
     run_record = await connection.fetchrow(
         """
@@ -394,6 +508,21 @@ async def _load_generation_top3(
             "Не найден ranking_run: "
             f"{ranking_run_id}"
         )
+
+    return run_record
+
+
+async def _load_generation_top3(
+    connection: asyncpg.Connection,
+    *,
+    ranking_run_id: int,
+) -> GenerationTop3Selection:
+    """Читает завершённый TOP-3 через соединение."""
+
+    run_record = await _load_run_record(
+        connection,
+        ranking_run_id=ranking_run_id,
+    )
 
     selected_for_top3_count = (
         await connection.fetchval(
@@ -497,6 +626,152 @@ async def _load_generation_top3(
     )
 
 
+async def _load_generation_combination(
+    connection: asyncpg.Connection,
+    *,
+    ranking_run_id: int,
+    combination_id: int,
+) -> RankedGenerationCombination:
+    """Читает одну конкретную сохранённую ranking combination."""
+
+    run_record = await _load_run_record(
+        connection,
+        ranking_run_id=ranking_run_id,
+    )
+
+    combination_record = (
+        await connection.fetchrow(
+            """
+            SELECT
+                combination_id,
+                combination_rank,
+                final_top_score,
+                is_winner
+            FROM ranking_combinations
+            WHERE ranking_run_id = $1
+              AND combination_id = $2
+            """,
+            ranking_run_id,
+            combination_id,
+        )
+    )
+
+    if combination_record is None:
+        raise LookupError(
+            "Не найдена ranking combination: "
+            f"ranking_run_id={ranking_run_id}, "
+            f"combination_id={combination_id}"
+        )
+
+    records = await connection.fetch(
+        """
+        SELECT
+            ns.score_id,
+            rci.position AS generation_position,
+            ns.rank_position,
+            ns.news_id,
+            ns.individual_score,
+            ns.score_explanation,
+            COALESCE(
+                NULLIF(
+                    BTRIM(ni.normalized_title),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.raw_title),
+                    ''
+                )
+            ) AS title,
+            COALESCE(
+                NULLIF(
+                    BTRIM(ni.normalized_summary),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.raw_summary),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.article_text),
+                    ''
+                )
+            ) AS summary,
+            s.source_name,
+            ni.source_url,
+            ni.source_published_at,
+            ni.processing_status
+        FROM ranking_combination_items AS rci
+        JOIN news_scores AS ns
+          ON ns.score_id = rci.score_id
+         AND ns.ranking_run_id = rci.ranking_run_id
+        JOIN news_items AS ni
+          ON ni.news_id = ns.news_id
+        JOIN sources AS s
+          ON s.source_id = ni.source_id
+        WHERE rci.ranking_run_id = $1
+          AND rci.combination_id = $2
+          AND ns.is_eligible = true
+        ORDER BY rci.position
+        """,
+        ranking_run_id,
+        combination_id,
+    )
+
+    selection = _build_selection(
+        ranking_run_id=int(
+            run_record["ranking_run_id"]
+        ),
+        run_status=run_record["run_status"],
+        eligible_count=int(
+            run_record["eligible_count"]
+        ),
+        records=list(records),
+    )
+
+    final_top_score = (
+        combination_record["final_top_score"]
+    )
+
+    if not isinstance(
+        final_top_score,
+        Decimal,
+    ):
+        raise TypeError(
+            "final_top_score должен быть Decimal: "
+            f"combination_id={combination_id}"
+        )
+
+    if (
+        not final_top_score.is_finite()
+        or final_top_score < 0
+    ):
+        raise ValueError(
+            "final_top_score должен быть "
+            "конечным неотрицательным числом: "
+            f"combination_id={combination_id}"
+        )
+
+    return RankedGenerationCombination(
+        combination_id=int(
+            combination_record[
+                "combination_id"
+            ]
+        ),
+        combination_rank=int(
+            combination_record[
+                "combination_rank"
+            ]
+        ),
+        final_top_score=final_top_score,
+        is_winner=bool(
+            combination_record[
+                "is_winner"
+            ]
+        ),
+        selection=selection,
+    )
+
+
 async def load_generation_top3(
     pool: asyncpg.Pool,
     *,
@@ -518,3 +793,249 @@ async def load_generation_top3(
                 normalized_ranking_run_id
             ),
         )
+
+
+async def load_generation_combination(
+    pool: asyncpg.Pool,
+    *,
+    ranking_run_id: int,
+    combination_id: int,
+) -> RankedGenerationCombination:
+    """Возвращает конкретную ranking combination для генерации."""
+
+    normalized_ranking_run_id = (
+        _normalize_positive_integer(
+            ranking_run_id,
+            field_name="ranking_run_id",
+        )
+    )
+
+    normalized_combination_id = (
+        _normalize_positive_integer(
+            combination_id,
+            field_name="combination_id",
+        )
+    )
+
+    async with pool.acquire() as connection:
+        return await _load_generation_combination(
+            connection,
+            ranking_run_id=(
+                normalized_ranking_run_id
+            ),
+            combination_id=(
+                normalized_combination_id
+            ),
+        )
+
+
+async def choose_next_generation_combination(
+    pool: asyncpg.Pool,
+    *,
+    ranking_run_id: int,
+    current_news_ids: tuple[int, int, int],
+    excluded_combination_ids: tuple[int, ...] = (),
+) -> GenerationCombinationReplacement | None:
+    """
+    Выбирает следующую комбинацию для replacement cascade.
+
+    Правила:
+    1. Текущий набор из тех же трёх news_id не выбирается.
+    2. Уже использованные combination_id исключаются.
+    3. Максимизируется overlap с текущим TOP-3:
+       сначала замена одной новости, затем двух, затем трёх.
+    4. При одинаковом overlap выигрывает лучший combination_rank.
+
+    Функция только читает БД и ничего не изменяет.
+    """
+
+    normalized_ranking_run_id = (
+        _normalize_positive_integer(
+            ranking_run_id,
+            field_name="ranking_run_id",
+        )
+    )
+
+    normalized_current_news_ids = (
+        _normalize_top3_news_ids(
+            current_news_ids,
+            field_name="current_news_ids",
+        )
+    )
+
+    normalized_excluded_ids = (
+        _normalize_combination_ids(
+            excluded_combination_ids,
+            field_name=(
+                "excluded_combination_ids"
+            ),
+        )
+    )
+
+    current_news_set = set(
+        normalized_current_news_ids
+    )
+
+    excluded_id_set = set(
+        normalized_excluded_ids
+    )
+
+    async with pool.acquire() as connection:
+        run_record = await _load_run_record(
+            connection,
+            ranking_run_id=(
+                normalized_ranking_run_id
+            ),
+        )
+
+        if run_record["run_status"] != "completed":
+            raise ValueError(
+                "Replacement требует completed "
+                "ranking_run: "
+                f"ranking_run_id="
+                f"{normalized_ranking_run_id}, "
+                f"run_status="
+                f"{run_record['run_status']}"
+            )
+
+        rows = await connection.fetch(
+            """
+            SELECT
+                rc.combination_id,
+                rc.combination_rank,
+                ARRAY_AGG(
+                    ns.news_id
+                    ORDER BY rci.position
+                ) AS news_ids
+            FROM ranking_combinations AS rc
+            JOIN ranking_combination_items AS rci
+              ON rci.combination_id = rc.combination_id
+             AND rci.ranking_run_id = rc.ranking_run_id
+            JOIN news_scores AS ns
+              ON ns.score_id = rci.score_id
+             AND ns.ranking_run_id = rci.ranking_run_id
+            WHERE rc.ranking_run_id = $1
+            GROUP BY
+                rc.combination_id,
+                rc.combination_rank
+            ORDER BY rc.combination_rank
+            """,
+            normalized_ranking_run_id,
+        )
+
+        candidates: list[
+            tuple[
+                int,
+                int,
+                int,
+                tuple[int, int, int],
+            ]
+        ] = []
+
+        for row in rows:
+            combination_id = int(
+                row["combination_id"]
+            )
+
+            if combination_id in excluded_id_set:
+                continue
+
+            raw_news_ids = tuple(
+                int(news_id)
+                for news_id in row["news_ids"]
+            )
+
+            if len(raw_news_ids) != 3:
+                raise ValueError(
+                    "ranking combination должна "
+                    "содержать ровно три news_id: "
+                    f"combination_id={combination_id}, "
+                    f"news_ids={raw_news_ids!r}"
+                )
+
+            candidate_news_ids = (
+                raw_news_ids[0],
+                raw_news_ids[1],
+                raw_news_ids[2],
+            )
+
+            candidate_news_set = set(
+                candidate_news_ids
+            )
+
+            if candidate_news_set == current_news_set:
+                continue
+
+            overlap_count = len(
+                current_news_set
+                & candidate_news_set
+            )
+
+            candidates.append(
+                (
+                    -overlap_count,
+                    int(
+                        row["combination_rank"]
+                    ),
+                    combination_id,
+                    candidate_news_ids,
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+            )
+        )
+
+        (
+            negative_overlap_count,
+            _selected_rank,
+            selected_combination_id,
+            selected_news_ids,
+        ) = candidates[0]
+
+        ranked_combination = (
+            await _load_generation_combination(
+                connection,
+                ranking_run_id=(
+                    normalized_ranking_run_id
+                ),
+                combination_id=(
+                    selected_combination_id
+                ),
+            )
+        )
+
+    selected_news_set = set(
+        selected_news_ids
+    )
+
+    removed_news_ids = tuple(
+        news_id
+        for news_id in normalized_current_news_ids
+        if news_id not in selected_news_set
+    )
+
+    added_news_ids = tuple(
+        news_id
+        for news_id in selected_news_ids
+        if news_id not in current_news_set
+    )
+
+    return GenerationCombinationReplacement(
+        combination=ranked_combination,
+        overlap_count=(
+            -negative_overlap_count
+        ),
+        removed_news_ids=(
+            removed_news_ids
+        ),
+        added_news_ids=(
+            added_news_ids
+        ),
+    )
