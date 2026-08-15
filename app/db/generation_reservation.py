@@ -529,6 +529,7 @@ def _validate_existing_reservation(
         "awaiting_review",
         "approved",
         "rejected",
+        "superseded",
         "publishing",
         "published",
         "failed",
