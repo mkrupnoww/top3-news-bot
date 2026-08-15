@@ -27,16 +27,29 @@ from app.generation.image_generator import (
 )
 
 
-WORKFLOW_ID = 12
-RANKING_RUN_ID = 141
-BATCH_ID = 65
-GENERATED_POST_ID = 61
-LINKED_FAILED_IMAGE_ID = 27
+WORKFLOW_ID = 16
+RANKING_RUN_ID = 142
+BATCH_ID = 67
+GENERATED_POST_ID = 64
 
-OLD_PROMPT_VERSION_V1 = "movie_news_image_v1"
 NORMAL_PROMPT_VERSION = "movie_news_image_v2"
-EXPECTED_FALLBACK_PROMPT_VERSION = (
+OLD_FALLBACK_PROMPT_VERSION = (
     "movie_news_image_moderation_fallback_v1"
+)
+EXPECTED_FALLBACK_PROMPT_VERSION = (
+    "movie_news_image_moderation_fallback_v2"
+)
+
+SENSITIVE_FALLBACK_TERMS = (
+    "X-Men",
+    "Marvel",
+    "Frozen",
+    "Disney",
+    "Anna",
+    "Kristoff",
+    "Olaf",
+    "Paramount",
+    "Warner Bros",
 )
 
 
@@ -99,7 +112,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-moderation-fallback-test:"
+        "daily-workflow-moderation-fallback-v2-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -110,7 +123,12 @@ def _synthetic_request_key(
 
 
 def _assert_generator_fallback_identity() -> None:
-    """Проверяет, что fallback реально меняет prompt и metadata identity."""
+    """
+    Проверяет новую fallback identity и обезличивание prompt.
+
+    Normal prompt обязан сохранить исходные новости.
+    Fallback v2 обязан передавать только safe_visual_brief.
+    """
 
     generator = OpenAIMovieNewsImageGenerator(
         client=_NeverCalledImageClient(),
@@ -122,38 +140,39 @@ def _assert_generator_fallback_identity() -> None:
     items = (
         ImageGenerationNewsItem(
             position=1,
-            news_id=892,
+            news_id=1029,
             title=(
-                "The War Over Warner Bros. "
-                "Is Splintering Hollywood’s Labor World"
+                "Marvel’s ‘X-Men’ Reboot Sets "
+                "May 2028 Release Date"
             ),
             summary=(
-                "Rob Bonta and David Ellison are dividing "
-                "the unions around the antitrust battle."
+                "Marvel announced the X-Men reboot "
+                "and its May 2028 release date."
             ),
         ),
         ImageGenerationNewsItem(
             position=2,
-            news_id=832,
+            news_id=1037,
             title=(
-                "Spider-Man: Brand New Day Becomes Fastest "
-                "Movie to Hit $700M at Domestic Box Office"
+                "‘Frozen 3’ First Details: Anna and "
+                "Kristoff Get Married, Olaf Gets "
+                "a Girlfriend"
             ),
             summary=(
-                "Tom Holland's blockbuster continues "
-                "to make history for Sony."
+                "Disney revealed the first story details "
+                "for Frozen 3."
             ),
         ),
         ImageGenerationNewsItem(
             position=3,
-            news_id=888,
+            news_id=986,
             title=(
-                "NY Film Festival Sets Currents Lineup "
-                "Led by Bardi World Premiere"
+                "Paramount-Warner Bros. Merger Gets "
+                "Mexico’s Approval"
             ),
             summary=(
-                "The section includes 15 features "
-                "and 28 shorts."
+                "The Paramount-Warner Bros. transaction "
+                "received regulatory approval in Mexico."
             ),
         ),
     )
@@ -168,6 +187,13 @@ def _assert_generator_fallback_identity() -> None:
         == NORMAL_PROMPT_VERSION
     )
 
+    for term in SENSITIVE_FALLBACK_TERMS:
+        if term not in normal_request.prompt:
+            raise AssertionError(
+                "Normal prompt неожиданно не содержит "
+                f"исходный термин: {term!r}"
+            )
+
     generator.set_moderation_safe_editorial_fallback(
         True
     )
@@ -181,28 +207,102 @@ def _assert_generator_fallback_identity() -> None:
         fallback_metadata.prompt_version
         == EXPECTED_FALLBACK_PROMPT_VERSION
     )
+
     assert (
         fallback_request.prompt
         != normal_request.prompt
     )
+
     assert (
-        "БЕЗОПАСНЫЙ РЕДАКЦИОННЫЙ FALLBACK"
-        in fallback_request.prompt
-    )
-    assert (
-        '"moderation_safe_editorial_fallback"'
+        '"mode":"neutralized_news_payload_v2"'
         in fallback_request.prompt
     )
 
-    print(
-        "Fallback changes model request and prompt identity: OK"
+    assert (
+        '"safe_visual_brief":'
+        in fallback_request.prompt
     )
+
+    assert (
+        '"moderation_safe_editorial_fallback":'
+        in fallback_request.prompt
+    )
+
+    assert (
+        '"title":'
+        not in fallback_request.prompt
+    )
+
+    assert (
+        '"summary":'
+        not in fallback_request.prompt
+    )
+
+    for term in SENSITIVE_FALLBACK_TERMS:
+        if term in fallback_request.prompt:
+            raise AssertionError(
+                "Fallback prompt содержит "
+                "исходный чувствительный термин: "
+                f"{term!r}"
+            )
+
+    if (
+        "Если новость относится к конкретному "
+        "фильму или франшизе"
+        in fallback_request.prompt
+    ):
+        raise AssertionError(
+            "Fallback v2 не должен включать "
+            "основной permissive IMAGE_PROMPT_INSTRUCTIONS."
+        )
+
+    print(
+        "Fallback v2 changes prompt identity: OK"
+    )
+    print(
+        "Fallback v2 removes title/summary from Image API prompt: OK"
+    )
+    print(
+        "Fallback v2 removes franchise/person/company terms: OK"
+    )
+
+
+async def _load_attempts(
+    pool,
+) -> list[asyncpg.Record]:
+    """Читает image attempts текущего production incident."""
+
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                image_generation_id,
+                image_status,
+                prompt_version,
+                error_type,
+                error_message,
+                failed_at
+            FROM image_generation_requests
+            WHERE batch_id = $1
+              AND generated_post_id = $2
+              AND request_kind = 'initial'
+            ORDER BY image_generation_id
+            """,
+            BATCH_ID,
+            GENERATED_POST_ID,
+        )
+
+    return list(rows)
 
 
 async def _assert_production_fixture(
     pool,
-) -> None:
-    """Проверяет текущий production incident fixture."""
+) -> int:
+    """
+    Проверяет incident 2026-08-15.
+
+    Возвращает текущий linked failed image_generation_id.
+    """
 
     workflow = await load_daily_workflow(
         pool,
@@ -217,10 +317,26 @@ async def _assert_production_fixture(
         workflow.generated_post_id
         == GENERATED_POST_ID
     )
-    assert (
+
+    linked_failed_image_id = (
         workflow.image_generation_id
-        == LINKED_FAILED_IMAGE_ID
     )
+
+    if (
+        not isinstance(
+            linked_failed_image_id,
+            int,
+        )
+        or isinstance(
+            linked_failed_image_id,
+            bool,
+        )
+        or linked_failed_image_id <= 0
+    ):
+        raise AssertionError(
+            "Workflow должен ссылаться "
+            "на failed image_generation_id."
+        )
 
     async with pool.acquire() as connection:
         generation = await connection.fetchrow(
@@ -240,25 +356,6 @@ async def _assert_production_fixture(
             GENERATED_POST_ID,
         )
 
-        attempts = await connection.fetch(
-            """
-            SELECT
-                image_generation_id,
-                image_status,
-                prompt_version,
-                error_type,
-                error_message,
-                failed_at
-            FROM image_generation_requests
-            WHERE batch_id = $1
-              AND generated_post_id = $2
-              AND request_kind = 'initial'
-            ORDER BY image_generation_id
-            """,
-            BATCH_ID,
-            GENERATED_POST_ID,
-        )
-
     if generation is None:
         raise AssertionError(
             "Production batch/post fixture не найдена."
@@ -269,14 +366,9 @@ async def _assert_production_fixture(
     assert generation["image_path"] is None
     assert generation["image_sha256"] is None
 
-    v1_attempts = [
-        row
-        for row in attempts
-        if (
-            row["prompt_version"]
-            == OLD_PROMPT_VERSION_V1
-        )
-    ]
+    attempts = await _load_attempts(
+        pool
+    )
 
     normal_attempts = [
         row
@@ -287,7 +379,16 @@ async def _assert_production_fixture(
         )
     ]
 
-    fallback_attempts = [
+    fallback_v1_attempts = [
+        row
+        for row in attempts
+        if (
+            row["prompt_version"]
+            == OLD_FALLBACK_PROMPT_VERSION
+        )
+    ]
+
+    fallback_v2_attempts = [
         row
         for row in attempts
         if (
@@ -296,28 +397,82 @@ async def _assert_production_fixture(
         )
     ]
 
-    assert len(v1_attempts) == 2
-    assert len(normal_attempts) == 2
-    assert len(fallback_attempts) == 0
+    assert len(normal_attempts) == 1
+    assert len(fallback_v1_attempts) == 2
+    assert len(fallback_v2_attempts) == 0
 
     for row in (
-        *v1_attempts,
         *normal_attempts,
+        *fallback_v1_attempts,
     ):
         assert row["image_status"] == "failed"
         assert row["error_type"] == "BadRequestError"
         assert row["failed_at"] is not None
-        assert "moderation_blocked" in (
+
+        if "moderation_blocked" not in (
             str(row["error_message"]).lower()
+        ):
+            raise AssertionError(
+                "Ожидался moderation_blocked: "
+                f"image_generation_id="
+                f"{row['image_generation_id']}"
+            )
+
+    linked_row = next(
+        (
+            row
+            for row in attempts
+            if (
+                row["image_generation_id"]
+                == linked_failed_image_id
+            )
+        ),
+        None,
+    )
+
+    if linked_row is None:
+        raise AssertionError(
+            "Linked image_generation_id "
+            "не найден среди attempts."
         )
+
+    assert (
+        linked_row["prompt_version"]
+        == OLD_FALLBACK_PROMPT_VERSION
+    )
+
+    assert (
+        linked_row["image_status"]
+        == "failed"
+    )
+
+    print(
+        "Current production moderation incident fixture: OK"
+    )
+    print(
+        "normal_v2_failed_attempts=1"
+    )
+    print(
+        "fallback_v1_failed_attempts=2"
+    )
+    print(
+        "fallback_v2_existing_attempts=0"
+    )
+
+    return linked_failed_image_id
 
 
 async def _insert_synthetic_fallback_reservation(
     pool,
     *,
+    source_image_generation_id: int,
     attempt_number: int,
 ) -> int:
-    """Создаёт synthetic fallback reservation внутри rollback transaction."""
+    """
+    Создаёт synthetic fallback-v2 reservation.
+
+    Все изменения выполняются внутри внешней rollback transaction.
+    """
 
     request_key = _synthetic_request_key(
         attempt_number=attempt_number
@@ -358,7 +513,7 @@ async def _insert_synthetic_fallback_reservation(
                 editorial_comment,
                 issues,
                 model_name,
-                'openai_movie_news_image_generator_v2',
+                generator_version,
                 $3,
                 image_size,
                 image_quality,
@@ -371,17 +526,20 @@ async def _insert_synthetic_fallback_reservation(
             WHERE image_generation_id = $1
             RETURNING image_generation_id
             """,
-            LINKED_FAILED_IMAGE_ID,
+            source_image_generation_id,
             request_key,
             EXPECTED_FALLBACK_PROMPT_VERSION,
         )
 
     if image_generation_id is None:
         raise RuntimeError(
-            "Не удалось создать synthetic fallback reservation."
+            "Не удалось создать synthetic "
+            "fallback-v2 reservation."
         )
 
-    return int(image_generation_id)
+    return int(
+        image_generation_id
+    )
 
 
 async def _mark_synthetic_moderation_failed(
@@ -389,7 +547,7 @@ async def _mark_synthetic_moderation_failed(
     *,
     image_generation_id: int,
 ) -> None:
-    """Переводит synthetic reservation в definitive moderation failure."""
+    """Переводит synthetic reservation в moderation failure."""
 
     async with pool.acquire() as connection:
         result = await connection.execute(
@@ -411,13 +569,13 @@ async def _mark_synthetic_moderation_failed(
 
     if result != "UPDATE 1":
         raise RuntimeError(
-            "Не удалось перевести synthetic fallback "
-            "reservation в failed."
+            "Не удалось перевести synthetic "
+            "fallback-v2 reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет safe fallback identity и retry budget без OpenAI/Telegram."""
+    """Проверяет fallback-v2 prompt и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
@@ -440,6 +598,7 @@ async def main() -> int:
     _assert_generator_fallback_identity()
 
     settings = get_settings()
+
     database_pool = await create_database_pool(
         settings
     )
@@ -454,8 +613,10 @@ async def main() -> int:
             )
 
             try:
-                await _assert_production_fixture(
-                    pool
+                linked_failed_image_id = (
+                    await _assert_production_fixture(
+                        pool
+                    )
                 )
 
                 attempts_used = (
@@ -474,7 +635,8 @@ async def main() -> int:
                 assert attempts_used == 0
 
                 print(
-                    "Fallback prompt version has fresh budget: OK"
+                    "Fallback v2 prompt version "
+                    "has fresh budget: OK"
                 )
 
                 workflow = (
@@ -494,16 +656,21 @@ async def main() -> int:
                 assert workflow.current_stage == "image"
                 assert (
                     workflow.image_generation_id
-                    == LINKED_FAILED_IMAGE_ID
+                    == linked_failed_image_id
                 )
 
                 print(
-                    "Failed normal workflow reopens for fallback: OK"
+                    "Failed fallback-v1 workflow "
+                    "reopens for fallback v2: OK"
                 )
 
                 first_fallback_id = (
-                    await _insert_synthetic_fallback_reservation(
+                    await
+                    _insert_synthetic_fallback_reservation(
                         pool,
+                        source_image_generation_id=(
+                            linked_failed_image_id
+                        ),
                         attempt_number=1,
                     )
                 )
@@ -548,12 +715,16 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second fallback attempt allowed: OK"
+                    "Second fallback-v2 attempt allowed: OK"
                 )
 
                 second_fallback_id = (
-                    await _insert_synthetic_fallback_reservation(
+                    await
+                    _insert_synthetic_fallback_reservation(
                         pool,
+                        source_image_generation_id=(
+                            linked_failed_image_id
+                        ),
                         attempt_number=2,
                     )
                 )
@@ -598,11 +769,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third fallback attempt blocked: OK"
+                        "Third fallback-v2 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух fallback failures "
+                        "После двух fallback-v2 failures "
                         "третья попытка не была заблокирована."
                     )
 
@@ -614,11 +785,17 @@ async def main() -> int:
         )
 
         print()
-        print("Database changes=rolled_back")
-        print("OpenAI requests=not_performed")
-        print("Telegram requests=not_performed")
         print(
-            "Moderation-safe image fallback test: OK"
+            "Database changes=rolled_back"
+        )
+        print(
+            "OpenAI requests=not_performed"
+        )
+        print(
+            "Telegram requests=not_performed"
+        )
+        print(
+            "Moderation-safe image fallback v2 test: OK"
         )
 
         return 0
@@ -631,5 +808,7 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
     )
