@@ -7,6 +7,7 @@ import asyncpg
 
 from app.db.generation_selection import (
     GenerationTop3Selection,
+    _load_generation_combination,
     _load_generation_top3,
 )
 from app.generation.openai_generator import (
@@ -647,6 +648,7 @@ async def reserve_generation(
     *,
     request_key: GenerationRequestKey,
     selection: GenerationTop3Selection,
+    combination_id: int | None = None,
     publication_date: date,
     telegram_chat_id: int,
     metadata: OpenAIPostGeneratorMetadata,
@@ -666,6 +668,15 @@ async def reserve_generation(
         _normalize_selection(
             selection
         )
+    )
+
+    normalized_combination_id = (
+        _normalize_positive_integer(
+            combination_id,
+            field_name="combination_id",
+        )
+        if combination_id is not None
+        else None
     )
 
     normalized_publication_date = (
@@ -721,6 +732,45 @@ async def reserve_generation(
                 ),
             )
 
+            if normalized_combination_id is None:
+                current_selection = (
+                    await _load_generation_top3(
+                        connection,
+                        ranking_run_id=(
+                            normalized_selection
+                            .ranking_run_id
+                        ),
+                    )
+                )
+            else:
+                current_combination = (
+                    await _load_generation_combination(
+                        connection,
+                        ranking_run_id=(
+                            normalized_selection
+                            .ranking_run_id
+                        ),
+                        combination_id=(
+                            normalized_combination_id
+                        ),
+                    )
+                )
+
+                current_selection = (
+                    current_combination.selection
+                )
+
+            if (
+                current_selection
+                != normalized_selection
+            ):
+                raise ValueError(
+                    "Сохранённая ranking selection "
+                    "изменилась после подготовки "
+                    "запроса. Нужно сформировать "
+                    "запрос и request_key заново."
+                )
+
             existing_record = (
                 await _find_existing_reservation(
                     connection,
@@ -752,27 +802,6 @@ async def reserve_generation(
                     _build_existing_result(
                         existing_record
                     )
-                )
-
-            current_selection = (
-                await _load_generation_top3(
-                    connection,
-                    ranking_run_id=(
-                        normalized_selection
-                        .ranking_run_id
-                    ),
-                )
-            )
-
-            if (
-                current_selection
-                != normalized_selection
-            ):
-                raise ValueError(
-                    "Сохранённый TOP-3 изменился "
-                    "после подготовки запроса. "
-                    "Нужно сформировать запрос "
-                    "и request_key заново."
                 )
 
             edition = (

@@ -15,6 +15,7 @@ from app.db.generation_reservation import (
 )
 from app.db.generation_selection import (
     GenerationTop3Selection,
+    load_generation_combination,
     load_generation_top3,
 )
 from app.generation.openai_generator import (
@@ -422,6 +423,7 @@ async def run_reserved_openai_generation(
     *,
     generator: OpenAITelegramPostGenerator,
     ranking_run_id: int,
+    combination_id: int | None = None,
     publication_date: date,
     telegram_chat_id: int,
     trailer_enricher: OfficialTrailerEnricher = (
@@ -437,7 +439,8 @@ async def run_reserved_openai_generation(
 
     Последовательность:
 
-    1. Читает сохранённый TOP-3 из PostgreSQL.
+    1. Читает winner TOP-3 либо явно указанную
+       сохранённую ranking combination.
     2. Формирует базовый запрос без внешнего
        trailer enrichment.
     3. Вычисляет детерминированный request_key.
@@ -468,10 +471,23 @@ async def run_reserved_openai_generation(
     Telegram не вызывается.
     """
 
-    selection = await load_generation_top3(
-        pool,
-        ranking_run_id=ranking_run_id,
-    )
+    if combination_id is None:
+        selection = await load_generation_top3(
+            pool,
+            ranking_run_id=ranking_run_id,
+        )
+    else:
+        ranked_combination = (
+            await load_generation_combination(
+                pool,
+                ranking_run_id=ranking_run_id,
+                combination_id=combination_id,
+            )
+        )
+
+        selection = (
+            ranked_combination.selection
+        )
 
     model_request = generator.build_request(
         selection.items
@@ -498,6 +514,7 @@ async def run_reserved_openai_generation(
         pool,
         request_key=request_key,
         selection=selection,
+        combination_id=combination_id,
         publication_date=publication_date,
         telegram_chat_id=telegram_chat_id,
         metadata=generator.metadata,
