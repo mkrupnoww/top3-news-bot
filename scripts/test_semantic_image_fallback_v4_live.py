@@ -164,7 +164,7 @@ def _build_output_path() -> Path:
     )
 
     return OUTPUT_DIR / (
-        "semantic-fallback-v3-"
+        "semantic-fallback-v4-"
         f"ranking-{RANKING_RUN_ID}-"
         f"combination-{COMBINATION_ID}-"
         f"{timestamp}.png"
@@ -173,7 +173,7 @@ def _build_output_path() -> Path:
 
 async def main() -> int:
     """
-    Выполняет один изолированный реальный semantic fallback v3.
+    Выполняет один изолированный реальный semantic fallback v4.
 
     PostgreSQL:
     - только READ ONLY transaction;
@@ -273,7 +273,7 @@ async def main() -> int:
         )
 
         # --------------------------------------------------------------
-        # 2. Создаём runtime и явно включаем semantic fallback v3.
+        # 2. Создаём runtime и явно включаем semantic fallback v4.
         # --------------------------------------------------------------
 
         runtime = (
@@ -296,7 +296,7 @@ async def main() -> int:
         ):
             raise AssertionError(
                 "Generator не переключился "
-                "на semantic fallback v3: "
+                "на semantic fallback v4: "
                 f"actual="
                 f"{metadata.prompt_version}, "
                 f"expected="
@@ -406,7 +406,7 @@ async def main() -> int:
 
         print()
         print(
-            "Semantic fallback v3 "
+            "Semantic fallback v4 "
             "real Image API call: OK"
         )
         print(
@@ -448,7 +448,7 @@ async def main() -> int:
             f"up_to_{settings.openai_max_retries}"
         )
         print(
-            "Semantic fallback v3 "
+            "Semantic fallback v4 "
             "isolated live test: OK"
         )
 

@@ -13,7 +13,7 @@ OPENAI_IMAGE_PROMPT_VERSION = (
 )
 
 OPENAI_IMAGE_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v3"
+    "movie_news_image_moderation_fallback_v4"
 )
 
 DEFAULT_IMAGE_QUALITY = "medium"
@@ -572,6 +572,12 @@ semantic_visual_brief, который уже локально очищен от
 - фестивальная новость — через кинозал, экран, публику
   и премьерную атмосферу.
 
+Эти примеры только объясняют формат visual brief и НЕ являются
+готовыми шаблонами. Не переноси снег, лёд, море, космос,
+исторические, корпоративные, фестивальные или другие признаки
+из примеров в конкретную зону, если соответствующего признака
+нет в semantic_visual_brief этой зоны.
+
 При этом не пытайся определить, какой именно фильм,
 франшиза, персонаж, актёр, режиссёр, компания или бренд
 стояли за очищенным brief.
@@ -919,7 +925,7 @@ def _build_moderation_safe_news_payload(
     ],
 ) -> list[dict[str, object]]:
     """
-    Формирует semantic-safe visual brief для fallback v3.
+    Формирует semantic-safe visual brief для fallback v4.
 
     Исходные title и summary используются только локально
     как набор семантических сигналов и никогда не попадают
@@ -930,12 +936,83 @@ def _build_moderation_safe_news_payload(
     визуальные мотивы, палитра и правила изображения людей.
     """
 
+    def marker_matches(
+        source_text: str,
+        marker: str,
+    ) -> bool:
+        """
+        Проверяет semantic marker без ложных совпадений внутри слов.
+
+        Контракт marker:
+        - обычный marker ищется как отдельное слово или точная фраза;
+        - marker с завершающей "*" является явным prefix-stem и
+          совпадает только с началом отдельного слова.
+
+        Примеры:
+        - "ice" совпадает с "snow and ice";
+        - "ice" НЕ совпадает с "Vice President";
+        - "зим*" совпадает с "зимний";
+        - "морск*" совпадает с "морское";
+        - "мор*" намеренно не используется, чтобы "мороз" не
+          становился морской тематикой.
+        """
+
+        normalized_marker = (
+            marker.casefold().strip()
+        )
+
+        if not normalized_marker:
+            raise ValueError(
+                "Semantic marker не может быть пустым."
+            )
+
+        prefix_match = (
+            normalized_marker.endswith("*")
+        )
+
+        if prefix_match:
+            normalized_marker = (
+                normalized_marker[:-1]
+                .strip()
+            )
+
+            if not normalized_marker:
+                raise ValueError(
+                    "Semantic prefix marker "
+                    "не может состоять только из '*'."
+                )
+
+        escaped_marker = re.escape(
+            normalized_marker
+        )
+
+        if prefix_match:
+            pattern = (
+                rf"(?<!\w){escaped_marker}\w*"
+            )
+        else:
+            pattern = (
+                rf"(?<!\w){escaped_marker}(?!\w)"
+            )
+
+        return (
+            re.search(
+                pattern,
+                source_text,
+                flags=re.UNICODE,
+            )
+            is not None
+        )
+
     def contains_any(
         source_text: str,
         markers: tuple[str, ...],
     ) -> bool:
         return any(
-            marker in source_text
+            marker_matches(
+                source_text,
+                marker,
+            )
             for marker in markers
         )
 
@@ -963,8 +1040,8 @@ def _build_moderation_safe_news_payload(
             "death",
             "obituary",
             "passed away",
-            "умер",
-            "скончал",
+            "умер*",
+            "скончал*",
         )
 
         business_markers = (
@@ -980,24 +1057,35 @@ def _build_moderation_safe_news_payload(
             "approves",
             "deal",
             "transaction",
-            "слияни",
-            "поглощени",
-            "антимонополь",
-            "регулятор",
-            "одобр",
-            "сделк",
+            "слияни*",
+            "поглощени*",
+            "антимонополь*",
+            "регулятор*",
+            "одобр*",
+            "сделк*",
             "иск",
+            "иски",
+            "иска",
+            "иске",
+            "иском",
+            "исков",
         )
 
         box_office_markers = (
             "box office",
             "gross",
+            "grosses",
+            "grossed",
+            "grossing",
             "opening weekend",
             "ticket sales",
-            "кассов",
-            "сбор",
-            "прокат",
-            "бокс-офис",
+            "кассов*",
+            "сборы",
+            "сборов",
+            "сборах",
+            "сборами",
+            "прокат*",
+            "бокс-офис*",
         )
 
         festival_markers = (
@@ -1006,10 +1094,11 @@ def _build_moderation_safe_news_payload(
             "premiere",
             "competition",
             "selection",
-            "фестивал",
-            "программ",
-            "премьер",
-            "конкурс",
+            "фестивал*",
+            "фестивальная программа",
+            "программа фестиваля",
+            "премьер*",
+            "конкурс*",
         )
 
         casting_markers = (
@@ -1021,11 +1110,13 @@ def _build_moderation_safe_news_payload(
             "negotiations",
             "circling",
             "eyed",
-            "каст",
+            "каст*",
             "роль",
-            "переговор",
-            "присоедин",
-            "рассматрива",
+            "роли",
+            "ролью",
+            "переговор*",
+            "присоедин*",
+            "рассматрива*",
         )
 
         reveal_markers = (
@@ -1045,6 +1136,9 @@ def _build_moderation_safe_news_payload(
         project_markers = (
             "release date",
             "release",
+            "releases",
+            "released",
+            "releasing",
             "reboot",
             "sequel",
             "prequel",
@@ -1053,13 +1147,29 @@ def _build_moderation_safe_news_payload(
             "shooting",
             "filming",
             "дата выхода",
-            "релиз",
-            "перезапуск",
-            "продолжени",
-            "приквел",
-            "ремейк",
-            "производств",
-            "съём",
+            "релиз*",
+            "перезапуск*",
+            "продолжени*",
+            "приквел*",
+            "ремейк*",
+            "производств*",
+            "съём*",
+        )
+
+        theme_park_markers = (
+            "theme park",
+            "themed land",
+            "themed area",
+            "amusement park",
+            "attraction",
+            "attractions",
+            "ride",
+            "rides",
+            "тематический парк",
+            "тематическая зона",
+            "тематической зоны",
+            "парк развлечений",
+            "аттракцион*",
         )
 
         if contains_any(
@@ -1093,6 +1203,14 @@ def _build_moderation_safe_news_payload(
             news_type = (
                 "кинофестивальная "
                 "или премьерная новость"
+            )
+        elif contains_any(
+            source_text,
+            theme_park_markers,
+        ):
+            news_type = (
+                "новость о тематическом парке, "
+                "развлекательной зоне или аттракционе"
             )
         elif contains_any(
             source_text,
@@ -1136,9 +1254,9 @@ def _build_moderation_safe_news_payload(
             "mutant",
             "mutants",
             "x-men",
-            "супергер",
-            "комикс",
-            "мутант",
+            "супергер*",
+            "комикс*",
+            "мутант*",
         )
 
         winter_fairy_tale_markers = (
@@ -1150,11 +1268,14 @@ def _build_moderation_safe_news_payload(
             "icy",
             "glacier",
             "aurora",
-            "снег",
-            "зим",
+            "снег*",
+            "снеж*",
+            "зим*",
             "лёд",
-            "ледян",
-            "мороз",
+            "льда",
+            "льдом",
+            "ледян*",
+            "мороз*",
             "северное сияние",
         )
 
@@ -1169,29 +1290,32 @@ def _build_moderation_safe_news_payload(
             "myth",
             "mythic",
             "фэнтези",
-            "сказ",
-            "маг",
-            "дракон",
-            "королевств",
-            "миф",
+            "сказка",
+            "сказки",
+            "сказоч*",
+            "магия",
+            "магич*",
+            "дракон*",
+            "королевств*",
+            "миф*",
         )
 
         science_fiction_markers = (
             "sci-fi",
             "science fiction",
-            "futur",
+            "futur*",
             "space",
             "alien",
             "robot",
             "android",
             "artificial intelligence",
-            " ai ",
-            "научн",
-            "фантаст",
-            "космос",
-            "робот",
-            "андроид",
-            "искусственн",
+            "ai",
+            "научн*",
+            "фантаст*",
+            "космос*",
+            "робот*",
+            "андроид*",
+            "искусственн*",
             "ии",
         )
 
@@ -1201,10 +1325,10 @@ def _build_moderation_safe_news_payload(
             "expedition",
             "journey",
             "odyssey",
-            "приключ",
-            "экспедиц",
-            "путешеств",
-            "одиссе",
+            "приключ*",
+            "экспедиц*",
+            "путешеств*",
+            "одиссе*",
         )
 
         action_markers = (
@@ -1212,40 +1336,40 @@ def _build_moderation_safe_news_payload(
             "battle",
             "combat",
             "mission",
-            "боевик",
-            "битв",
-            "сраж",
-            "мисси",
+            "боевик*",
+            "битв*",
+            "сраж*",
+            "мисси*",
         )
 
         thriller_markers = (
             "thriller",
             "suspense",
-            "триллер",
-            "напряж",
+            "триллер*",
+            "напряж*",
         )
 
         horror_markers = (
             "horror",
             "haunted",
             "supernatural",
-            "ужас",
-            "хоррор",
-            "сверхъестествен",
+            "ужас*",
+            "хоррор*",
+            "сверхъестествен*",
         )
 
         comedy_markers = (
             "comedy",
             "comic",
-            "комеди",
+            "комеди*",
         )
 
         romance_markers = (
             "romance",
             "romantic",
             "love story",
-            "романтич",
-            "любов",
+            "романтич*",
+            "любов*",
         )
 
         historical_markers = (
@@ -1255,19 +1379,23 @@ def _build_moderation_safe_news_payload(
             "ancient",
             "medieval",
             "victorian",
-            "историчес",
+            "историчес*",
             "век",
-            "древн",
-            "средневек",
-            "викториан",
+            "века",
+            "веке",
+            "веком",
+            "веков",
+            "древн*",
+            "средневек*",
+            "викториан*",
         )
 
         animation_markers = (
             "animation",
             "animated",
             "animated film",
-            "анимац",
-            "мультф",
+            "анимац*",
+            "мультф*",
         )
 
         if contains_any(
@@ -1412,13 +1540,17 @@ def _build_moderation_safe_news_payload(
             "sailing",
             "naval",
             "odyssey",
-            "океан",
-            "мор",
-            "побереж",
-            "остров",
-            "кораб",
-            "парус",
-            "одиссе",
+            "океан*",
+            "море",
+            "моря",
+            "морем",
+            "морю",
+            "морск*",
+            "побереж*",
+            "остров*",
+            "кораб*",
+            "парус*",
+            "одиссе*",
         )
 
         space_markers = (
@@ -1427,10 +1559,10 @@ def _build_moderation_safe_news_payload(
             "cosmic",
             "galaxy",
             "orbit",
-            "космос",
-            "планет",
-            "галактик",
-            "орбит",
+            "космос*",
+            "планет*",
+            "галактик*",
+            "орбит*",
         )
 
         urban_markers = (
@@ -1439,9 +1571,9 @@ def _build_moderation_safe_news_payload(
             "downtown",
             "street",
             "metropolis",
-            "город",
-            "улиц",
-            "мегапол",
+            "город*",
+            "улиц*",
+            "мегапол*",
         )
 
         forest_markers = (
@@ -1449,14 +1581,18 @@ def _build_moderation_safe_news_payload(
             "woods",
             "jungle",
             "лес",
-            "джунг",
+            "леса",
+            "лесу",
+            "лесом",
+            "лесн*",
+            "джунг*",
         )
 
         desert_markers = (
             "desert",
             "dune",
-            "пустын",
-            "дюн",
+            "пустын*",
+            "дюн*",
         )
 
         if contains_any(
@@ -1639,6 +1775,10 @@ def _build_moderation_safe_news_payload(
             source_text,
             festival_markers,
         )
+        is_theme_park = contains_any(
+            source_text,
+            theme_park_markers,
+        )
         is_casting = contains_any(
             source_text,
             casting_markers,
@@ -1721,6 +1861,32 @@ def _build_moderation_safe_news_payload(
                 "публика",
                 "свет экрана",
                 "элегантная премьерная атмосфера",
+            ):
+                append_unique(
+                    motifs,
+                    value,
+                )
+
+        elif is_theme_park:
+            action = (
+                "передать создание, строительство "
+                "или открытие тематической "
+                "развлекательной зоны через "
+                "оригинальную архитектуру и среду, "
+                "не восстанавливая конкретный бренд"
+            )
+            append_unique(
+                settings,
+                "оригинальная тематическая "
+                "развлекательная зона или парк",
+            )
+            for value in (
+                "выразительные декоративные "
+                "фасады и входные порталы",
+                "пешеходные пространства "
+                "и аттракционные конструкции",
+                "анонимные посетители "
+                "в оригинальной среде",
             ):
                 append_unique(
                     motifs,
@@ -1817,6 +1983,16 @@ def _build_moderation_safe_news_payload(
             palette = (
                 "глубокие синие и тёплые "
                 "янтарно-красные световые акценты"
+            )
+
+        elif is_theme_park:
+            atmosphere = (
+                "яркая, семейная, игровая "
+                "и современная"
+            )
+            palette = (
+                "выразительные разнообразные цвета "
+                "с естественным кинематографическим светом"
             )
 
         elif contains_any(
@@ -1923,6 +2099,14 @@ def _build_moderation_safe_news_payload(
                 "анонимные взрослые участники "
                 "деловой встречи без сходства "
                 "с реальными публичными людьми"
+            )
+
+        elif is_theme_park:
+            people = (
+                "только оригинальные неузнаваемые "
+                "посетители общего типа; "
+                "без сходства с известными персонажами "
+                "или публичными людьми"
             )
 
         elif contains_any(
@@ -2043,7 +2227,7 @@ def build_image_prompt(
                     "retry_after_output_moderation_blocked"
                 ),
                 "mode": (
-                    "semantic_visual_brief_v3"
+                    "semantic_visual_brief_v4"
                 ),
             },
         }
