@@ -1,6 +1,13 @@
-from collections.abc import Awaitable, Callable
+from __future__ import annotations
+
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Sequence,
+)
 from dataclasses import dataclass, replace
 from datetime import date
+from decimal import Decimal
 
 import asyncpg
 
@@ -29,6 +36,10 @@ from app.generation.official_trailer_enrichment import (
     OfficialTrailerEnrichmentResult,
     enrich_official_trailer,
 )
+from app.generation.post_integrity import (
+    build_post_integrity_editorial_comment,
+    validate_generated_post_integrity,
+)
 from app.generation.request_key import (
     GenerationRequestKey,
     create_generation_request_key,
@@ -37,6 +48,9 @@ from app.ranking.openai_usage import (
     OpenAICostEstimate,
     OpenAITokenUsage,
 )
+
+
+MAX_GENERATION_INTEGRITY_REVISIONS = 2
 
 
 OfficialTrailerEnricher = Callable[
@@ -147,178 +161,353 @@ def _require_generation_telemetry(
 
 
 def _combine_generation_results(
-    *,
-    primary: OpenAIPostGenerationResult,
-    self_review: OpenAIPostGenerationResult,
+    results: Sequence[
+        OpenAIPostGenerationResult
+    ],
 ) -> OpenAIPostGenerationResult:
     """
-    Объединяет два прохода в один итоговый результат.
+    Объединяет несколько проходов генерации
+    в один итоговый результат.
 
-    Финальный payload берётся из self-review.
+    Финальный payload берётся из последнего
+    прохода.
 
-    Usage и стоимость модели суммируются по двум
-    Responses API вызовам. Стоимость самого
-    web_search здесь отдельно не включается:
-    текущий OpenAICostEstimate описывает только
-    стоимость токенов модели.
+    Usage и стоимость модели суммируются
+    по всем Responses API вызовам.
 
-    Телеметрия web_search сохраняется в итоговом
-    GenerationModelResponse.
+    Телеметрия web_search агрегируется
+    по всем проходам.
     """
 
-    _require_generation_telemetry(primary)
-    _require_generation_telemetry(self_review)
+    normalized_results = tuple(results)
 
-    primary_usage = (
-        primary.model_response.usage
+    if not normalized_results:
+        raise ValueError(
+            "Для объединения должен быть "
+            "передан хотя бы один результат."
+        )
+
+    for result in normalized_results:
+        _require_generation_telemetry(
+            result
+        )
+
+    first_response = (
+        normalized_results[0]
+        .model_response
     )
 
-    self_review_usage = (
-        self_review.model_response.usage
+    first_usage = first_response.usage
+    first_cost = (
+        first_response.cost_estimate
     )
 
-    primary_cost = (
-        primary.model_response.cost_estimate
-    )
-
-    self_review_cost = (
-        self_review.model_response.cost_estimate
-    )
-
-    if primary_usage is None:
+    if first_usage is None:
         raise ValueError(
-            "Primary generation usage отсутствует."
+            "Первый результат не содержит "
+            "usage."
         )
 
-    if self_review_usage is None:
+    if first_cost is None:
         raise ValueError(
-            "Self-review usage отсутствует."
+            "Первый результат не содержит "
+            "cost_estimate."
         )
 
-    if primary_cost is None:
-        raise ValueError(
-            "Primary generation cost отсутствует."
+    total_input_tokens = 0
+    total_cached_input_tokens = 0
+    total_cache_write_tokens = 0
+    total_output_tokens = 0
+    total_reasoning_tokens = 0
+    total_tokens = 0
+
+    total_regular_input_cost = Decimal("0")
+    total_cached_input_cost = Decimal("0")
+    total_cache_write_cost = Decimal("0")
+    total_output_cost = Decimal("0")
+    total_cost = Decimal("0")
+
+    web_search_used = False
+    web_search_call_count = 0
+    web_source_urls: list[str] = []
+
+    for result in normalized_results:
+        response = result.model_response
+        usage = response.usage
+        cost = response.cost_estimate
+
+        if usage is None:
+            raise ValueError(
+                "Один из результатов не "
+                "содержит usage."
+            )
+
+        if cost is None:
+            raise ValueError(
+                "Один из результатов не "
+                "содержит cost_estimate."
+            )
+
+        if (
+            cost.model_name
+            != first_cost.model_name
+        ):
+            raise ValueError(
+                "Модель в разных проходах "
+                "генерации не совпадает."
+            )
+
+        if (
+            cost.pricing_version
+            != first_cost.pricing_version
+        ):
+            raise ValueError(
+                "Версия тарифа в разных "
+                "проходах генерации "
+                "не совпадает."
+            )
+
+        total_input_tokens += (
+            usage.input_tokens
+        )
+        total_cached_input_tokens += (
+            usage.cached_input_tokens
+        )
+        total_cache_write_tokens += (
+            usage.cache_write_tokens
+        )
+        total_output_tokens += (
+            usage.output_tokens
+        )
+        total_reasoning_tokens += (
+            usage.reasoning_tokens
+        )
+        total_tokens += usage.total_tokens
+
+        total_regular_input_cost += (
+            cost.regular_input_cost_usd
+        )
+        total_cached_input_cost += (
+            cost.cached_input_cost_usd
+        )
+        total_cache_write_cost += (
+            cost.cache_write_cost_usd
+        )
+        total_output_cost += (
+            cost.output_cost_usd
+        )
+        total_cost += (
+            cost.total_cost_usd
         )
 
-    if self_review_cost is None:
-        raise ValueError(
-            "Self-review cost отсутствует."
+        web_search_used = (
+            web_search_used
+            or response.web_search_used
         )
 
-    if (
-        primary_cost.model_name
-        != self_review_cost.model_name
-    ):
-        raise ValueError(
-            "Модель primary generation и "
-            "self-review не совпадает."
+        web_search_call_count += (
+            response.web_search_call_count
         )
 
-    if (
-        primary_cost.pricing_version
-        != self_review_cost.pricing_version
-    ):
-        raise ValueError(
-            "Версия тарифа primary generation "
-            "и self-review не совпадает."
-        )
+        for url in response.web_source_urls:
+            if url not in web_source_urls:
+                web_source_urls.append(url)
 
     combined_usage = OpenAITokenUsage(
-        input_tokens=(
-            primary_usage.input_tokens
-            + self_review_usage.input_tokens
-        ),
+        input_tokens=total_input_tokens,
         cached_input_tokens=(
-            primary_usage.cached_input_tokens
-            + self_review_usage.cached_input_tokens
+            total_cached_input_tokens
         ),
         cache_write_tokens=(
-            primary_usage.cache_write_tokens
-            + self_review_usage.cache_write_tokens
+            total_cache_write_tokens
         ),
-        output_tokens=(
-            primary_usage.output_tokens
-            + self_review_usage.output_tokens
-        ),
+        output_tokens=total_output_tokens,
         reasoning_tokens=(
-            primary_usage.reasoning_tokens
-            + self_review_usage.reasoning_tokens
+            total_reasoning_tokens
         ),
-        total_tokens=(
-            primary_usage.total_tokens
-            + self_review_usage.total_tokens
-        ),
+        total_tokens=total_tokens,
     )
 
     combined_cost = OpenAICostEstimate(
-        model_name=primary_cost.model_name,
+        model_name=first_cost.model_name,
         pricing_version=(
-            primary_cost.pricing_version
+            first_cost.pricing_version
         ),
         regular_input_cost_usd=(
-            primary_cost.regular_input_cost_usd
-            + self_review_cost.regular_input_cost_usd
+            total_regular_input_cost
         ),
         cached_input_cost_usd=(
-            primary_cost.cached_input_cost_usd
-            + self_review_cost.cached_input_cost_usd
+            total_cached_input_cost
         ),
         cache_write_cost_usd=(
-            primary_cost.cache_write_cost_usd
-            + self_review_cost.cache_write_cost_usd
+            total_cache_write_cost
         ),
         output_cost_usd=(
-            primary_cost.output_cost_usd
-            + self_review_cost.output_cost_usd
+            total_output_cost
         ),
-        total_cost_usd=(
-            primary_cost.total_cost_usd
-            + self_review_cost.total_cost_usd
-        ),
+        total_cost_usd=total_cost,
     )
 
-    web_source_urls = tuple(
-        dict.fromkeys(
-            (
-                *primary.model_response.web_source_urls,
-                *self_review.model_response.web_source_urls,
-            )
-        )
-    )
+    final_result = normalized_results[-1]
 
     combined_model_response = (
         GenerationModelResponse(
             output_text=(
-                self_review
+                final_result
                 .model_response
                 .output_text
             ),
             usage=combined_usage,
             cost_estimate=combined_cost,
             web_search_used=(
-                primary
-                .model_response
-                .web_search_used
-                or self_review
-                .model_response
-                .web_search_used
+                web_search_used
             ),
             web_search_call_count=(
-                primary
-                .model_response
-                .web_search_call_count
-                + self_review
-                .model_response
-                .web_search_call_count
+                web_search_call_count
             ),
-            web_source_urls=web_source_urls,
+            web_source_urls=tuple(
+                web_source_urls
+            ),
         )
     )
 
     return OpenAIPostGenerationResult(
-        payload=self_review.payload,
-        model_response=combined_model_response,
+        payload=final_result.payload,
+        model_response=(
+            combined_model_response
+        ),
     )
+
+
+async def _run_integrity_repairs_if_needed(
+    generator: OpenAITelegramPostGenerator,
+    *,
+    items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ],
+    initial_generation: (
+        OpenAIPostGenerationResult
+    ),
+    max_revision_attempts: int = (
+        MAX_GENERATION_INTEGRITY_REVISIONS
+    ),
+) -> tuple[
+    OpenAIPostGenerationResult,
+    ...,
+]:
+    """
+    Проверяет финальный self-review результат
+    deterministic integrity gate'ом.
+
+    Если gate обнаруживает оборванный или
+    структурно повреждённый текст, выполняется
+    ограниченное число существующих revision-
+    запросов.
+
+    Возвращаемый кортеж всегда начинается
+    с initial_generation и дополнительно
+    содержит выполненные repair revisions.
+    """
+
+    if max_revision_attempts < 0:
+        raise ValueError(
+            "max_revision_attempts не может "
+            "быть отрицательным."
+        )
+
+    _require_generation_telemetry(
+        initial_generation
+    )
+
+    generations: list[
+        OpenAIPostGenerationResult
+    ] = [initial_generation]
+
+    current_generation = (
+        initial_generation
+    )
+
+    issues = (
+        validate_generated_post_integrity(
+            current_generation.payload
+        )
+    )
+
+    revision_attempts_used = 0
+
+    while issues:
+        if (
+            revision_attempts_used
+            >= max_revision_attempts
+        ):
+            raise ValueError(
+                "Integrity gate не пройден "
+                "после ограниченного числа "
+                "revision-попыток: "
+                + "; ".join(issues)
+            )
+
+        editorial_comment = (
+            build_post_integrity_editorial_comment(
+                issues
+            )
+        )
+
+        revision_request = (
+            generator.build_revision_request(
+                items,
+                source_post_text=(
+                    current_generation
+                    .payload
+                    .post_text
+                ),
+                editorial_comment=(
+                    editorial_comment
+                ),
+                issues=issues,
+            )
+        )
+
+        revised_generation = (
+            await generator
+            .generate_prepared_revision_request(
+                items,
+                revision_request,
+                source_post_text=(
+                    current_generation
+                    .payload
+                    .post_text
+                ),
+                editorial_comment=(
+                    editorial_comment
+                ),
+                issues=issues,
+            )
+        )
+
+        _require_generation_telemetry(
+            revised_generation
+        )
+
+        generations.append(
+            revised_generation
+        )
+
+        current_generation = (
+            revised_generation
+        )
+
+        issues = (
+            validate_generated_post_integrity(
+                current_generation.payload
+            )
+        )
+
+        revision_attempts_used += 1
+
+    return tuple(generations)
 
 
 async def _enrich_generation_items(
@@ -457,12 +646,17 @@ async def run_reserved_openai_generation(
     9. Выполняет автоматический self-review
        того же поста. Self-review сам решает,
        нужен ли web_search.
-    10. Финальный текст берёт из self-review,
-        а usage и стоимость модели суммирует
-        по обоим Responses API вызовам.
-    11. Сохраняет только финальный generated_post.
-    12. Переводит выпуск в awaiting_review.
-    13. При ошибке переводит выпуск в failed.
+    10. Проверяет self-review через
+        deterministic text integrity gate.
+    11. При необходимости выполняет до двух
+        bounded revision-проходов.
+    12. Финальный payload берётся из последнего
+        успешного прохода.
+    13. Usage и стоимость суммируются по всем
+        Responses API вызовам.
+    14. Сохраняет только финальный generated_post.
+    15. Переводит выпуск в awaiting_review.
+    16. При ошибке переводит выпуск в failed.
 
     Функция не управляет жизненным циклом
     пула PostgreSQL или OpenAI SDK-клиента.
@@ -579,12 +773,22 @@ async def run_reserved_openai_generation(
             self_review_generation
         )
 
-        generation = (
-            _combine_generation_results(
-                primary=primary_generation,
-                self_review=(
+        review_passes = (
+            await _run_integrity_repairs_if_needed(
+                generator,
+                items=generation_items,
+                initial_generation=(
                     self_review_generation
                 ),
+            )
+        )
+
+        generation = (
+            _combine_generation_results(
+                (
+                    primary_generation,
+                    *review_passes,
+                )
             )
         )
 
