@@ -17,7 +17,7 @@ from app.generation.openai_generator import (
 
 
 GENERATION_REQUEST_KEY_VERSION = (
-    "generation_request_key_v1"
+    "generation_request_key_v2"
 )
 
 GENERATION_REQUEST_KEY_PATTERN = re.compile(

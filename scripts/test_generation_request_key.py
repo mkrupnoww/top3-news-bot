@@ -243,12 +243,12 @@ def test_deterministic_key() -> None:
 
     assert (
         GENERATION_REQUEST_KEY_VERSION
-        == "generation_request_key_v1"
+        == "generation_request_key_v2"
     )
 
     assert first_key.value == (
-        "f42336efbe832f8beb30e8ca8e91cdb3"
-        "ef25a8c2f484ffa75d0e37f2d41f3bd0"
+        "bee6b1b04b86210390677b600c534dd0"
+        "cddf9a5cc31221b5212b092f112d28e4"
     )
 
     print(

@@ -8,6 +8,7 @@ from collections.abc import (
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+import logging
 
 import asyncpg
 
@@ -29,6 +30,7 @@ from app.generation.openai_generator import (
     GenerationModelRequest,
     GenerationModelResponse,
     GenerationNewsItem,
+    OpenAIGeneratedPostPayload,
     OpenAIPostGenerationResult,
     OpenAITelegramPostGenerator,
 )
@@ -37,6 +39,7 @@ from app.generation.official_trailer_enrichment import (
     enrich_official_trailer,
 )
 from app.generation.post_integrity import (
+    build_deterministic_integrity_fallback,
     build_post_integrity_editorial_comment,
     validate_generated_post_integrity,
 )
@@ -52,6 +55,8 @@ from app.ranking.openai_usage import (
 
 MAX_GENERATION_INTEGRITY_REVISIONS = 2
 
+logger = logging.getLogger(__name__)
+
 
 OfficialTrailerEnricher = Callable[
     ...,
@@ -62,6 +67,20 @@ GenerationReservationObserver = Callable[
     [GenerationReservation],
     Awaitable[None],
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrityRepairOutcome:
+    """Итог bounded text-integrity recovery."""
+
+    model_generations: tuple[
+        OpenAIPostGenerationResult,
+        ...,
+    ]
+
+    final_payload: OpenAIGeneratedPostPayload
+
+    used_deterministic_fallback: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +183,11 @@ def _combine_generation_results(
     results: Sequence[
         OpenAIPostGenerationResult
     ],
+    *,
+    final_payload: (
+        OpenAIGeneratedPostPayload
+        | None
+    ) = None,
 ) -> OpenAIPostGenerationResult:
     """
     Объединяет несколько проходов генерации
@@ -372,7 +396,11 @@ def _combine_generation_results(
     )
 
     return OpenAIPostGenerationResult(
-        payload=final_result.payload,
+        payload=(
+            final_result.payload
+            if final_payload is None
+            else final_payload
+        ),
         model_response=(
             combined_model_response
         ),
@@ -390,25 +418,26 @@ async def _run_integrity_repairs_if_needed(
     initial_generation: (
         OpenAIPostGenerationResult
     ),
+    primary_generation: (
+        OpenAIPostGenerationResult
+        | None
+    ) = None,
     max_revision_attempts: int = (
         MAX_GENERATION_INTEGRITY_REVISIONS
     ),
-) -> tuple[
-    OpenAIPostGenerationResult,
-    ...,
-]:
+) -> IntegrityRepairOutcome:
     """
-    Проверяет финальный self-review результат
-    deterministic integrity gate'ом.
+    Выполняет bounded text-integrity recovery.
 
-    Если gate обнаруживает оборванный или
-    структурно повреждённый текст, выполняется
-    ограниченное число существующих revision-
-    запросов.
+    Сначала проверяет self-review. Если обнаружен
+    вероятно обрезанный длинный body, выполняет
+    до max_revision_attempts модельных revision.
 
-    Возвращаемый кортеж всегда начинается
-    с initial_generation и дополнительно
-    содержит выполненные repair revisions.
+    Если модельные revisions не устранили только
+    эвристическую проблему завершения текста,
+    применяется локальный deterministic fail-safe.
+    Сама эта эвристика больше не должна делать
+    ежедневный workflow terminal failed.
     """
 
     if max_revision_attempts < 0:
@@ -420,6 +449,11 @@ async def _run_integrity_repairs_if_needed(
     _require_generation_telemetry(
         initial_generation
     )
+
+    if primary_generation is not None:
+        _require_generation_telemetry(
+            primary_generation
+        )
 
     generations: list[
         OpenAIPostGenerationResult
@@ -437,18 +471,11 @@ async def _run_integrity_repairs_if_needed(
 
     revision_attempts_used = 0
 
-    while issues:
-        if (
-            revision_attempts_used
-            >= max_revision_attempts
-        ):
-            raise ValueError(
-                "Integrity gate не пройден "
-                "после ограниченного числа "
-                "revision-попыток: "
-                + "; ".join(issues)
-            )
-
+    while (
+        issues
+        and revision_attempts_used
+        < max_revision_attempts
+    ):
         editorial_comment = (
             build_post_integrity_editorial_comment(
                 issues
@@ -507,7 +534,42 @@ async def _run_integrity_repairs_if_needed(
 
         revision_attempts_used += 1
 
-    return tuple(generations)
+    if not issues:
+        return IntegrityRepairOutcome(
+            model_generations=tuple(
+                generations
+            ),
+            final_payload=(
+                current_generation.payload
+            ),
+            used_deterministic_fallback=False,
+        )
+
+    deterministic_payload = (
+        build_deterministic_integrity_fallback(
+            current_generation.payload,
+            fallback_payload=(
+                primary_generation.payload
+                if primary_generation is not None
+                else None
+            ),
+        )
+    )
+
+    logger.warning(
+        "Text integrity model repairs exhausted; "
+        "deterministic local fail-safe applied. "
+        "remaining_issues=%s",
+        "; ".join(issues),
+    )
+
+    return IntegrityRepairOutcome(
+        model_generations=tuple(
+            generations
+        ),
+        final_payload=deterministic_payload,
+        used_deterministic_fallback=True,
+    )
 
 
 async def _enrich_generation_items(
@@ -650,13 +712,15 @@ async def run_reserved_openai_generation(
         deterministic text integrity gate.
     11. При необходимости выполняет до двух
         bounded revision-проходов.
-    12. Финальный payload берётся из последнего
-        успешного прохода.
-    13. Usage и стоимость суммируются по всем
-        Responses API вызовам.
+    12. Если revisions не устранили вероятно
+        обрезанный хвост, применяет локальный
+        deterministic fail-safe без новых фактов.
+    13. Usage и стоимость суммируются только по
+        фактическим Responses API вызовам.
     14. Сохраняет только финальный generated_post.
     15. Переводит выпуск в awaiting_review.
-    16. При ошибке переводит выпуск в failed.
+    16. Реальные ошибки pipeline по-прежнему
+        переводят выпуск в failed.
 
     Функция не управляет жизненным циклом
     пула PostgreSQL или OpenAI SDK-клиента.
@@ -773,12 +837,15 @@ async def run_reserved_openai_generation(
             self_review_generation
         )
 
-        review_passes = (
+        integrity_outcome = (
             await _run_integrity_repairs_if_needed(
                 generator,
                 items=generation_items,
                 initial_generation=(
                     self_review_generation
+                ),
+                primary_generation=(
+                    primary_generation
                 ),
             )
         )
@@ -787,8 +854,13 @@ async def run_reserved_openai_generation(
             _combine_generation_results(
                 (
                     primary_generation,
-                    *review_passes,
-                )
+                    *integrity_outcome
+                    .model_generations,
+                ),
+                final_payload=(
+                    integrity_outcome
+                    .final_payload
+                ),
             )
         )
 
