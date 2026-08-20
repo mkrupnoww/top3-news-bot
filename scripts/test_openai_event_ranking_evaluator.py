@@ -509,7 +509,7 @@ def test_build_request() -> None:
     ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v7"
+        "event_ranking_evaluator_v8"
     )
     assert EVENT_PROMPT_VERSION == (
         "movie_news_event_ranking_prompt_v6"
@@ -524,8 +524,62 @@ def test_build_request() -> None:
         EVENT_PROMPT_VERSION
     )
 
-    print("Request preparation v7: OK")
+    print("Request preparation v8: OK")
     print("client_call_count=0")
+
+
+async def test_representative_flag_normalization() -> None:
+    """Нормализует redundant flag по representative_news_id."""
+
+    payload = build_valid_payload()
+    events = payload["events"]
+    assert isinstance(events, list)
+    second_event = events[1]
+    assert isinstance(second_event, dict)
+    assert second_event["representative_news_id"] == 101
+    members = second_event["members"]
+    assert isinstance(members, list)
+    first_member = members[0]
+    second_member = members[1]
+    assert isinstance(first_member, dict)
+    assert isinstance(second_member, dict)
+
+    # Имитирует production-сбой 2026-08-20:
+    # canonical representative_news_id указывает на 101,
+    # но модель ошибочно поставила boolean-флаг у 102.
+    first_member["is_representative"] = False
+    second_member["is_representative"] = True
+
+    evaluator, client = build_evaluator(
+        build_response(payload)
+    )
+    result = await evaluator.evaluate_detailed(
+        build_selection()
+    )
+
+    assert len(client.requests) == 1
+    assert result.diagnostics is not None
+    assert result.diagnostics.repair_attempted is False
+    assert result.diagnostics.model_call_count == 1
+
+    normalized_event = next(
+        event
+        for event in result.events
+        if event.representative_news_id == 101
+    )
+    normalized_members = {
+        member.news_id: member
+        for member in normalized_event.members
+    }
+
+    assert normalized_members[101].is_representative is True
+    assert normalized_members[102].is_representative is False
+
+    print()
+    print("Representative flag normalization: OK")
+    print("canonical_representative_news_id=101")
+    print("normalized_true_news_id=101")
+    print("client_call_count=1")
 
 
 async def test_complete_response() -> None:
@@ -1360,9 +1414,10 @@ async def test_common_interface() -> None:
 
 
 async def main() -> int:
-    """Запускает изолированный тест v7."""
+    """Запускает изолированный тест v8."""
 
     test_build_request()
+    await test_representative_flag_normalization()
     await test_complete_response()
     await test_successful_repair()
     await test_degraded_after_unsuccessful_repair()

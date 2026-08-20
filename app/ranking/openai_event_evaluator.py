@@ -1227,7 +1227,8 @@ def _build_events(
                         member.source_relation
                     ),
                     is_representative=(
-                        member.is_representative
+                        member.news_id
+                        == event.representative_news_id
                     ),
                     is_independent_source=(
                         member.is_independent_source
