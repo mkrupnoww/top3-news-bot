@@ -271,7 +271,7 @@ def _assert_generator_fallback_identity() -> None:
 async def _load_attempts(
     pool,
 ) -> list[asyncpg.Record]:
-    """Читает image attempts текущего production incident."""
+    """Читает historical image attempts production fixture."""
 
     async with pool.acquire() as connection:
         rows = await connection.fetch(
@@ -282,7 +282,8 @@ async def _load_attempts(
                 prompt_version,
                 error_type,
                 error_message,
-                failed_at
+                failed_at,
+                completed_at
             FROM image_generation_requests
             WHERE batch_id = $1
               AND generated_post_id = $2
@@ -296,57 +297,49 @@ async def _load_attempts(
     return list(rows)
 
 
-async def _assert_production_fixture(
+async def _load_fixture_snapshot(
     pool,
-) -> int:
+) -> dict[str, object]:
     """
-    Проверяет incident 2026-08-15.
+    Снимает фактическое production-состояние fixture.
 
-    Возвращает текущий linked failed image_generation_id.
+    Снимок используется только для проверки полного rollback.
+    Тест не требует, чтобы workflow навсегда оставался failed.
     """
-
-    workflow = await load_daily_workflow(
-        pool,
-        daily_workflow_run_id=WORKFLOW_ID,
-    )
-
-    assert workflow.workflow_status == "failed"
-    assert workflow.current_stage == "failed"
-    assert workflow.ranking_run_id == RANKING_RUN_ID
-    assert workflow.batch_id == BATCH_ID
-    assert (
-        workflow.generated_post_id
-        == GENERATED_POST_ID
-    )
-
-    linked_failed_image_id = (
-        workflow.image_generation_id
-    )
-
-    if (
-        not isinstance(
-            linked_failed_image_id,
-            int,
-        )
-        or isinstance(
-            linked_failed_image_id,
-            bool,
-        )
-        or linked_failed_image_id <= 0
-    ):
-        raise AssertionError(
-            "Workflow должен ссылаться "
-            "на failed image_generation_id."
-        )
 
     async with pool.acquire() as connection:
+        workflow = await connection.fetchrow(
+            """
+            SELECT
+                workflow_status,
+                current_stage,
+                ranking_run_id,
+                batch_id,
+                generated_post_id,
+                image_generation_id,
+                error_type,
+                error_message,
+                finished_at
+            FROM daily_workflow_runs
+            WHERE daily_workflow_run_id = $1
+            """,
+            WORKFLOW_ID,
+        )
+
         generation = await connection.fetchrow(
             """
             SELECT
                 b.batch_status,
+                b.approved_at,
+                b.published_at,
+                b.approved_by_telegram_user_id,
+                b.error_message AS batch_error_message,
                 p.post_status,
                 p.image_path,
-                p.image_sha256
+                p.image_sha256,
+                p.image_prompt,
+                p.image_model_name,
+                p.image_prompt_version
             FROM publication_batches AS b
             JOIN generated_posts AS p
               ON p.batch_id = b.batch_id
@@ -357,15 +350,75 @@ async def _assert_production_fixture(
             GENERATED_POST_ID,
         )
 
+        attempts = await connection.fetch(
+            """
+            SELECT
+                image_generation_id,
+                image_status,
+                prompt_version,
+                image_path,
+                image_sha256,
+                error_type,
+                error_message,
+                failed_at,
+                completed_at
+            FROM image_generation_requests
+            WHERE batch_id = $1
+              AND generated_post_id = $2
+              AND request_kind = 'initial'
+            ORDER BY image_generation_id
+            """,
+            BATCH_ID,
+            GENERATED_POST_ID,
+        )
+
+    if workflow is None:
+        raise AssertionError(
+            "Production workflow fixture не найден."
+        )
+
     if generation is None:
         raise AssertionError(
             "Production batch/post fixture не найдена."
         )
 
-    assert generation["batch_status"] == "awaiting_review"
-    assert generation["post_status"] == "awaiting_review"
-    assert generation["image_path"] is None
-    assert generation["image_sha256"] is None
+    return {
+        "workflow": dict(workflow),
+        "generation": dict(generation),
+        "attempts": [
+            dict(row)
+            for row in attempts
+        ],
+    }
+
+
+async def _assert_historical_fixture(
+    pool,
+) -> int:
+    """
+    Проверяет только неизменяемую историческую часть incident 2026-08-15.
+
+    Текущий workflow уже мог быть успешно восстановлен, approved или
+    опубликован. Для теста важны:
+    - исходные ranking/batch/post;
+    - historical normal-v2 moderation block;
+    - два historical fallback-v1 moderation blocks.
+
+    Возвращает historical normal failed image_generation_id, который
+    используется как безопасный source для synthetic rollback-сценария.
+    """
+
+    workflow = await load_daily_workflow(
+        pool,
+        daily_workflow_run_id=WORKFLOW_ID,
+    )
+
+    assert workflow.ranking_run_id == RANKING_RUN_ID
+    assert workflow.batch_id == BATCH_ID
+    assert (
+        workflow.generated_post_id
+        == GENERATED_POST_ID
+    )
 
     attempts = await _load_attempts(
         pool
@@ -377,6 +430,7 @@ async def _assert_production_fixture(
         if (
             row["prompt_version"]
             == HISTORICAL_NORMAL_PROMPT_VERSION
+            and row["image_status"] == "failed"
         )
     ]
 
@@ -386,27 +440,26 @@ async def _assert_production_fixture(
         if (
             row["prompt_version"]
             == HISTORICAL_FALLBACK_PROMPT_VERSION
+            and row["image_status"] == "failed"
         )
     ]
 
-    current_fallback_attempts = [
-        row
-        for row in attempts
-        if (
-            row["prompt_version"]
-            == EXPECTED_FALLBACK_PROMPT_VERSION
+    if len(normal_attempts) != 1:
+        raise AssertionError(
+            "Ожидалась ровно одна historical normal-v2 "
+            "failed image attempt."
         )
-    ]
 
-    assert len(normal_attempts) == 1
-    assert len(fallback_v1_attempts) == 2
-    assert len(current_fallback_attempts) == 0
+    if len(fallback_v1_attempts) != 2:
+        raise AssertionError(
+            "Ожидались ровно две historical fallback-v1 "
+            "failed image attempts."
+        )
 
     for row in (
         *normal_attempts,
         *fallback_v1_attempts,
     ):
-        assert row["image_status"] == "failed"
         assert row["error_type"] == "BadRequestError"
         assert row["failed_at"] is not None
 
@@ -414,53 +467,156 @@ async def _assert_production_fixture(
             str(row["error_message"]).lower()
         ):
             raise AssertionError(
-                "Ожидался moderation_blocked: "
+                "Historical attempt не является "
+                "moderation_blocked: "
                 f"image_generation_id="
                 f"{row['image_generation_id']}"
             )
 
-    linked_row = next(
-        (
-            row
-            for row in attempts
-            if (
-                row["image_generation_id"]
-                == linked_failed_image_id
-            )
-        ),
-        None,
+    normal_failed_image_id = int(
+        normal_attempts[0]["image_generation_id"]
     )
 
-    if linked_row is None:
+    print(
+        "Historical production moderation fixture: OK"
+    )
+    print(
+        "current_workflow_status="
+        f"{workflow.workflow_status}"
+    )
+    print(
+        "historical_normal_v2_failed_attempts=1"
+    )
+    print(
+        "historical_fallback_v1_failed_attempts=2"
+    )
+
+    return normal_failed_image_id
+
+
+async def _prepare_retry_fixture(
+    connection: asyncpg.Connection,
+    *,
+    normal_failed_image_id: int,
+) -> None:
+    """
+    Создаёт failed/failed retry-состояние только внутри rollback transaction.
+
+    Production workflow может в реальности быть awaiting_review/approved/
+    published и иметь successful historical fallback. Сначала переключаем
+    workflow на historical failed normal image, затем временно убираем
+    active/completed initial image rows и attempts текущего fallback-v5.
+    После rollback исходное production-состояние восстанавливается PostgreSQL.
+    """
+
+    updated = await connection.execute(
+        """
+        UPDATE daily_workflow_runs
+        SET
+            workflow_status = 'failed',
+            current_stage = 'failed',
+            ranking_run_id = $2,
+            batch_id = $3,
+            generated_post_id = $4,
+            image_generation_id = $5,
+            error_type = 'BadRequestError',
+            error_message = (
+                'Synthetic rollback fixture: '
+                'moderation_blocked'
+            ),
+            finished_at = now()
+        WHERE daily_workflow_run_id = $1
+        """,
+        WORKFLOW_ID,
+        RANKING_RUN_ID,
+        BATCH_ID,
+        GENERATED_POST_ID,
+        normal_failed_image_id,
+    )
+
+    if updated != "UPDATE 1":
         raise AssertionError(
-            "Linked image_generation_id "
-            "не найден среди attempts."
+            "Не удалось подготовить workflow rollback fixture."
         )
 
+    await connection.execute(
+        """
+        UPDATE publication_batches
+        SET
+            batch_status = 'awaiting_review',
+            approved_at = NULL,
+            published_at = NULL,
+            approved_by_telegram_user_id = NULL,
+            error_message = NULL
+        WHERE batch_id = $1
+        """,
+        BATCH_ID,
+    )
+
+    await connection.execute(
+        """
+        UPDATE generated_posts
+        SET
+            post_status = 'awaiting_review',
+            image_path = NULL,
+            image_sha256 = NULL,
+            image_prompt = NULL,
+            image_model_name = NULL,
+            image_prompt_version = NULL
+        WHERE generated_post_id = $1
+          AND batch_id = $2
+        """,
+        GENERATED_POST_ID,
+        BATCH_ID,
+    )
+
+    # Successful historical fallback (например fallback-v2) блокирует
+    # новый moderation retry по production-правилам. Для synthetic test
+    # временно убираем active/completed initial requests независимо от
+    # их исторической версии. Одновременно очищаем attempts текущего v5,
+    # чтобы его version-aware budget начинался с нуля.
+    await connection.execute(
+        """
+        DELETE FROM image_generation_requests
+        WHERE batch_id = $1
+          AND generated_post_id = $2
+          AND request_kind = 'initial'
+          AND (
+                image_status IN (
+                    'reserved',
+                    'completed'
+                )
+                OR prompt_version = $3
+              )
+        """,
+        BATCH_ID,
+        GENERATED_POST_ID,
+        EXPECTED_FALLBACK_PROMPT_VERSION,
+    )
+
+    prepared = await connection.fetchrow(
+        """
+        SELECT
+            workflow_status,
+            current_stage,
+            image_generation_id
+        FROM daily_workflow_runs
+        WHERE daily_workflow_run_id = $1
+        """,
+        WORKFLOW_ID,
+    )
+
+    if prepared is None:
+        raise AssertionError(
+            "Prepared workflow fixture исчез."
+        )
+
+    assert prepared["workflow_status"] == "failed"
+    assert prepared["current_stage"] == "failed"
     assert (
-        linked_row["prompt_version"]
-        == HISTORICAL_FALLBACK_PROMPT_VERSION
+        int(prepared["image_generation_id"])
+        == normal_failed_image_id
     )
-
-    assert (
-        linked_row["image_status"]
-        == "failed"
-    )
-
-    print(
-        "Current production moderation incident fixture: OK"
-    )
-    print(
-        "normal_v2_failed_attempts=1"
-    )
-    print(
-        "fallback_v1_failed_attempts=2"
-    )
-    print(
-        "current_fallback_v5_existing_attempts=0"
-    )
-
-    return linked_failed_image_id
 
 
 async def _insert_synthetic_fallback_reservation(
@@ -605,6 +761,16 @@ async def main() -> int:
     )
 
     try:
+        snapshot_before = await _load_fixture_snapshot(
+            database_pool
+        )
+
+        normal_failed_image_id = (
+            await _assert_historical_fixture(
+                database_pool
+            )
+        )
+
         async with database_pool.acquire() as connection:
             transaction = connection.transaction()
             await transaction.start()
@@ -614,10 +780,11 @@ async def main() -> int:
             )
 
             try:
-                linked_failed_image_id = (
-                    await _assert_production_fixture(
-                        pool
-                    )
+                await _prepare_retry_fixture(
+                    connection,
+                    normal_failed_image_id=(
+                        normal_failed_image_id
+                    ),
                 )
 
                 attempts_used = (
@@ -635,6 +802,9 @@ async def main() -> int:
 
                 assert attempts_used == 0
 
+                print(
+                    "Synthetic failed/image fixture prepared: OK"
+                )
                 print(
                     "Fallback v5 prompt version "
                     "has fresh budget: OK"
@@ -657,11 +827,11 @@ async def main() -> int:
                 assert workflow.current_stage == "image"
                 assert (
                     workflow.image_generation_id
-                    == linked_failed_image_id
+                    == normal_failed_image_id
                 )
 
                 print(
-                    "Failed fallback-v1 workflow "
+                    "Synthetic failed workflow "
                     "reopens for fallback v5: OK"
                 )
 
@@ -670,7 +840,7 @@ async def main() -> int:
                     _insert_synthetic_fallback_reservation(
                         pool,
                         source_image_generation_id=(
-                            linked_failed_image_id
+                            normal_failed_image_id
                         ),
                         attempt_number=1,
                     )
@@ -724,7 +894,7 @@ async def main() -> int:
                     _insert_synthetic_fallback_reservation(
                         pool,
                         source_image_generation_id=(
-                            linked_failed_image_id
+                            normal_failed_image_id
                         ),
                         attempt_number=2,
                     )
@@ -781,10 +951,18 @@ async def main() -> int:
             finally:
                 await transaction.rollback()
 
-        await _assert_production_fixture(
+        snapshot_after = await _load_fixture_snapshot(
             database_pool
         )
 
+        if snapshot_after != snapshot_before:
+            raise AssertionError(
+                "Production fixture изменился после rollback."
+            )
+
+        print(
+            "Production fixture restored after rollback: OK"
+        )
         print()
         print(
             "Database changes=rolled_back"

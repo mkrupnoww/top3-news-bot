@@ -38,6 +38,9 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v3"
+HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
+
 WINNER_COMBINATION_ID = 1844
 FIRST_REPLACEMENT_ID = 1845
 
@@ -106,6 +109,171 @@ def _synthetic_request_key(
     ).hexdigest()
 
 
+async def _load_fixture_snapshot(
+    pool,
+) -> dict[str, object]:
+    """Снимает production fixture для строгой проверки rollback."""
+
+    async with pool.acquire() as connection:
+        workflow = await connection.fetchrow(
+            """
+            SELECT
+                workflow_status,
+                current_stage,
+                ranking_run_id,
+                batch_id,
+                generated_post_id,
+                image_generation_id,
+                error_type,
+                error_message,
+                finished_at
+            FROM top3_news.daily_workflow_runs
+            WHERE daily_workflow_run_id = $1
+            """,
+            WORKFLOW_ID,
+        )
+
+        generation = await connection.fetchrow(
+            """
+            SELECT
+                b.batch_status,
+                b.approved_at,
+                b.published_at,
+                b.approved_by_telegram_user_id,
+                b.error_message AS batch_error_message,
+                gp.post_status,
+                gp.image_path,
+                gp.image_sha256,
+                gp.image_prompt,
+                gp.image_model_name,
+                gp.image_prompt_version
+            FROM top3_news.publication_batches AS b
+            JOIN top3_news.generated_posts AS gp
+              ON gp.batch_id = b.batch_id
+            WHERE b.batch_id = $1
+              AND gp.generated_post_id = $2
+            """,
+            BATCH_ID,
+            GENERATED_POST_ID,
+        )
+
+        attempts = await connection.fetch(
+            """
+            SELECT
+                image_generation_id,
+                image_status,
+                prompt_version,
+                image_path,
+                image_sha256,
+                error_type,
+                error_message,
+                failed_at,
+                completed_at
+            FROM top3_news.image_generation_requests
+            WHERE batch_id = $1
+              AND generated_post_id = $2
+              AND request_kind = 'initial'
+            ORDER BY image_generation_id
+            """,
+            BATCH_ID,
+            GENERATED_POST_ID,
+        )
+
+        selection_attempts = await connection.fetch(
+            """
+            SELECT
+                selection_attempt_id,
+                attempt_number,
+                combination_id,
+                selection_status,
+                batch_id,
+                generated_post_id,
+                image_generation_id
+            FROM top3_news.daily_workflow_selection_attempts
+            WHERE daily_workflow_run_id = $1
+            ORDER BY selection_attempt_id
+            """,
+            WORKFLOW_ID,
+        )
+
+    if workflow is None:
+        raise AssertionError(
+            "Production workflow fixture не найден."
+        )
+
+    if generation is None:
+        raise AssertionError(
+            "Production batch/post fixture не найдена."
+        )
+
+    return {
+        "workflow": dict(workflow),
+        "generation": dict(generation),
+        "attempts": [
+            dict(row)
+            for row in attempts
+        ],
+        "selection_attempts": [
+            dict(row)
+            for row in selection_attempts
+        ],
+    }
+
+
+async def _assert_historical_fixture(
+    pool,
+) -> int:
+    """
+    Проверяет неизменяемую часть incident 2026-08-15.
+
+    Текущий workflow может быть уже успешно восстановлен. Для branch-test
+    нужен только historical normal-v2 moderation-blocked request.
+    """
+
+    async with pool.acquire() as connection:
+        workflow = await connection.fetchrow(
+            """
+            SELECT
+                ranking_run_id,
+                batch_id,
+                generated_post_id,
+                workflow_status
+            FROM top3_news.daily_workflow_runs
+            WHERE daily_workflow_run_id = $1
+            """,
+            WORKFLOW_ID,
+        )
+
+        if workflow is None:
+            raise AssertionError(
+                "Historical workflow fixture не найден."
+            )
+
+        assert int(workflow["ranking_run_id"]) == RANKING_RUN_ID
+        assert int(workflow["batch_id"]) == BATCH_ID
+        assert int(workflow["generated_post_id"]) == GENERATED_POST_ID
+
+        normal_failed_image_id = (
+            await _load_normal_failed_image_id(
+                connection
+            )
+        )
+
+    print(
+        "Historical replacement fixture: OK"
+    )
+    print(
+        "current_workflow_status="
+        f"{workflow['workflow_status']}"
+    )
+    print(
+        "historical_normal_prompt_version="
+        f"{HISTORICAL_NORMAL_PROMPT_VERSION}"
+    )
+
+    return normal_failed_image_id
+
+
 async def _load_normal_failed_image_id(
     connection: asyncpg.Connection,
 ) -> int:
@@ -133,7 +301,7 @@ async def _load_normal_failed_image_id(
         """,
         BATCH_ID,
         GENERATED_POST_ID,
-        OPENAI_IMAGE_PROMPT_VERSION,
+        HISTORICAL_NORMAL_PROMPT_VERSION,
     )
 
     if image_generation_id is None:
@@ -152,7 +320,7 @@ async def _prepare_fixture(
 ) -> None:
     """
     В rollback-транзакции восстанавливает состояние:
-    normal image -> moderation_blocked, fallback budget ещё свежий.
+    normal image -> moderation_blocked, current fallback-v5 budget ещё свежий.
     """
 
     await connection.execute(
@@ -218,16 +386,25 @@ async def _prepare_fixture(
         BATCH_ID,
     )
 
-    # Current fallback v2 мог реально завершиться успешно позже.
-    # Для synthetic branch-test удаляем только attempts текущей
-    # fallback prompt_version. Всё находится во внешнем rollback.
+    # Production fixture уже мог иметь successful historical fallback
+    # (сейчас это fallback-v2). Он корректно блокирует новый retry.
+    # Для synthetic branch-test временно удаляем любой active/completed
+    # initial image request, а также attempts текущего fallback-v5,
+    # чтобы его version-aware budget начинался с нуля.
+    # Всё изменение находится во внешней rollback transaction.
     await connection.execute(
         """
         DELETE FROM top3_news.image_generation_requests
         WHERE batch_id = $1
           AND generated_post_id = $2
           AND request_kind = 'initial'
-          AND prompt_version = $3
+          AND (
+                image_status IN (
+                    'reserved',
+                    'completed'
+                )
+                OR prompt_version = $3
+              )
         """,
         BATCH_ID,
         GENERATED_POST_ID,
@@ -358,6 +535,15 @@ async def main() -> int:
             f"{MAX_TOP3_REPLACEMENTS}"
         )
 
+    if (
+        OPENAI_IMAGE_PROMPT_VERSION
+        != CURRENT_NORMAL_PROMPT_VERSION
+    ):
+        raise AssertionError(
+            "Неожиданная current normal prompt_version: "
+            f"{OPENAI_IMAGE_PROMPT_VERSION}"
+        )
+
     settings = get_settings()
 
     database_pool = await create_database_pool(
@@ -365,19 +551,15 @@ async def main() -> int:
     )
 
     try:
-        async with database_pool.acquire() as connection:
-            original_selection_count = (
-                await connection.fetchval(
-                    """
-                    SELECT COUNT(*)::integer
-                    FROM
-                        top3_news
-                        .daily_workflow_selection_attempts
-                    WHERE daily_workflow_run_id = $1
-                    """,
-                    WORKFLOW_ID,
-                )
+        snapshot_before = await _load_fixture_snapshot(
+            database_pool
+        )
+
+        historical_normal_failed_image_id = (
+            await _assert_historical_fixture(
+                database_pool
             )
+        )
 
         async with database_pool.acquire() as connection:
             transaction = connection.transaction()
@@ -389,9 +571,7 @@ async def main() -> int:
 
             try:
                 normal_failed_image_id = (
-                    await _load_normal_failed_image_id(
-                        connection
-                    )
+                    historical_normal_failed_image_id
                 )
 
                 await _prepare_fixture(
@@ -744,25 +924,18 @@ async def main() -> int:
             finally:
                 await transaction.rollback()
 
-        async with database_pool.acquire() as connection:
-            remaining_selection_count = (
-                await connection.fetchval(
-                    """
-                    SELECT COUNT(*)::integer
-                    FROM
-                        top3_news
-                        .daily_workflow_selection_attempts
-                    WHERE daily_workflow_run_id = $1
-                    """,
-                    WORKFLOW_ID,
-                )
-            )
-
-        assert (
-            int(remaining_selection_count)
-            == int(original_selection_count)
+        snapshot_after = await _load_fixture_snapshot(
+            database_pool
         )
 
+        if snapshot_after != snapshot_before:
+            raise AssertionError(
+                "Production fixture изменился после rollback."
+            )
+
+        print(
+            "Production fixture restored after rollback: OK"
+        )
         print()
         print(
             "Database changes=rolled_back"
