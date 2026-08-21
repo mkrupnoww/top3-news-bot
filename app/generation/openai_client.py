@@ -88,7 +88,9 @@ def _response_to_dict(response: Any) -> dict[str, Any]:
     model_dump = getattr(response, "model_dump", None)
 
     if callable(model_dump):
-        dumped = model_dump()
+        dumped = model_dump(
+            warnings=False
+        )
 
         if isinstance(dumped, dict):
             return dumped

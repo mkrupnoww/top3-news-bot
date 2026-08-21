@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal
 import json
 from typing import Any, Mapping
 
@@ -26,6 +27,18 @@ GENERATION_COMPLETION_VERSION = (
 
 GENERATION_FAILURE_VERSION = (
     "reserved_generation_failure_v1"
+)
+
+WEB_SEARCH_TOOL_PRICE_USD_PER_CALL = (
+    Decimal("0.01")
+)
+
+WEB_SEARCH_TOOL_PRICING_VERSION = (
+    "openai_web_search_2026_08_21"
+)
+
+GENERATION_COST_ACCOUNTING_VERSION = (
+    "generation_cost_accounting_v1"
 )
 
 
@@ -255,6 +268,105 @@ def _build_cost_payload(
             cost_estimate.total_cost_usd
         ),
     }
+
+
+def calculate_web_search_tool_cost(
+    call_count: int,
+) -> Decimal:
+    """Рассчитывает стоимость Web Search tool calls."""
+
+    if isinstance(call_count, bool):
+        raise TypeError(
+            "web_search_call_count не может "
+            "быть bool."
+        )
+
+    if not isinstance(call_count, int):
+        raise TypeError(
+            "web_search_call_count должен быть int."
+        )
+
+    if call_count < 0:
+        raise ValueError(
+            "web_search_call_count не может "
+            "быть отрицательным."
+        )
+
+    return (
+        Decimal(call_count)
+        * WEB_SEARCH_TOOL_PRICE_USD_PER_CALL
+    )
+
+
+def _build_web_search_payload(
+    *,
+    used: bool,
+    call_count: int,
+    source_urls: tuple[str, ...],
+) -> tuple[dict[str, Any], Decimal]:
+    """Формирует Web Search telemetry и её стоимость."""
+
+    if not isinstance(used, bool):
+        raise TypeError(
+            "web_search_used должен быть bool."
+        )
+
+    tool_cost_usd = (
+        calculate_web_search_tool_cost(
+            call_count
+        )
+    )
+
+    if used != (call_count > 0):
+        raise ValueError(
+            "web_search_used не согласован с "
+            "web_search_call_count."
+        )
+
+    if not isinstance(source_urls, tuple):
+        raise TypeError(
+            "web_source_urls должен быть tuple."
+        )
+
+    normalized_urls: list[str] = []
+
+    for url in source_urls:
+        if not isinstance(url, str):
+            raise TypeError(
+                "Каждый web_source_url должен "
+                "быть строкой."
+            )
+
+        normalized_url = url.strip()
+
+        if not normalized_url:
+            raise ValueError(
+                "web_source_url не может быть "
+                "пустым."
+            )
+
+        if normalized_url not in normalized_urls:
+            normalized_urls.append(
+                normalized_url
+            )
+
+    return (
+        {
+            "used": used,
+            "call_count": call_count,
+            "pricing_version": (
+                WEB_SEARCH_TOOL_PRICING_VERSION
+            ),
+            "tool_price_usd_per_call": str(
+                WEB_SEARCH_TOOL_PRICE_USD_PER_CALL
+            ),
+            "tool_cost_usd": str(
+                tool_cost_usd
+            ),
+            "source_urls": normalized_urls,
+        },
+        tool_cost_usd,
+    )
 
 
 def _validate_telemetry(
@@ -494,8 +606,25 @@ def _build_batch_completion_metadata(
     generated_post_id: int,
     usage: OpenAITokenUsage,
     cost_estimate: OpenAICostEstimate,
+    web_search_used: bool,
+    web_search_call_count: int,
+    web_source_urls: tuple[str, ...],
 ) -> dict[str, Any]:
     """Формирует дополнение metadata выпуска."""
+
+    (
+        web_search_payload,
+        web_search_tool_cost_usd,
+    ) = _build_web_search_payload(
+        used=web_search_used,
+        call_count=web_search_call_count,
+        source_urls=web_source_urls,
+    )
+
+    generation_total_cost_usd = (
+        cost_estimate.total_cost_usd
+        + web_search_tool_cost_usd
+    )
 
     return {
         "generation_completed": True,
@@ -509,6 +638,15 @@ def _build_batch_completion_metadata(
             _build_cost_payload(
                 cost_estimate
             )
+        ),
+        "openai_web_search": (
+            web_search_payload
+        ),
+        "generation_total_cost_usd": str(
+            generation_total_cost_usd
+        ),
+        "generation_cost_accounting_version": (
+            GENERATION_COST_ACCOUNTING_VERSION
         ),
         "generation_completion_version": (
             GENERATION_COMPLETION_VERSION
@@ -1064,6 +1202,18 @@ async def complete_reserved_generation(
                     usage=usage,
                     cost_estimate=(
                         cost_estimate
+                    ),
+                    web_search_used=(
+                        result.model_response
+                        .web_search_used
+                    ),
+                    web_search_call_count=(
+                        result.model_response
+                        .web_search_call_count
+                    ),
+                    web_source_urls=(
+                        result.model_response
+                        .web_source_urls
                     ),
                 )
             )

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import date, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import asyncpg
@@ -7,7 +8,11 @@ import asyncpg
 from app.config import get_settings
 from app.db.generation_completion import (
     GENERATION_COMPLETION_VERSION,
+    GENERATION_COST_ACCOUNTING_VERSION,
     GENERATION_FAILURE_VERSION,
+    WEB_SEARCH_TOOL_PRICE_USD_PER_CALL,
+    WEB_SEARCH_TOOL_PRICING_VERSION,
+    calculate_web_search_tool_cost,
     complete_reserved_generation,
     fail_reserved_generation,
 )
@@ -58,6 +63,29 @@ class NoCallGenerationClient:
             "OpenAI не должен вызываться "
             "в тесте завершения генерации."
         )
+
+
+def test_web_search_cost_calculation() -> None:
+    """Проверяет стоимость 0, 1 и нескольких поисков."""
+
+    assert (
+        calculate_web_search_tool_cost(0)
+        == Decimal("0.00")
+    )
+
+    assert (
+        calculate_web_search_tool_cost(1)
+        == Decimal("0.01")
+    )
+
+    assert (
+        calculate_web_search_tool_cost(3)
+        == Decimal("0.03")
+    )
+
+    print(
+        "Web Search cost calculation: OK"
+    )
 
 
 def build_test_publication_date() -> date:
@@ -193,6 +221,12 @@ def build_generation_result(
                 ),
                 usage=usage,
                 cost_estimate=cost_estimate,
+                web_search_used=True,
+                web_search_call_count=2,
+                web_source_urls=(
+                    "https://example.com/source-1",
+                    "https://example.com/source-2",
+                ),
             )
         ),
     )
@@ -522,6 +556,61 @@ async def test_successful_completion(
                     ->>'total_cost_usd'
                     AS batch_total_cost_usd,
 
+                (
+                    b.metadata
+                    ->'openai_web_search'
+                    ->>'used'
+                )::boolean
+                    AS batch_web_search_used,
+
+                (
+                    b.metadata
+                    ->'openai_web_search'
+                    ->>'call_count'
+                )::integer
+                    AS batch_web_search_call_count,
+
+                b.metadata
+                    ->'openai_web_search'
+                    ->>'pricing_version'
+                    AS batch_web_search_pricing_version,
+
+                b.metadata
+                    ->'openai_web_search'
+                    ->>'tool_price_usd_per_call'
+                    AS batch_web_search_price_per_call,
+
+                b.metadata
+                    ->'openai_web_search'
+                    ->>'tool_cost_usd'
+                    AS batch_web_search_tool_cost_usd,
+
+                jsonb_array_length(
+                    b.metadata
+                    ->'openai_web_search'
+                    ->'source_urls'
+                ) AS batch_web_source_url_count,
+
+                b.metadata
+                    ->'openai_web_search'
+                    ->'source_urls'
+                    ->>0
+                    AS batch_first_web_source_url,
+
+                b.metadata
+                    ->'openai_web_search'
+                    ->'source_urls'
+                    ->>1
+                    AS batch_second_web_source_url,
+
+                b.metadata
+                    ->>'generation_total_cost_usd'
+                    AS generation_total_cost_usd,
+
+                b.metadata
+                    ->>'generation_cost_accounting_version'
+                    AS generation_cost_accounting_version,
+
                 gp.generated_post_id,
                 gp.version_number,
                 gp.post_status,
@@ -576,6 +665,16 @@ async def test_successful_completion(
                     ->'openai_cost'
                     ->>'total_cost_usd'
                     AS post_total_cost_usd,
+
+                (
+                    gp.generation_metadata
+                    ? 'openai_web_search'
+                ) AS post_has_web_search_metadata,
+
+                (
+                    gp.generation_metadata
+                    ? 'generation_total_cost_usd'
+                ) AS post_has_generation_total_cost,
 
                 (
                     SELECT COUNT(*)::integer
@@ -672,6 +771,71 @@ async def test_successful_completion(
     )
 
     assert (
+        record["batch_web_search_used"]
+        is True
+    )
+
+    assert (
+        record["batch_web_search_call_count"]
+        == 2
+    )
+
+    assert (
+        record[
+            "batch_web_search_pricing_version"
+        ]
+        == WEB_SEARCH_TOOL_PRICING_VERSION
+    )
+
+    assert (
+        record[
+            "batch_web_search_price_per_call"
+        ]
+        == str(
+            WEB_SEARCH_TOOL_PRICE_USD_PER_CALL
+        )
+    )
+
+    assert (
+        record[
+            "batch_web_search_tool_cost_usd"
+        ]
+        == "0.02"
+    )
+
+    assert (
+        record["batch_web_source_url_count"]
+        == 2
+    )
+
+    assert (
+        record["batch_first_web_source_url"]
+        == "https://example.com/source-1"
+    )
+
+    assert (
+        record["batch_second_web_source_url"]
+        == "https://example.com/source-2"
+    )
+
+    expected_generation_total_cost = (
+        cost.total_cost_usd
+        + Decimal("0.02")
+    )
+
+    assert (
+        record["generation_total_cost_usd"]
+        == str(expected_generation_total_cost)
+    )
+
+    assert (
+        record[
+            "generation_cost_accounting_version"
+        ]
+        == GENERATION_COST_ACCOUNTING_VERSION
+    )
+
+    assert (
         record["generated_post_id"]
         == completion.generated_post_id
     )
@@ -746,6 +910,18 @@ async def test_successful_completion(
     )
 
     assert (
+        record["post_has_web_search_metadata"]
+        is False
+    )
+
+    assert (
+        record[
+            "post_has_generation_total_cost"
+        ]
+        is False
+    )
+
+    assert (
         record["generated_post_count"]
         == 1
     )
@@ -776,6 +952,14 @@ async def test_successful_completion(
     print(
         "estimated_cost_usd="
         f"{record['post_total_cost_usd']}"
+    )
+    print(
+        "web_search_tool_cost_usd="
+        f"{record['batch_web_search_tool_cost_usd']}"
+    )
+    print(
+        "generation_total_cost_usd="
+        f"{record['generation_total_cost_usd']}"
     )
     print(
         "publication_attempt_count="
@@ -1123,6 +1307,8 @@ async def cleanup_test_batches(
 
 async def main() -> int:
     """Запускает интеграционный тест."""
+
+    test_web_search_cost_calculation()
 
     settings = get_settings()
 
