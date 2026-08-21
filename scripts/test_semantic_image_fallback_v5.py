@@ -10,11 +10,14 @@ from app.generation.image_generator import (
 )
 
 
+EXPECTED_NORMAL_PROMPT_VERSION = (
+    "movie_news_image_v3"
+)
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v4"
+    "movie_news_image_moderation_fallback_v5"
 )
 EXPECTED_FALLBACK_MODE = (
-    "semantic_visual_brief_v4"
+    "semantic_visual_brief_v5"
 )
 
 
@@ -88,6 +91,54 @@ MONSTROPOLIS_ITEM = ImageGenerationNewsItem(
         "the team is excited to bring Monstropolis "
         "to life for fans. The themed land is "
         "currently under construction."
+    ),
+)
+
+
+TODAY_2026_08_21_ITEMS = (
+    ImageGenerationNewsItem(
+        position=1,
+        news_id=1537,
+        title=(
+            "Крис Хансен отказался от условий A24 "
+            "и не увидел Primetime"
+        ),
+        summary=(
+            "Журналист Крис Хансен приехал в A24 "
+            "на показ Primetime Лэнса Оппенхайма, "
+            "где его играет Роберт Паттинсон. "
+            "Но Хансен отказался подписать предложенное "
+            "соглашение и ушёл, так и не увидев фильм."
+        ),
+    ),
+    ImageGenerationNewsItem(
+        position=2,
+        news_id=1487,
+        title=(
+            "The Odyssey побила рекорд R-rated "
+            "фильмов в прокате"
+        ),
+        summary=(
+            "Приключенческий фильм собрал рекордную "
+            "мировую кассу и стал крупнейшим "
+            "R-rated релизом."
+        ),
+    ),
+    ImageGenerationNewsItem(
+        position=3,
+        news_id=1528,
+        title=(
+            "Джафар Джексон снова сыграет "
+            "Майкла Джексона в сиквеле"
+        ),
+        summary=(
+            "Джафар Джексон вновь сыграет дядю, "
+            "Майкла Джексона, в продолжении "
+            "музыкального байопика Michael. "
+            "Сиквел затронет взгляд певца на "
+            "обвинения в сексуальном насилии "
+            "над детьми."
+        ),
     ),
 )
 
@@ -240,7 +291,16 @@ def _assert_not_contains(
 
 
 def main() -> int:
-    """Проверяет semantic fallback v4 и marker matching без сети."""
+    """Проверяет semantic fallback v5 и marker matching без сети."""
+
+    if (
+        OPENAI_IMAGE_PROMPT_VERSION
+        != EXPECTED_NORMAL_PROMPT_VERSION
+    ):
+        raise AssertionError(
+            "Неожиданная normal prompt version: "
+            f"{OPENAI_IMAGE_PROMPT_VERSION}"
+        )
 
     if (
         OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
@@ -252,7 +312,7 @@ def main() -> int:
         )
 
     # ------------------------------------------------------------------
-    # Normal image mode не меняем.
+    # Normal image mode v3 сохраняет исходные идентификаторы.
     # ------------------------------------------------------------------
 
     normal_prompt = build_image_prompt(
@@ -275,12 +335,24 @@ def main() -> int:
                 f"{required_identity}"
             )
 
+    for required_instruction in (
+        "person-centric",
+        "центральный человек",
+        "не визуализируй предполагаемое",
+    ):
+        if required_instruction not in normal_lower:
+            raise AssertionError(
+                "Normal prompt v3 потерял "
+                "person-centric правило: "
+                f"{required_instruction!r}"
+            )
+
     print(
-        "Normal prompt remains unchanged: OK"
+        "Normal prompt v3 identity/person priority: OK"
     )
 
     # ------------------------------------------------------------------
-    # Fallback identity stripping и версия v4.
+    # Fallback identity stripping и версия v5.
     # ------------------------------------------------------------------
 
     fallback_prompt = build_image_prompt(
@@ -338,7 +410,7 @@ def main() -> int:
         )
 
     print(
-        "Fallback v4 identity and mode: OK"
+        "Fallback v5 identity and mode: OK"
     )
 
     # ------------------------------------------------------------------
@@ -407,6 +479,102 @@ def main() -> int:
 
     print(
         "Existing positive semantic signals preserved: OK"
+    )
+
+    # ------------------------------------------------------------------
+    # Production regression 2026-08-21:
+    # person-centric screening + sensitive musical biopic.
+    # ------------------------------------------------------------------
+
+    today_fallback_prompt = build_image_prompt(
+        items=TODAY_2026_08_21_ITEMS,
+        moderation_safe_editorial_fallback=True,
+    )
+
+    today_fallback_lower = (
+        today_fallback_prompt.casefold()
+    )
+
+    for forbidden_identity in (
+        "крис хансен",
+        "a24",
+        "primetime",
+        "лэнс оппенхайм",
+        "роберт паттинсон",
+        "джафар джексон",
+        "майкл джексон",
+        "lionsgate",
+    ):
+        if forbidden_identity in today_fallback_lower:
+            raise AssertionError(
+                "Fallback v5 восстановил "
+                "идентификатор production news: "
+                f"{forbidden_identity!r}"
+            )
+
+    today_payload = _extract_payload(
+        today_fallback_prompt
+    )
+
+    screening_text = _brief_text(
+        _brief(
+            today_payload,
+            position=1,
+        )
+    )
+
+    for expected in (
+        "кинопоказ",
+        "централь",
+        "документ",
+        "отказ",
+        "журналист",
+    ):
+        if expected not in screening_text:
+            raise AssertionError(
+                "Screening/person semantic brief "
+                "потерял production-смысл: "
+                f"{expected}"
+            )
+
+    music_biopic_text = _brief_text(
+        _brief(
+            today_payload,
+            position=3,
+        )
+    )
+
+    for expected in (
+        "музыкаль",
+        "биограф",
+        "централь",
+        "микрофон",
+        "софит",
+        "чувствитель",
+        "профессиональ",
+    ):
+        if expected not in music_biopic_text:
+            raise AssertionError(
+                "Music-biopic semantic brief "
+                "потерял production-смысл: "
+                f"{expected}"
+            )
+
+    _assert_not_contains(
+        music_biopic_text,
+        (
+            "научная фантастика",
+            "футуристическая технологическая",
+            "космическая",
+        ),
+        context="2026-08-21 music biopic",
+    )
+
+    print(
+        "2026-08-21 screening person semantics: OK"
+    )
+    print(
+        "2026-08-21 sensitive music-biopic semantics: OK"
     )
 
     # ------------------------------------------------------------------
@@ -688,7 +856,7 @@ def main() -> int:
         )
 
     print(
-        "Generator switches to fallback v4: OK"
+        "Generator switches to fallback v5: OK"
     )
 
     print()
@@ -702,7 +870,7 @@ def main() -> int:
         "Telegram requests=not_performed"
     )
     print(
-        "Semantic marker matching v4 test: OK"
+        "Semantic marker matching v5 test: OK"
     )
 
     return 0

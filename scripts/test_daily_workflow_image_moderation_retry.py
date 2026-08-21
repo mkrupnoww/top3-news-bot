@@ -32,12 +32,13 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-NORMAL_PROMPT_VERSION = "movie_news_image_v2"
-OLD_FALLBACK_PROMPT_VERSION = (
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v3"
+HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
+HISTORICAL_FALLBACK_PROMPT_VERSION = (
     "movie_news_image_moderation_fallback_v1"
 )
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v2"
+    "movie_news_image_moderation_fallback_v5"
 )
 
 SENSITIVE_FALLBACK_TERMS = (
@@ -112,7 +113,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-moderation-fallback-v2-test:"
+        "daily-workflow-moderation-fallback-v5-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -127,7 +128,7 @@ def _assert_generator_fallback_identity() -> None:
     Проверяет новую fallback identity и обезличивание prompt.
 
     Normal prompt обязан сохранить исходные новости.
-    Fallback v2 обязан передавать только safe_visual_brief.
+    Fallback v5 обязан передавать только semantic_visual_brief.
     """
 
     generator = OpenAIMovieNewsImageGenerator(
@@ -184,7 +185,7 @@ def _assert_generator_fallback_identity() -> None:
 
     assert (
         normal_metadata.prompt_version
-        == NORMAL_PROMPT_VERSION
+        == CURRENT_NORMAL_PROMPT_VERSION
     )
 
     for term in SENSITIVE_FALLBACK_TERMS:
@@ -214,12 +215,12 @@ def _assert_generator_fallback_identity() -> None:
     )
 
     assert (
-        '"mode":"neutralized_news_payload_v2"'
+        '"mode":"semantic_visual_brief_v5"'
         in fallback_request.prompt
     )
 
     assert (
-        '"safe_visual_brief":'
+        '"semantic_visual_brief":'
         in fallback_request.prompt
     )
 
@@ -252,18 +253,18 @@ def _assert_generator_fallback_identity() -> None:
         in fallback_request.prompt
     ):
         raise AssertionError(
-            "Fallback v2 не должен включать "
+            "Fallback v5 не должен включать "
             "основной permissive IMAGE_PROMPT_INSTRUCTIONS."
         )
 
     print(
-        "Fallback v2 changes prompt identity: OK"
+        "Fallback v5 changes prompt identity: OK"
     )
     print(
-        "Fallback v2 removes title/summary from Image API prompt: OK"
+        "Fallback v5 removes title/summary from Image API prompt: OK"
     )
     print(
-        "Fallback v2 removes franchise/person/company terms: OK"
+        "Fallback v5 removes franchise/person/company terms: OK"
     )
 
 
@@ -375,7 +376,7 @@ async def _assert_production_fixture(
         for row in attempts
         if (
             row["prompt_version"]
-            == NORMAL_PROMPT_VERSION
+            == HISTORICAL_NORMAL_PROMPT_VERSION
         )
     ]
 
@@ -384,11 +385,11 @@ async def _assert_production_fixture(
         for row in attempts
         if (
             row["prompt_version"]
-            == OLD_FALLBACK_PROMPT_VERSION
+            == HISTORICAL_FALLBACK_PROMPT_VERSION
         )
     ]
 
-    fallback_v2_attempts = [
+    current_fallback_attempts = [
         row
         for row in attempts
         if (
@@ -399,7 +400,7 @@ async def _assert_production_fixture(
 
     assert len(normal_attempts) == 1
     assert len(fallback_v1_attempts) == 2
-    assert len(fallback_v2_attempts) == 0
+    assert len(current_fallback_attempts) == 0
 
     for row in (
         *normal_attempts,
@@ -438,7 +439,7 @@ async def _assert_production_fixture(
 
     assert (
         linked_row["prompt_version"]
-        == OLD_FALLBACK_PROMPT_VERSION
+        == HISTORICAL_FALLBACK_PROMPT_VERSION
     )
 
     assert (
@@ -456,7 +457,7 @@ async def _assert_production_fixture(
         "fallback_v1_failed_attempts=2"
     )
     print(
-        "fallback_v2_existing_attempts=0"
+        "current_fallback_v5_existing_attempts=0"
     )
 
     return linked_failed_image_id
@@ -469,7 +470,7 @@ async def _insert_synthetic_fallback_reservation(
     attempt_number: int,
 ) -> int:
     """
-    Создаёт synthetic fallback-v2 reservation.
+    Создаёт synthetic fallback-v5 reservation.
 
     Все изменения выполняются внутри внешней rollback transaction.
     """
@@ -534,7 +535,7 @@ async def _insert_synthetic_fallback_reservation(
     if image_generation_id is None:
         raise RuntimeError(
             "Не удалось создать synthetic "
-            "fallback-v2 reservation."
+            "fallback-v5 reservation."
         )
 
     return int(
@@ -570,16 +571,16 @@ async def _mark_synthetic_moderation_failed(
     if result != "UPDATE 1":
         raise RuntimeError(
             "Не удалось перевести synthetic "
-            "fallback-v2 reservation в failed."
+            "fallback-v5 reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет fallback-v2 prompt и retry budget без OpenAI/Telegram."""
+    """Проверяет fallback-v5 prompt и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
-        != NORMAL_PROMPT_VERSION
+        != CURRENT_NORMAL_PROMPT_VERSION
     ):
         raise AssertionError(
             "Неожиданная normal prompt_version: "
@@ -635,7 +636,7 @@ async def main() -> int:
                 assert attempts_used == 0
 
                 print(
-                    "Fallback v2 prompt version "
+                    "Fallback v5 prompt version "
                     "has fresh budget: OK"
                 )
 
@@ -661,7 +662,7 @@ async def main() -> int:
 
                 print(
                     "Failed fallback-v1 workflow "
-                    "reopens for fallback v2: OK"
+                    "reopens for fallback v5: OK"
                 )
 
                 first_fallback_id = (
@@ -715,7 +716,7 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second fallback-v2 attempt allowed: OK"
+                    "Second fallback-v5 attempt allowed: OK"
                 )
 
                 second_fallback_id = (
@@ -769,11 +770,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third fallback-v2 attempt blocked: OK"
+                        "Third fallback-v5 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух fallback-v2 failures "
+                        "После двух fallback-v5 failures "
                         "третья попытка не была заблокирована."
                     )
 
@@ -795,7 +796,7 @@ async def main() -> int:
             "Telegram requests=not_performed"
         )
         print(
-            "Moderation-safe image fallback v2 test: OK"
+            "Moderation-safe image fallback v5 test: OK"
         )
 
         return 0
