@@ -65,7 +65,7 @@ def parse_arguments() -> argparse.Namespace:
             "Выполняет защищённое event-level "
             "ранжирование киноновостей через OpenAI, "
             "рассчитывает полную формулу "
-            "top3_cinema_v4 и сохраняет результат "
+            "top3_cinema_v5 и сохраняет результат "
             "в PostgreSQL."
         ),
     )
@@ -130,7 +130,7 @@ def validate_arguments(
 
     if arguments.window_hours != 24.0:
         raise ValueError(
-            "--window-hours для top3_cinema_v4 "
+            "--window-hours для top3_cinema_v5 "
             "должен быть равен 24."
         )
 

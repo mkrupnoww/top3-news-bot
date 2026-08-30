@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TypeAlias
@@ -10,9 +10,11 @@ from app.ranking.event_evaluator import (
     EventAssessment,
 )
 from app.ranking.full_formula import (
+    ELIGIBILITY_FALLBACK_THRESHOLD,
     FULL_FORMULA_VERSION,
     FullNewsScore,
     Top3SelectionResult,
+    apply_insufficient_top3_eligibility_fallback,
     calculate_full_news_score,
     normalize_audience_metric,
     select_top3_combination,
@@ -127,6 +129,10 @@ class EventFormulaCalculationResult:
         ...,
     ]
     top3_selection: Top3SelectionResult
+    strict_eligible_count: int
+    eligibility_fallback_used: bool
+    eligibility_fallback_threshold: Decimal | None
+    fallback_promoted_news_ids: tuple[int, ...]
 
     @property
     def scores(
@@ -273,7 +279,7 @@ def _validate_selection(
 
     if window_hours != FORMULA_WINDOW_HOURS:
         raise ValueError(
-            "Полная формула top3_cinema_v4 "
+            f"Полная формула {FULL_FORMULA_VERSION} "
             "требует окно ровно 24 часа: "
             f"window_hours={window_hours}"
         )
@@ -738,9 +744,10 @@ def select_event_top3(
     """
     Выбирает победившую комбинацию TOP-3.
 
-    При eligible_count < 3 функция выбрасывает
-    ValueError, но исходный промежуточный объект
-    calculation остаётся доступным вызывающему коду.
+    Если strict eligible_count < 3, сначала применяется
+    insufficient-TOP3 eligibility fallback. ValueError
+    сохраняется только если после fallback всё ещё
+    невозможно собрать три effective-eligible события.
     """
 
     if not isinstance(
@@ -760,9 +767,32 @@ def select_event_top3(
             "промежуточного расчёта."
         )
 
+    fallback_result = (
+        apply_insufficient_top3_eligibility_fallback(
+            calculation.scores
+        )
+    )
+
+    effective_scores_by_news_id = {
+        score.news_id: score
+        for score in fallback_result.scores
+    }
+
+    effective_calculated_events = tuple(
+        replace(
+            item,
+            score=(
+                effective_scores_by_news_id[
+                    item.score.news_id
+                ]
+            ),
+        )
+        for item in calculation.calculated_events
+    )
+
     top3_selection = (
         select_top3_combination(
-            calculation.scores,
+            fallback_result.scores,
             story_cluster_keys_by_news_id={
                 item.event.representative_news_id: (
                     item.event.story_cluster_key
@@ -783,9 +813,23 @@ def select_event_top3(
             calculation.audience_maxima
         ),
         calculated_events=(
-            calculation.calculated_events
+            effective_calculated_events
         ),
         top3_selection=top3_selection,
+        strict_eligible_count=(
+            fallback_result.strict_eligible_count
+        ),
+        eligibility_fallback_used=(
+            fallback_result.fallback_used
+        ),
+        eligibility_fallback_threshold=(
+            ELIGIBILITY_FALLBACK_THRESHOLD
+            if fallback_result.fallback_used
+            else None
+        ),
+        fallback_promoted_news_ids=(
+            fallback_result.promoted_news_ids
+        ),
     )
 
 
@@ -802,7 +846,7 @@ def calculate_event_formula(
     ] = (),
 ) -> EventFormulaCalculationResult:
     """
-    Выполняет полный детерминированный расчёт v4.
+    Выполняет полный детерминированный расчёт v5.
 
     Сохраняет прежний публичный интерфейс:
     рассчитывает все баллы и сразу выбирает TOP-3.

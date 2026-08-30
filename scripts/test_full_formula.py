@@ -1,7 +1,9 @@
+from dataclasses import replace
 from decimal import Decimal
 
 from app.ranking.full_formula import (
     EXCLUSION_REASON_QUALITY_ZERO,
+    ELIGIBILITY_FALLBACK_THRESHOLD,
     EXCLUSION_REASON_SCORE_BELOW_THRESHOLD,
     FULL_FORMULA_VERSION,
     TOP3_SELECTION_POLICY_VERSION,
@@ -17,6 +19,7 @@ from app.ranking.full_formula import (
     calculate_magnitude_score,
     calculate_media_reach_score,
     calculate_resonance_score,
+    apply_insufficient_top3_eligibility_fallback,
     normalize_audience_metric,
     select_top3_combination,
 )
@@ -383,6 +386,7 @@ def _manual_full_score(
     m_score: str,
     q_score: str,
     f_score: str,
+    macro_topic: str = "business_economy_law",
 ) -> FullNewsScore:
     """Создаёт контролируемую оценку для проверки tie-break правил."""
 
@@ -423,7 +427,7 @@ def _manual_full_score(
     return FullNewsScore(
         formula_version=FULL_FORMULA_VERSION,
         news_id=news_id,
-        macro_topic="business_economy_law",
+        macro_topic=macro_topic,
         age_hours=ZERO,
         source_weight_sum=ZERO,
         max_source_weight_sum=ZERO,
@@ -442,6 +446,203 @@ def _manual_full_score(
         is_eligible=True,
         exclusion_reason=None,
     )
+
+
+def test_insufficient_top3_eligibility_fallback() -> None:
+    """Проверяет аварийный floor 3.0 без реабилитации q=0."""
+
+    strict_first = _manual_full_score(
+        news_id=101,
+        individual_score="5.000000",
+        m_score="5.000000",
+        q_score="1.000000",
+        f_score="5.000000",
+    )
+
+    strict_second = _manual_full_score(
+        news_id=102,
+        individual_score="4.000000",
+        m_score="4.000000",
+        q_score="1.000000",
+        f_score="4.000000",
+    )
+
+    near_threshold = replace(
+        _manual_full_score(
+            news_id=103,
+            individual_score="3.400000",
+            m_score="3.400000",
+            q_score="1.000000",
+            f_score="3.400000",
+        ),
+        is_eligible=False,
+        exclusion_reason=(
+            EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+        ),
+    )
+
+    below_fallback = replace(
+        _manual_full_score(
+            news_id=104,
+            individual_score="2.900000",
+            m_score="2.900000",
+            q_score="1.000000",
+            f_score="2.900000",
+        ),
+        is_eligible=False,
+        exclusion_reason=(
+            EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+        ),
+    )
+
+    quality_zero = replace(
+        _manual_full_score(
+            news_id=105,
+            individual_score="9.000000",
+            m_score="9.000000",
+            q_score="0.000000",
+            f_score="9.000000",
+        ),
+        is_eligible=False,
+        exclusion_reason=(
+            EXCLUSION_REASON_QUALITY_ZERO
+        ),
+    )
+
+    result = (
+        apply_insufficient_top3_eligibility_fallback(
+            (
+                strict_first,
+                strict_second,
+                near_threshold,
+                below_fallback,
+                quality_zero,
+            )
+        )
+    )
+
+    assert result.fallback_used is True
+    assert result.strict_eligible_count == 2
+    assert result.effective_eligible_count == 3
+    assert result.fallback_threshold == (
+        ELIGIBILITY_FALLBACK_THRESHOLD
+    )
+    assert result.promoted_news_ids == (103,)
+
+    effective_by_news_id = {
+        item.news_id: item
+        for item in result.scores
+    }
+
+    assert effective_by_news_id[103].is_eligible is True
+    assert effective_by_news_id[103].exclusion_reason is None
+    assert effective_by_news_id[104].is_eligible is False
+    assert effective_by_news_id[105].is_eligible is False
+    assert effective_by_news_id[105].exclusion_reason == (
+        EXCLUSION_REASON_QUALITY_ZERO
+    )
+
+    selection = select_top3_combination(
+        result.scores
+    )
+
+    assert selection.eligible_count == 3
+    assert set(selection.winner.news_ids) == {
+        101,
+        102,
+        103,
+    }
+
+    print("Insufficient TOP-3 eligibility fallback: OK")
+
+
+def test_2026_08_30_insufficient_top3_regression() -> None:
+    """Фиксирует production incident: strict eligible_count=2."""
+
+    raw = (
+        (2252, "4.500616", "8.560000", "1.000000", "6.280579", "creative_cast_production"),
+        (2260, "3.870968", "5.452360", "0.700000", "7.708676", "people_conflicts_legal"),
+        (2259, "3.392490", "4.812360", "1.000000", "7.430158", "creative_cast_production"),
+        (2253, "3.389246", "5.732360", "0.900000", "6.066191", "box_office_audience_distribution"),
+        (2256, "3.374062", "5.012360", "1.000000", "6.535521", "creative_cast_production"),
+        (2257, "3.170257", "4.732360", "0.900000", "7.163118", "festivals_awards_criticism"),
+        (2258, "3.147198", "4.532360", "0.900000", "7.327575", "creative_cast_production"),
+        (2250, "3.012618", "5.292360", "0.700000", "5.321173", "creative_cast_production"),
+        (2249, "2.461454", "4.092360", "1.000000", "5.399981", "other"),
+    )
+
+    scores = tuple(
+        replace(
+            _manual_full_score(
+                news_id=news_id,
+                individual_score=individual_score,
+                m_score=m_score,
+                q_score=q_score,
+                f_score=f_score,
+                macro_topic=macro_topic,
+            ),
+            is_eligible=(
+                Decimal(individual_score)
+                >= Decimal("3.500000")
+            ),
+            exclusion_reason=(
+                None
+                if (
+                    Decimal(individual_score)
+                    >= Decimal("3.500000")
+                )
+                else (
+                    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+                )
+            ),
+        )
+        for (
+            news_id,
+            individual_score,
+            m_score,
+            q_score,
+            f_score,
+            macro_topic,
+        ) in raw
+    )
+
+    fallback = (
+        apply_insufficient_top3_eligibility_fallback(
+            scores
+        )
+    )
+
+    assert fallback.strict_eligible_count == 2
+    assert fallback.effective_eligible_count == 8
+    assert fallback.promoted_news_ids == (
+        2259,
+        2253,
+        2256,
+        2257,
+        2258,
+        2250,
+    )
+
+    selection = select_top3_combination(
+        fallback.scores
+    )
+
+    assert selection.winner.news_ids == (
+        2252,
+        2253,
+        2260,
+    )
+    assert selection.winner.ordered_news_ids == (
+        2252,
+        2260,
+        2253,
+    )
+    assert (
+        selection.winner.distinct_macro_topic_count
+        == 3
+    )
+
+    print("2026-08-30 insufficient TOP-3 regression: OK")
 
 
 def test_tie_break_rules() -> None:
@@ -602,6 +803,8 @@ def main() -> int:
     test_aggregated_components()
     test_full_news_score_and_eligibility()
     test_diversity_and_combination_selection()
+    test_insufficient_top3_eligibility_fallback()
+    test_2026_08_30_insufficient_top3_regression()
     test_tie_break_rules()
     test_story_cluster_selection_policy()
     test_invalid_combination_inputs()

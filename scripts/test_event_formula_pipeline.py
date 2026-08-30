@@ -18,6 +18,7 @@ from app.ranking.event_formula_pipeline import (
 )
 from app.ranking.full_formula import (
     EXCLUSION_REASON_QUALITY_ZERO,
+    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD,
     FULL_FORMULA_VERSION,
     RESONANCE_CONFIDENCE_FULL,
     RESONANCE_CONFIDENCE_PARTIAL,
@@ -439,6 +440,10 @@ def test_complete_calculation() -> None:
         result.top3_selection.eligible_count
         == 3
     )
+    assert result.strict_eligible_count == 3
+    assert result.eligibility_fallback_used is False
+    assert result.eligibility_fallback_threshold is None
+    assert result.fallback_promoted_news_ids == ()
 
     assert len(
         result.top3_selection.combinations
@@ -615,6 +620,79 @@ def test_no_audience_metrics() -> None:
     print()
     print("Unavailable audience metrics: OK")
     print("all_resonance_scores=0")
+
+
+
+def test_insufficient_top3_score_floor_fallback() -> None:
+    """Проверяет promotion score 3.0..3.5 при strict eligible_count=2."""
+
+    score_calculation = calculate_event_scores(
+        selection=build_selection(),
+        events=build_events(),
+    )
+
+    adjusted_events = tuple(
+        replace(
+            item,
+            score=replace(
+                item.score,
+                individual=replace(
+                    item.score.individual,
+                    individual_score=(
+                        Decimal("3.400000")
+                    ),
+                ),
+                is_eligible=False,
+                exclusion_reason=(
+                    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+                ),
+            ),
+        )
+        if item.score.news_id == 104
+        else item
+        for item in score_calculation.calculated_events
+    )
+
+    adjusted_calculation = replace(
+        score_calculation,
+        calculated_events=adjusted_events,
+    )
+
+    assert adjusted_calculation.eligible_count == 2
+
+    result = select_event_top3(
+        adjusted_calculation
+    )
+
+    assert result.strict_eligible_count == 2
+    assert result.eligibility_fallback_used is True
+    assert result.eligibility_fallback_threshold == (
+        Decimal("3.000000")
+    )
+    assert result.fallback_promoted_news_ids == (104,)
+    assert result.top3_selection.eligible_count == 3
+
+    effective_by_news_id = {
+        item.score.news_id: item.score
+        for item in result.calculated_events
+    }
+
+    assert effective_by_news_id[104].is_eligible is True
+    assert effective_by_news_id[104].exclusion_reason is None
+    assert effective_by_news_id[105].is_eligible is False
+    assert effective_by_news_id[105].exclusion_reason == (
+        EXCLUSION_REASON_QUALITY_ZERO
+    )
+
+    assert set(
+        result.top3_selection.winner.news_ids
+    ) == {101, 103, 104}
+
+    print()
+    print("Insufficient TOP-3 score-floor fallback: OK")
+    print("strict_eligible_count=2")
+    print("effective_eligible_count=3")
+    print("fallback_promoted_news_ids=104")
 
 
 
@@ -901,6 +979,7 @@ def main() -> int:
     test_complete_calculation()
     test_story_cluster_diversity_policy()
     test_no_audience_metrics()
+    test_insufficient_top3_score_floor_fallback()
     test_intermediate_scores_survive_insufficient_top3()
     test_invalid_window()
     test_missing_candidate_coverage()

@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import combinations
 import re
@@ -15,7 +15,7 @@ from app.ranking.score_formula import (
 ScoreInput: TypeAlias = Decimal | int | float | str
 OptionalScoreInput: TypeAlias = ScoreInput | None
 
-FULL_FORMULA_VERSION = "top3_cinema_v4"
+FULL_FORMULA_VERSION = "top3_cinema_v5"
 LEGACY_TOP3_SELECTION_POLICY_VERSION = (
     "macro_topic_diversity_v1"
 )
@@ -31,7 +31,12 @@ SCORE_MIN = Decimal("0")
 SCORE_MAX = Decimal("10")
 QUALITY_MAX = Decimal("1")
 MAX_AGE_HOURS = Decimal("24")
-ELIGIBILITY_THRESHOLD = Decimal("3.500000")
+STRICT_ELIGIBILITY_THRESHOLD = Decimal("3.500000")
+ELIGIBILITY_FALLBACK_THRESHOLD = Decimal("3.000000")
+ELIGIBILITY_THRESHOLD = STRICT_ELIGIBILITY_THRESHOLD
+ELIGIBILITY_FALLBACK_POLICY_VERSION = (
+    "insufficient_top3_score_floor_v1"
+)
 
 U_WEIGHT = Decimal("0.60")
 I_WEIGHT = Decimal("0.40")
@@ -98,6 +103,21 @@ class FullNewsScore:
     individual: CalculatedScore
     is_eligible: bool
     exclusion_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityFallbackResult:
+    """Effective eligibility после insufficient-TOP3 fallback."""
+
+    formula_version: str
+    policy_version: str
+    strict_eligible_count: int
+    effective_eligible_count: int
+    fallback_used: bool
+    strict_threshold: Decimal
+    fallback_threshold: Decimal
+    promoted_news_ids: tuple[int, ...]
+    scores: tuple[FullNewsScore, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,7 +460,7 @@ def calculate_full_news_score(
     if q_value == 0:
         eligible = False
         exclusion_reason = EXCLUSION_REASON_QUALITY_ZERO
-    elif individual.individual_score < ELIGIBILITY_THRESHOLD:
+    elif individual.individual_score < STRICT_ELIGIBILITY_THRESHOLD:
         eligible = False
         exclusion_reason = EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
     else:
@@ -468,6 +488,134 @@ def calculate_full_news_score(
         individual,
         eligible,
         exclusion_reason,
+    )
+
+
+def apply_insufficient_top3_eligibility_fallback(
+    scores: tuple[FullNewsScore, ...],
+) -> EligibilityFallbackResult:
+    """
+    Расширяет effective eligibility только если strict-eligible < 3.
+
+    Правила:
+    - strict threshold остаётся 3.5;
+    - q_score=0 никогда не реабилитируется;
+    - допускаются только записи, исключённые по score < 3.5;
+    - аварийный floor равен 3.0;
+    - при fallback повышаются все подходящие события, чтобы
+      существующая комбинационная формула и diversity сами
+      выбрали лучшую тройку.
+
+    OpenAI, PostgreSQL и Telegram не вызываются.
+    """
+
+    if not isinstance(scores, tuple):
+        raise TypeError(
+            "scores должен быть tuple."
+        )
+
+    if not scores:
+        raise ValueError(
+            "Список полных оценок не может быть пустым."
+        )
+
+    news_ids = tuple(
+        item.news_id
+        for item in scores
+    )
+
+    if len(news_ids) != len(set(news_ids)):
+        raise ValueError(
+            "Каждый news_id должен встречаться один раз."
+        )
+
+    strict_eligible_count = sum(
+        1
+        for item in scores
+        if item.is_eligible
+    )
+
+    if strict_eligible_count >= 3:
+        return EligibilityFallbackResult(
+            formula_version=FULL_FORMULA_VERSION,
+            policy_version=(
+                ELIGIBILITY_FALLBACK_POLICY_VERSION
+            ),
+            strict_eligible_count=(
+                strict_eligible_count
+            ),
+            effective_eligible_count=(
+                strict_eligible_count
+            ),
+            fallback_used=False,
+            strict_threshold=(
+                STRICT_ELIGIBILITY_THRESHOLD
+            ),
+            fallback_threshold=(
+                ELIGIBILITY_FALLBACK_THRESHOLD
+            ),
+            promoted_news_ids=(),
+            scores=scores,
+        )
+
+    promoted_news_ids = tuple(
+        item.news_id
+        for item in scores
+        if (
+            not item.is_eligible
+            and item.exclusion_reason
+            == EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+            and item.q_score > 0
+            and (
+                item.individual.individual_score
+                >= ELIGIBILITY_FALLBACK_THRESHOLD
+            )
+        )
+    )
+
+    promoted_news_id_set = set(
+        promoted_news_ids
+    )
+
+    effective_scores = tuple(
+        replace(
+            item,
+            is_eligible=True,
+            exclusion_reason=None,
+        )
+        if item.news_id in promoted_news_id_set
+        else item
+        for item in scores
+    )
+
+    effective_eligible_count = sum(
+        1
+        for item in effective_scores
+        if item.is_eligible
+    )
+
+    return EligibilityFallbackResult(
+        formula_version=FULL_FORMULA_VERSION,
+        policy_version=(
+            ELIGIBILITY_FALLBACK_POLICY_VERSION
+        ),
+        strict_eligible_count=(
+            strict_eligible_count
+        ),
+        effective_eligible_count=(
+            effective_eligible_count
+        ),
+        fallback_used=True,
+        strict_threshold=(
+            STRICT_ELIGIBILITY_THRESHOLD
+        ),
+        fallback_threshold=(
+            ELIGIBILITY_FALLBACK_THRESHOLD
+        ),
+        promoted_news_ids=(
+            promoted_news_ids
+        ),
+        scores=effective_scores,
     )
 
 

@@ -19,7 +19,12 @@ from app.ranking.event_formula_pipeline import (
     EventScoreCalculationResult,
 )
 from app.ranking.full_formula import (
+    ELIGIBILITY_FALLBACK_POLICY_VERSION,
+    ELIGIBILITY_FALLBACK_THRESHOLD,
+    EXCLUSION_REASON_QUALITY_ZERO,
+    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD,
     FULL_FORMULA_VERSION,
+    STRICT_ELIGIBILITY_THRESHOLD,
     Top3CombinationScore,
 )
 from app.ranking.openai_usage import (
@@ -32,7 +37,7 @@ from app.ranking.request_key import (
 
 
 COMPLETION_VERSION = (
-    "reserved_event_ranking_completion_v4"
+    "reserved_event_ranking_completion_v5"
 )
 
 DIAGNOSTIC_FAILURE_VERSION = (
@@ -903,6 +908,33 @@ def _score_details(
 
     score = item.score
 
+    strict_is_eligible = (
+        score.q_score > 0
+        and (
+            score.individual.individual_score
+            >= STRICT_ELIGIBILITY_THRESHOLD
+        )
+    )
+
+    if score.q_score == 0:
+        strict_exclusion_reason = (
+            EXCLUSION_REASON_QUALITY_ZERO
+        )
+    elif (
+        score.individual.individual_score
+        < STRICT_ELIGIBILITY_THRESHOLD
+    ):
+        strict_exclusion_reason = (
+            EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+        )
+    else:
+        strict_exclusion_reason = None
+
+    fallback_promoted = (
+        score.is_eligible
+        and not strict_is_eligible
+    )
+
     return {
         "formula_version": (
             FULL_FORMULA_VERSION
@@ -922,6 +954,32 @@ def _score_details(
         "max_source_weight_sum": str(
             score.max_source_weight_sum
         ),
+        "eligibility": {
+            "policy_version": (
+                ELIGIBILITY_FALLBACK_POLICY_VERSION
+            ),
+            "strict_threshold": str(
+                STRICT_ELIGIBILITY_THRESHOLD
+            ),
+            "fallback_threshold": str(
+                ELIGIBILITY_FALLBACK_THRESHOLD
+            ),
+            "strict_is_eligible": (
+                strict_is_eligible
+            ),
+            "strict_exclusion_reason": (
+                strict_exclusion_reason
+            ),
+            "effective_is_eligible": (
+                score.is_eligible
+            ),
+            "effective_exclusion_reason": (
+                score.exclusion_reason
+            ),
+            "fallback_promoted": (
+                fallback_promoted
+            ),
+        },
         "resonance": {
             "confidence": (
                 score.resonance.confidence
@@ -1928,6 +1986,40 @@ async def complete_reserved_event_ranking_run(
                 .top3_selection
                 .winner
                 .ordered_news_ids
+            ),
+            "strict_eligibility_threshold": str(
+                STRICT_ELIGIBILITY_THRESHOLD
+            ),
+            "strict_eligible_count": (
+                calculation.strict_eligible_count
+            ),
+            "eligibility_fallback_used": (
+                calculation
+                .eligibility_fallback_used
+            ),
+            "eligibility_fallback_policy_version": (
+                ELIGIBILITY_FALLBACK_POLICY_VERSION
+            ),
+            "eligibility_fallback_threshold": (
+                None
+                if (
+                    calculation
+                    .eligibility_fallback_threshold
+                    is None
+                )
+                else str(
+                    calculation
+                    .eligibility_fallback_threshold
+                )
+            ),
+            "effective_eligible_count": (
+                calculation
+                .top3_selection
+                .eligible_count
+            ),
+            "fallback_promoted_news_ids": list(
+                calculation
+                .fallback_promoted_news_ids
             ),
             "top3_selection": {
                 "policy_version": (

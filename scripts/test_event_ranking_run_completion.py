@@ -44,14 +44,21 @@ from app.ranking.event_formula_pipeline import (
     EventAudienceMetrics,
     EventFormulaCalculationResult,
     calculate_event_formula,
+    calculate_event_scores,
+    select_event_top3,
 )
 from app.ranking.full_formula import (
+    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD,
     FULL_FORMULA_VERSION,
 )
 from app.ranking.openai_usage import (
     OpenAITokenUsage,
     calculate_openai_cost,
     get_model_pricing,
+)
+from app.ranking.score_formula import (
+    calculate_individual_score,
+    create_score_components,
 )
 from app.ranking.request_key import (
     REQUEST_KEY_VERSION,
@@ -427,6 +434,79 @@ def build_calculation(
         audience_metrics=(
             build_audience_metrics()
         ),
+    )
+
+
+def build_fallback_calculation(
+) -> EventFormulaCalculationResult:
+    """Создаёт synthetic completed calculation через eligibility fallback."""
+
+    score_calculation = calculate_event_scores(
+        selection=build_selection(),
+        events=build_events(),
+        audience_metrics=(
+            build_audience_metrics()
+        ),
+    )
+
+    fallback_components = create_score_components(
+        f_score="4.000000",
+        m_score="4.000000",
+        r_score="4.000000",
+        h_score="4.000000",
+        q_score="1.000000",
+    )
+
+    fallback_individual = calculate_individual_score(
+        fallback_components
+    )
+
+    if (
+        fallback_individual.individual_score
+        != Decimal("3.400000")
+    ):
+        raise AssertionError(
+            "Synthetic fallback score должен быть 3.400000."
+        )
+
+    adjusted_events = tuple(
+        replace(
+            item,
+            score=replace(
+                item.score,
+                f_score=Decimal("4.000000"),
+                m_score=Decimal("4.000000"),
+                resonance=replace(
+                    item.score.resonance,
+                    r_score=Decimal("4.000000"),
+                ),
+                h_score=Decimal("4.000000"),
+                q_score=Decimal("1.000000"),
+                individual=fallback_individual,
+                is_eligible=False,
+                exclusion_reason=(
+                    EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+                ),
+            ),
+        )
+        if item.score.news_id == TEST_NEWS_IDS[3]
+        else item
+        for item in score_calculation.calculated_events
+    )
+
+    adjusted_calculation = replace(
+        score_calculation,
+        calculated_events=adjusted_events,
+    )
+
+    if adjusted_calculation.eligible_count != 2:
+        raise AssertionError(
+            "Synthetic fallback fixture должен иметь "
+            "strict eligible_count=2."
+        )
+
+    return select_event_top3(
+        adjusted_calculation
     )
 
 
@@ -965,6 +1045,14 @@ async def test_successful_completion(
                     AS winner_news_ids,
                 parameters->'top3_selection'
                     AS top3_selection,
+                parameters->>'strict_eligible_count'
+                    AS strict_eligible_count,
+                parameters->>'eligibility_fallback_used'
+                    AS eligibility_fallback_used,
+                parameters->>'effective_eligible_count'
+                    AS effective_eligible_count,
+                parameters->'fallback_promoted_news_ids'
+                    AS fallback_promoted_news_ids,
                 parameters->>'degraded'
                     AS degraded,
                 parameters->>'processed_candidate_count'
@@ -1142,6 +1230,12 @@ async def test_successful_completion(
     assert run_record["candidate_count"] == 5
     assert run_record["scored_count"] == 4
     assert run_record["eligible_count"] == 3
+    assert run_record["strict_eligible_count"] == "3"
+    assert run_record["eligibility_fallback_used"] == "false"
+    assert run_record["effective_eligible_count"] == "3"
+    assert decode_jsonb(
+        run_record["fallback_promoted_news_ids"]
+    ) == []
     assert run_record["error_message"] is None
     assert run_record["finished_at"] is not None
     assert run_record["completion_version"] == (
@@ -1382,6 +1476,149 @@ async def test_successful_completion(
             "Completed event ranking_run "
             "был ошибочно переведён в failed."
         )
+
+
+async def test_eligibility_fallback_completion(
+    pool: asyncpg.Pool,
+    *,
+    created_run_ids: set[int],
+) -> None:
+    """Проверяет persistence promoted eligibility и diagnostics."""
+
+    metadata = build_metadata()
+
+    request_key = build_request_key(
+        test_name=(
+            "event_ranking_eligibility_fallback_completion"
+        )
+    )
+
+    reservation = await reserve_test_run(
+        pool,
+        request_key=request_key,
+        created_run_ids=created_run_ids,
+    )
+
+    calculation = build_fallback_calculation()
+
+    assert calculation.strict_eligible_count == 2
+    assert calculation.eligibility_fallback_used is True
+    assert calculation.fallback_promoted_news_ids == (
+        TEST_NEWS_IDS[3],
+    )
+    assert calculation.top3_selection.eligible_count == 3
+
+    usage = build_usage()
+
+    cost_estimate = calculate_openai_cost(
+        usage,
+        get_model_pricing(
+            metadata.model_name
+            or "gpt-5.6-terra"
+        ),
+    )
+
+    result = await complete_reserved_event_ranking_run(
+        pool,
+        ranking_run_id=reservation.ranking_run_id,
+        request_key=request_key.value,
+        metadata=metadata,
+        candidate_news_ids=TEST_NEWS_IDS,
+        calculation=calculation,
+        usage=usage,
+        cost_estimate=cost_estimate,
+        coverage_diagnostics=(
+            build_verified_diagnostics()
+        ),
+    )
+
+    assert result.run_status == "completed"
+    assert result.eligible_count == 3
+
+    promoted_news_id = TEST_NEWS_IDS[3]
+
+    async with pool.acquire() as connection:
+        run_record = await connection.fetchrow(
+            """
+            SELECT
+                eligible_count,
+                parameters->>'strict_eligible_count'
+                    AS strict_eligible_count,
+                parameters->>'eligibility_fallback_used'
+                    AS eligibility_fallback_used,
+                parameters->>'eligibility_fallback_threshold'
+                    AS eligibility_fallback_threshold,
+                parameters->>'effective_eligible_count'
+                    AS effective_eligible_count,
+                parameters->'fallback_promoted_news_ids'
+                    AS fallback_promoted_news_ids
+            FROM top3_news.ranking_runs
+            WHERE ranking_run_id = $1
+            """,
+            reservation.ranking_run_id,
+        )
+
+        promoted_score = await connection.fetchrow(
+            """
+            SELECT
+                is_eligible,
+                exclusion_reason,
+                selected_for_top3,
+                top3_position,
+                score_details->'eligibility'
+                    AS eligibility
+            FROM top3_news.news_scores
+            WHERE ranking_run_id = $1
+              AND news_id = $2
+            """,
+            reservation.ranking_run_id,
+            promoted_news_id,
+        )
+
+    if run_record is None:
+        raise AssertionError(
+            "Fallback ranking_run не найден."
+        )
+
+    if promoted_score is None:
+        raise AssertionError(
+            "Promoted news_score не найден."
+        )
+
+    assert int(run_record["eligible_count"]) == 3
+    assert run_record["strict_eligible_count"] == "2"
+    assert run_record["eligibility_fallback_used"] == "true"
+    assert run_record["eligibility_fallback_threshold"] == (
+        "3.000000"
+    )
+    assert run_record["effective_eligible_count"] == "3"
+    assert decode_jsonb(
+        run_record["fallback_promoted_news_ids"]
+    ) == [promoted_news_id]
+
+    eligibility = decode_jsonb(
+        promoted_score["eligibility"]
+    )
+
+    assert promoted_score["is_eligible"] is True
+    assert promoted_score["exclusion_reason"] is None
+    assert promoted_score["selected_for_top3"] is True
+    assert promoted_score["top3_position"] is not None
+    assert eligibility["strict_is_eligible"] is False
+    assert eligibility["strict_exclusion_reason"] == (
+        EXCLUSION_REASON_SCORE_BELOW_THRESHOLD
+    )
+    assert eligibility["effective_is_eligible"] is True
+    assert eligibility["fallback_promoted"] is True
+
+    print()
+    print("Eligibility fallback persistence: OK")
+    print("strict_eligible_count=2")
+    print("effective_eligible_count=3")
+    print(
+        "fallback_promoted_news_id="
+        f"{promoted_news_id}"
+    )
 
 
 async def test_degraded_completion(
@@ -1831,6 +2068,11 @@ async def main() -> int:
         )
 
         await test_successful_completion(
+            pool,
+            created_run_ids=created_run_ids,
+        )
+
+        await test_eligibility_fallback_completion(
             pool,
             created_run_ids=created_run_ids,
         )
