@@ -22,7 +22,7 @@ from app.generation.post_contract import (
 )
 
 GENERATION_REVISION_COMPLETION_VERSION = (
-    "generation_revision_completion_v1"
+    "generation_revision_completion_v2"
 )
 
 GENERATION_REVISION_FAILURE_VERSION = (
@@ -411,6 +411,22 @@ def _prepare_generation_result(
                             f"news_id={news_id}"
                         ),
                     )
+                ),
+                **(
+                    {
+                        "official_trailer_url": item.official_trailer_url,
+                        **(
+                            {
+                                "official_trailer_channel_name": (
+                                    item.official_trailer_channel_name
+                                )
+                            }
+                            if item.official_trailer_channel_name is not None
+                            else {}
+                        ),
+                    }
+                    if item.official_trailer_url is not None
+                    else {}
                 ),
             }
         )

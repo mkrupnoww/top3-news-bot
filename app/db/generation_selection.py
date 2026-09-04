@@ -626,6 +626,113 @@ async def _load_generation_top3(
     )
 
 
+async def _load_generation_batch_selection(
+    connection: asyncpg.Connection,
+    *,
+    ranking_run_id: int,
+    batch_id: int,
+) -> GenerationTop3Selection:
+    """Читает фактический TOP-3 конкретного publication batch."""
+
+    run_record = await _load_run_record(
+        connection,
+        ranking_run_id=ranking_run_id,
+    )
+
+    batch_record = await connection.fetchrow(
+        """
+        SELECT
+            batch_id,
+            ranking_run_id
+        FROM publication_batches
+        WHERE batch_id = $1
+        """,
+        batch_id,
+    )
+
+    if batch_record is None:
+        raise LookupError(
+            "Не найден publication batch: "
+            f"batch_id={batch_id}"
+        )
+
+    batch_ranking_run_id = int(
+        batch_record["ranking_run_id"]
+    )
+
+    if batch_ranking_run_id != ranking_run_id:
+        raise ValueError(
+            "publication batch относится к другому ranking_run: "
+            f"batch_id={batch_id}, "
+            f"expected_ranking_run_id={ranking_run_id}, "
+            f"actual_ranking_run_id={batch_ranking_run_id}"
+        )
+
+    records = await connection.fetch(
+        """
+        SELECT
+            ns.score_id,
+            bi.position AS generation_position,
+            ns.rank_position,
+            ns.news_id,
+            ns.individual_score,
+            ns.score_explanation,
+            COALESCE(
+                NULLIF(
+                    BTRIM(ni.normalized_title),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.raw_title),
+                    ''
+                )
+            ) AS title,
+            COALESCE(
+                NULLIF(
+                    BTRIM(ni.normalized_summary),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.raw_summary),
+                    ''
+                ),
+                NULLIF(
+                    BTRIM(ni.article_text),
+                    ''
+                )
+            ) AS summary,
+            s.source_name,
+            ni.source_url,
+            ni.source_published_at,
+            ni.processing_status
+        FROM batch_items AS bi
+        JOIN news_scores AS ns
+          ON ns.score_id = bi.score_id
+         AND ns.ranking_run_id = $1
+         AND ns.news_id = bi.news_id
+        JOIN news_items AS ni
+          ON ni.news_id = ns.news_id
+        JOIN sources AS s
+          ON s.source_id = ni.source_id
+        WHERE bi.batch_id = $2
+        ORDER BY bi.position
+        """,
+        ranking_run_id,
+        batch_id,
+    )
+
+    return _build_selection(
+        ranking_run_id=int(
+            run_record["ranking_run_id"]
+        ),
+        run_status=run_record["run_status"],
+        eligible_count=int(
+            run_record["eligible_count"]
+        ),
+        records=list(records),
+    )
+
+
 async def _load_generation_combination(
     connection: asyncpg.Connection,
     *,
@@ -795,6 +902,38 @@ async def load_generation_top3(
         )
 
 
+async def load_generation_batch_selection(
+    pool: asyncpg.Pool,
+    *,
+    ranking_run_id: int,
+    batch_id: int,
+) -> GenerationTop3Selection:
+    """Возвращает фактический TOP-3 конкретного publication batch."""
+
+    normalized_ranking_run_id = (
+        _normalize_positive_integer(
+            ranking_run_id,
+            field_name="ranking_run_id",
+        )
+    )
+
+    normalized_batch_id = (
+        _normalize_positive_integer(
+            batch_id,
+            field_name="batch_id",
+        )
+    )
+
+    async with pool.acquire() as connection:
+        return await _load_generation_batch_selection(
+            connection,
+            ranking_run_id=(
+                normalized_ranking_run_id
+            ),
+            batch_id=normalized_batch_id,
+        )
+
+
 async def load_generation_combination(
     pool: asyncpg.Pool,
     *,
@@ -835,6 +974,7 @@ async def choose_next_generation_combination(
     ranking_run_id: int,
     current_news_ids: tuple[int, int, int],
     excluded_combination_ids: tuple[int, ...] = (),
+    excluded_news_ids: tuple[int, ...] = (),
 ) -> GenerationCombinationReplacement | None:
     """
     Выбирает следующую комбинацию для replacement cascade.
@@ -842,9 +982,10 @@ async def choose_next_generation_combination(
     Правила:
     1. Текущий набор из тех же трёх news_id не выбирается.
     2. Уже использованные combination_id исключаются.
-    3. Максимизируется overlap с текущим TOP-3:
+    3. Комбинации с excluded_news_ids исключаются.
+    4. Максимизируется overlap с текущим TOP-3:
        сначала замена одной новости, затем двух, затем трёх.
-    4. При одинаковом overlap выигрывает лучший combination_rank.
+    5. При одинаковом overlap выигрывает лучший combination_rank.
 
     Функция только читает БД и ничего не изменяет.
     """
@@ -872,12 +1013,22 @@ async def choose_next_generation_combination(
         )
     )
 
+    normalized_excluded_news_ids = (
+        _normalize_combination_ids(
+            excluded_news_ids,
+            field_name="excluded_news_ids",
+        )
+    )
+
     current_news_set = set(
         normalized_current_news_ids
     )
 
     excluded_id_set = set(
         normalized_excluded_ids
+    )
+    excluded_news_set = set(
+        normalized_excluded_news_ids
     )
 
     async with pool.acquire() as connection:
@@ -962,6 +1113,9 @@ async def choose_next_generation_combination(
             candidate_news_set = set(
                 candidate_news_ids
             )
+
+            if candidate_news_set & excluded_news_set:
+                continue
 
             if candidate_news_set == current_news_set:
                 continue

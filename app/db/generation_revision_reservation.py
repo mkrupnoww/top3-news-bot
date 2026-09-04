@@ -6,7 +6,7 @@ import asyncpg
 
 from app.db.generation_selection import (
     GenerationTop3Selection,
-    _load_generation_top3,
+    _load_generation_batch_selection,
 )
 from app.generation.openai_generator import (
     GenerationModelRequest,
@@ -794,21 +794,23 @@ def _validate_revision_context(
     return normalized_ranking_run_id
 
 
-async def _validate_current_top3(
+async def _validate_current_batch_selection(
     connection: asyncpg.Connection,
     *,
     ranking_run_id: int,
+    batch_id: int,
     items: tuple[
         GenerationNewsItem,
         ...,
     ],
 ) -> GenerationTop3Selection:
-    """Сверяет factual-проекцию с текущим сохранённым TOP-3."""
+    """Сверяет factual-проекцию с фактическим TOP-3 publication batch."""
 
     current_selection = (
-        await _load_generation_top3(
+        await _load_generation_batch_selection(
             connection,
             ranking_run_id=ranking_run_id,
+            batch_id=batch_id,
         )
     )
 
@@ -824,7 +826,7 @@ async def _validate_current_top3(
 
     if current_projection != expected_projection:
         raise ValueError(
-            "Сохранённый TOP-3 изменился "
+            "TOP-3 publication batch изменился "
             "после подготовки revision request. "
             "Нужно сформировать запрос "
             "и request_key заново."
@@ -1183,10 +1185,13 @@ async def reserve_generation_revision(
                     )
 
                     selection = (
-                        await _validate_current_top3(
+                        await _validate_current_batch_selection(
                             connection,
                             ranking_run_id=(
                                 ranking_run_id
+                            ),
+                            batch_id=(
+                                normalized_batch_id
                             ),
                             items=normalized_items,
                         )
@@ -1248,9 +1253,10 @@ async def reserve_generation_revision(
             )
 
             selection = (
-                await _validate_current_top3(
+                await _validate_current_batch_selection(
                     connection,
                     ranking_run_id=ranking_run_id,
+                    batch_id=normalized_batch_id,
                     items=normalized_items,
                 )
             )

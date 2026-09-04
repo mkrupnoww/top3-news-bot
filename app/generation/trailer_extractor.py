@@ -1,4 +1,6 @@
+from html import unescape
 from html.parser import HTMLParser
+import re
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -11,14 +13,41 @@ _YOUTUBE_HOSTS = {
     "youtu.be",
 }
 
+_URL_TOKEN_PATTERN = re.compile(
+    r"(?:https?:)?//[^\s\"'<>]+",
+    flags=re.IGNORECASE,
+)
+
+
+class _DocumentAttributeParser(HTMLParser):
+    """Собирает URL-подобные значения HTML-атрибутов."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        del tag
+
+        for _, value in attrs:
+            if value is None:
+                continue
+
+            normalized = value.strip()
+
+            if normalized:
+                self.values.append(normalized)
+
 
 class _YouTubeIframeParser(HTMLParser):
     """Извлекает URL YouTube iframe из HTML."""
 
     def __init__(self) -> None:
-        super().__init__(
-            convert_charrefs=True,
-        )
+        super().__init__(convert_charrefs=True)
         self.urls: list[str] = []
 
     def handle_starttag(
@@ -42,9 +71,7 @@ class _YouTubeIframeParser(HTMLParser):
         normalized_url = source_url.strip()
 
         if normalized_url:
-            self.urls.append(
-                normalized_url
-            )
+            self.urls.append(normalized_url)
 
 
 def _normalize_hostname(
@@ -62,6 +89,33 @@ def _normalize_hostname(
     return normalized_hostname or None
 
 
+def _normalize_candidate_url(url: str) -> str:
+    """Нормализует protocol-relative и escaped URL."""
+
+    normalized = unescape(url.strip())
+
+    normalized = (
+        normalized
+        .replace(r"\/", "/")
+        .replace(r"\u002F", "/")
+        .replace(r"\u002f", "/")
+        .replace(r"\u003A", ":")
+        .replace(r"\u003a", ":")
+        .replace(r"\u0026", "&")
+    )
+
+    if normalized.startswith("//"):
+        normalized = "https:" + normalized
+
+    if normalized.startswith("www.youtube.com/"):
+        normalized = "https://" + normalized
+
+    if normalized.startswith("youtu.be/"):
+        normalized = "https://" + normalized
+
+    return normalized
+
+
 def extract_youtube_video_id(
     url: str,
 ) -> str | None:
@@ -69,7 +123,7 @@ def extract_youtube_video_id(
     Извлекает YouTube video_id из URL.
 
     Поддерживаются canonical watch URL,
-    youtu.be и embed URL.
+    youtu.be, embed, shorts и live URL.
     """
 
     if not isinstance(url, str):
@@ -77,15 +131,13 @@ def extract_youtube_video_id(
             "url должен быть строкой."
         )
 
-    normalized_url = url.strip()
+    normalized_url = _normalize_candidate_url(url)
 
     if not normalized_url:
         return None
 
     try:
-        parsed = urlsplit(
-            normalized_url
-        )
+        parsed = urlsplit(normalized_url)
     except ValueError:
         return None
 
@@ -125,10 +177,7 @@ def extract_youtube_video_id(
         or path_parts[0].casefold()
         == "watch"
     ):
-        query = parse_qs(
-            parsed.query
-        )
-
+        query = parse_qs(parsed.query)
         values = query.get("v")
 
         if values:
@@ -137,9 +186,7 @@ def extract_youtube_video_id(
     if video_id is None:
         return None
 
-    normalized_video_id = (
-        video_id.strip()
-    )
+    normalized_video_id = video_id.strip()
 
     if not normalized_video_id:
         return None
@@ -166,9 +213,7 @@ def build_youtube_watch_url(
             "video_id должен быть строкой."
         )
 
-    normalized_video_id = (
-        video_id.strip()
-    )
+    normalized_video_id = video_id.strip()
 
     if not normalized_video_id:
         raise ValueError(
@@ -195,34 +240,17 @@ def build_youtube_watch_url(
     )
 
 
-def extract_youtube_iframe_urls(
-    html_content: str,
+def _canonicalize_candidates(
+    candidates: list[str],
 ) -> tuple[str, ...]:
-    """
-    Извлекает canonical YouTube URL из iframe.
-
-    Возвращает уникальные URL в порядке
-    появления в HTML.
-    """
-
-    if not isinstance(
-        html_content,
-        str,
-    ):
-        raise TypeError(
-            "html_content должен быть строкой."
-        )
-
-    parser = _YouTubeIframeParser()
-    parser.feed(html_content)
-    parser.close()
+    """Возвращает уникальные canonical YouTube URL."""
 
     results: list[str] = []
     seen_video_ids: set[str] = set()
 
-    for source_url in parser.urls:
+    for candidate_url in candidates:
         video_id = extract_youtube_video_id(
-            source_url
+            candidate_url
         )
 
         if video_id is None:
@@ -232,11 +260,76 @@ def extract_youtube_iframe_urls(
             continue
 
         seen_video_ids.add(video_id)
-
         results.append(
-            build_youtube_watch_url(
-                video_id
-            )
+            build_youtube_watch_url(video_id)
         )
 
     return tuple(results)
+
+
+def extract_youtube_iframe_urls(
+    html_content: str,
+) -> tuple[str, ...]:
+    """
+    Извлекает canonical YouTube URL из iframe.
+
+    Сохранено для обратной совместимости тестов.
+    """
+
+    if not isinstance(html_content, str):
+        raise TypeError(
+            "html_content должен быть строкой."
+        )
+
+    parser = _YouTubeIframeParser()
+    parser.feed(html_content)
+    parser.close()
+
+    return _canonicalize_candidates(
+        parser.urls
+    )
+
+
+def extract_youtube_document_urls(
+    html_content: str,
+) -> tuple[str, ...]:
+    """
+    Ищет YouTube URL во всём HTML-документе.
+
+    Проверяются:
+    - src/href/data-* и другие HTML-атрибуты;
+    - URL внутри script/JSON;
+    - escaped URL вида ``https:\\/\\/youtube...``;
+    - protocol-relative URL.
+
+    Возвращаются canonical watch URL без дублей.
+    """
+
+    if not isinstance(html_content, str):
+        raise TypeError(
+            "html_content должен быть строкой."
+        )
+
+    parser = _DocumentAttributeParser()
+    parser.feed(html_content)
+    parser.close()
+
+    normalized_document = (
+        unescape(html_content)
+        .replace(r"\/", "/")
+        .replace(r"\u002F", "/")
+        .replace(r"\u002f", "/")
+        .replace(r"\u003A", ":")
+        .replace(r"\u003a", ":")
+        .replace(r"\u0026", "&")
+    )
+
+    candidates = list(parser.values)
+    candidates.extend(
+        match.group(0)
+        for match in _URL_TOKEN_PATTERN.finditer(
+            normalized_document
+        )
+    )
+
+    return _canonicalize_candidates(candidates)

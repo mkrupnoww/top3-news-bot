@@ -61,6 +61,8 @@ OFFICIAL_TRAILER_URL = (
     "https://www.youtube.com/watch?v=5fHXyqQOKL8"
 )
 
+OFFICIAL_TRAILER_CHANNEL_NAME = "Netflix"
+
 
 class FakeStructuredGenerationClient:
     """Тестовый клиент без сетевых запросов."""
@@ -374,15 +376,15 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v6"
+        "openai_telegram_post_generator_v7"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v6"
+        "movie_news_telegram_post_prompt_v7"
     )
 
     assert OPENAI_POST_REVISION_PROMPT_VERSION == (
-        "movie_news_telegram_post_revision_prompt_v4"
+        "movie_news_telegram_post_revision_prompt_v5"
     )
 
     request = generator.build_request(
@@ -861,6 +863,9 @@ def test_official_trailer_request_serialization() -> None:
         official_trailer_url=(
             OFFICIAL_TRAILER_URL
         ),
+        official_trailer_channel_name=(
+            OFFICIAL_TRAILER_CHANNEL_NAME
+        ),
     )
 
     request = generator.build_request(
@@ -881,6 +886,10 @@ def test_official_trailer_request_serialization() -> None:
     ][1][
         "official_trailer_url"
     ] == OFFICIAL_TRAILER_URL
+
+    assert payload["news"][1][
+        "official_trailer_channel_name"
+    ] == OFFICIAL_TRAILER_CHANNEL_NAME
 
     assert (
         "official_trailer_url"
@@ -941,6 +950,9 @@ def test_self_review_request_preparation() -> None:
         official_trailer_url=(
             OFFICIAL_TRAILER_URL
         ),
+        official_trailer_channel_name=(
+            OFFICIAL_TRAILER_CHANNEL_NAME
+        ),
     )
 
     request = (
@@ -988,7 +1000,10 @@ def test_self_review_request_preparation() -> None:
         set(payload["news"][1])
         == (
             expected_news_fields
-            | {"official_trailer_url"}
+            | {
+                "official_trailer_url",
+                "official_trailer_channel_name",
+            }
         )
     )
 
@@ -1007,6 +1022,10 @@ def test_self_review_request_preparation() -> None:
     ][1][
         "official_trailer_url"
     ] == OFFICIAL_TRAILER_URL
+
+    assert payload["news"][1][
+        "official_trailer_channel_name"
+    ] == OFFICIAL_TRAILER_CHANNEL_NAME
 
     assert (
         "official_trailer_url"

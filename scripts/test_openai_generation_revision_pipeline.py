@@ -12,6 +12,7 @@ import asyncpg
 from app.config import get_settings
 from app.db.generation_selection import (
     GenerationTop3Selection,
+    load_generation_combination,
     load_generation_top3,
 )
 from app.db.pool import (
@@ -19,6 +20,7 @@ from app.db.pool import (
     create_database_pool,
 )
 from app.generation.openai_generator import (
+    OPENAI_POST_REVISION_PROMPT_VERSION,
     GenerationModelRequest,
     GenerationModelResponse,
     OpenAITelegramPostGenerator,
@@ -33,6 +35,9 @@ from app.ranking.openai_usage import (
 
 
 TEST_RANKING_RUN_ID = 18
+REPLACEMENT_RANKING_RUN_ID = 142
+REPLACEMENT_COMBINATION_ID = 1845
+REPLACEMENT_NEWS_IDS = (1029, 1030, 986)
 TEST_SUITE_ID = uuid4().hex
 
 SOURCE_POST_TEXT = (
@@ -1035,7 +1040,7 @@ async def test_successful_revision_pipeline(
         first_result
         .revision_selection
         .ranking_run_id
-        == TEST_RANKING_RUN_ID
+        == selection.ranking_run_id
     )
 
     assert (
@@ -1165,7 +1170,7 @@ async def test_successful_revision_pipeline(
 
     assert (
         record["ranking_run_id"]
-        == TEST_RANKING_RUN_ID
+        == selection.ranking_run_id
     )
 
     assert (
@@ -1214,10 +1219,7 @@ async def test_successful_revision_pipeline(
 
     assert (
         record["target_text_prompt_version"]
-        == (
-            "movie_news_telegram_post_"
-            "revision_prompt_v1"
-        )
+        == OPENAI_POST_REVISION_PROMPT_VERSION
     )
 
     assert (
@@ -1272,7 +1274,7 @@ async def test_successful_revision_pipeline(
 
     assert (
         record["target_completion_version"]
-        == "generation_revision_completion_v1"
+        == "generation_revision_completion_v2"
     )
 
     assert record["generated_post_count"] == 2
@@ -1978,6 +1980,44 @@ async def main() -> int:
             )
         )
 
+        replacement_combination = (
+            await load_generation_combination(
+                pool,
+                ranking_run_id=(
+                    REPLACEMENT_RANKING_RUN_ID
+                ),
+                combination_id=(
+                    REPLACEMENT_COMBINATION_ID
+                ),
+            )
+        )
+
+        if replacement_combination.is_winner:
+            raise AssertionError(
+                "Replacement revision fixture неожиданно является winner."
+            )
+
+        replacement_selection = (
+            replacement_combination.selection
+        )
+
+        if replacement_selection.news_ids != REPLACEMENT_NEWS_IDS:
+            raise AssertionError(
+                "Replacement revision fixture изменился: "
+                f"actual={replacement_selection.news_ids!r}, "
+                f"expected={REPLACEMENT_NEWS_IDS!r}"
+            )
+
+        winner_142 = await load_generation_top3(
+            pool,
+            ranking_run_id=REPLACEMENT_RANKING_RUN_ID,
+        )
+
+        if winner_142.news_ids == replacement_selection.news_ids:
+            raise AssertionError(
+                "Replacement fixture должен отличаться от winner TOP-3."
+            )
+
         reviewer_telegram_user_id = (
             await load_test_reviewer(pool)
         )
@@ -2017,6 +2057,42 @@ async def main() -> int:
             created_batch_ids=(
                 created_batch_ids
             ),
+        )
+
+        await test_successful_revision_pipeline(
+            pool,
+            selection=replacement_selection,
+            telegram_chat_id=(
+                settings.telegram_channel_id
+            ),
+            reviewer_telegram_user_id=(
+                reviewer_telegram_user_id
+            ),
+            publication_date=(
+                publication_date
+                + timedelta(days=2)
+            ),
+            created_batch_ids=(
+                created_batch_ids
+            ),
+        )
+
+        print()
+        print(
+            "Replacement combination -> revision: OK"
+        )
+        print(
+            f"replacement_ranking_run_id={REPLACEMENT_RANKING_RUN_ID}"
+        )
+        print(
+            f"replacement_combination_id={REPLACEMENT_COMBINATION_ID}"
+        )
+        print(
+            "replacement_news_ids="
+            + ",".join(
+                str(news_id)
+                for news_id in replacement_selection.news_ids
+            )
         )
     finally:
         try:

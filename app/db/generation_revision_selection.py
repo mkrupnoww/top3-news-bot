@@ -1,11 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
+from urllib.parse import urlsplit
 
 import asyncpg
 
 from app.db.generation_selection import (
     GenerationTop3Selection,
-    _load_generation_top3,
+    _load_generation_batch_selection,
 )
 from app.generation.openai_generator import (
     GenerationNewsItem,
@@ -182,6 +183,8 @@ async def _load_revision_record(
                 AS source_post_text,
             gp.text_format
                 AS source_text_format,
+            gp.generation_metadata::text
+                AS source_generation_metadata_json,
 
             b.batch_status,
             b.ranking_run_id
@@ -412,6 +415,90 @@ def _validate_revision_record(
     )
 
 
+def _hydrate_trailer_metadata(
+    selection: GenerationTop3Selection,
+    generation_metadata_json: str | None,
+) -> GenerationTop3Selection:
+    """Восстанавливает verified trailer metadata предыдущей версии."""
+
+    if not generation_metadata_json:
+        return selection
+
+    try:
+        metadata = json.loads(generation_metadata_json)
+    except (TypeError, json.JSONDecodeError):
+        return selection
+
+    if not isinstance(metadata, dict):
+        return selection
+
+    raw_items = metadata.get("generated_items")
+    if not isinstance(raw_items, list):
+        return selection
+
+    trailer_by_news_id: dict[int, tuple[str, str | None]] = {}
+
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        raw_news_id = raw_item.get("news_id")
+        raw_url = raw_item.get("official_trailer_url")
+
+        if isinstance(raw_news_id, bool) or not isinstance(raw_news_id, int):
+            continue
+        if not isinstance(raw_url, str):
+            continue
+
+        url = raw_url.strip()
+        if not url:
+            continue
+
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+            continue
+
+        raw_channel = raw_item.get("official_trailer_channel_name")
+        channel: str | None = None
+        if isinstance(raw_channel, str) and raw_channel.strip():
+            channel = raw_channel.strip()
+
+        trailer_by_news_id[raw_news_id] = (url, channel)
+
+    if not trailer_by_news_id:
+        return selection
+
+    hydrated_items: list[GenerationNewsItem] = []
+
+    for item in selection.items:
+        trailer = trailer_by_news_id.get(item.news_id)
+        if trailer is None:
+            hydrated_items.append(item)
+            continue
+
+        url, channel = trailer
+        hydrated_items.append(
+            replace(
+                item,
+                official_trailer_url=url,
+                official_trailer_channel_name=channel,
+            )
+        )
+
+    return replace(
+        selection,
+        items=(
+            hydrated_items[0],
+            hydrated_items[1],
+            hydrated_items[2],
+        ),
+    )
+
+
 async def load_generation_revision_selection(
     pool: asyncpg.Pool,
     *,
@@ -424,8 +511,8 @@ async def load_generation_revision_selection(
 
     Атомарная повторная проверка batch,
     source generated_post, review_action
-    и текущего TOP-3 выполняется позднее
-    в reserve_generation_revision().
+    и фактического TOP-3 этого batch выполняется
+    позднее в reserve_generation_revision().
     """
 
     normalized_review_action_id = (
@@ -460,12 +547,18 @@ async def load_generation_revision_selection(
         )
 
         selection = (
-            await _load_generation_top3(
+            await _load_generation_batch_selection(
                 connection,
                 ranking_run_id=(
                     ranking_run_id
                 ),
+                batch_id=batch_id,
             )
+        )
+
+        selection = _hydrate_trailer_metadata(
+            selection,
+            record["source_generation_metadata_json"],
         )
 
     return GenerationRevisionSelection(

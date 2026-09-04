@@ -30,6 +30,9 @@ from app.db.daily_workflow import (
 from app.db.daily_workflow_replacement import (
     replace_daily_workflow_after_image_moderation,
 )
+from app.db.daily_workflow_trailer_replacement import (
+    replace_daily_workflow_after_trailer_unverified,
+)
 from app.db.daily_workflow_selection_attempts import (
     DailyWorkflowSelectionAttempt,
     ensure_initial_daily_workflow_selection,
@@ -71,6 +74,9 @@ from app.generation.openai_image_pipeline import (
 )
 from app.generation.openai_pipeline import (
     run_reserved_openai_generation,
+)
+from app.generation.official_trailer_enrichment import (
+    preflight_generation_official_trailers,
 )
 from app.generation.request_key import (
     GenerationRequestKey,
@@ -827,6 +833,7 @@ async def _choose_workflow_replacement(
     ranking_run_id: int,
     active_selection: DailyWorkflowSelectionAttempt,
     current_selection: GenerationTop3Selection,
+    excluded_news_ids: tuple[int, ...] = (),
 ):
     """Выбирает следующий replacement с лимитом workflow."""
 
@@ -856,6 +863,7 @@ async def _choose_workflow_replacement(
             excluded_combination_ids=(
                 used_combination_ids
             ),
+            excluded_news_ids=excluded_news_ids,
         )
     )
 
@@ -964,6 +972,7 @@ async def run_daily_production_workflow(
     -> ranking reservation/recovery
     -> OpenAI event ranking
     -> saved TOP-3
+    -> official trailer preflight / optional TOP-3 replacement
     -> text generation + self-review
     -> image generation
     -> native Telegram photo+caption
@@ -976,6 +985,12 @@ async def run_daily_production_workflow(
     Failed и orphan/uncertain child states
     автоматически не переигрываются, кроме
     доказанного Image API moderation_blocked.
+
+    Trailer/teaser-news проверяется до платной text generation.
+    Если официальный URL не подтверждён, workflow пробует
+    следующую ranking combination без этой новости. Если
+    replacement недоступен, текущий TOP-3 публикуется в
+    degraded режиме без trailer-ссылки: daily post не падает.
 
     Для каждой active TOP-3 combination:
     - normal image выполняется один раз;
@@ -1349,6 +1364,73 @@ async def run_daily_production_workflow(
                             batch_id=batch_id,
                         )
 
+                prepared_generation_items = None
+
+                if batch_id is None:
+                    trailer_preflight = (
+                        await preflight_generation_official_trailers(
+                            selection.items
+                        )
+                    )
+
+                    if not trailer_preflight.ready:
+                        rejected_news_ids = (
+                            trailer_preflight
+                            .unverified_required_news_ids
+                        )
+
+                        replacement_candidate = (
+                            await _choose_workflow_replacement(
+                                pool,
+                                daily_workflow_run_id=workflow_id,
+                                ranking_run_id=ranking_run_id,
+                                active_selection=active_selection,
+                                current_selection=selection,
+                                excluded_news_ids=rejected_news_ids,
+                            )
+                        )
+
+                        if replacement_candidate is not None:
+                            replacement_result = (
+                                await replace_daily_workflow_after_trailer_unverified(
+                                    pool,
+                                    daily_workflow_run_id=workflow_id,
+                                    current_selection_attempt_id=(
+                                        active_selection.selection_attempt_id
+                                    ),
+                                    replacement_combination_id=(
+                                        replacement_candidate
+                                        .combination
+                                        .combination_id
+                                    ),
+                                    rejected_news_ids=rejected_news_ids,
+                                )
+                            )
+
+                            _report_progress(
+                                progress,
+                                "[selection] official trailer not verified; "
+                                "replace TOP-3 "
+                                f"source_combination_id={combination_id}; "
+                                f"replacement_combination_id="
+                                f"{replacement_result.replacement_combination_id}; "
+                                f"rejected_news_ids={rejected_news_ids!r}",
+                            )
+                            continue
+
+                        # Availability wins over trailer completeness. This is
+                        # the final safety net requested for production: never
+                        # lose the whole daily post only because a verified
+                        # official trailer URL could not be found.
+                        _report_progress(
+                            progress,
+                            "[selection] official trailer not verified and "
+                            "replacement unavailable; continue degraded "
+                            f"without trailer link news_ids={rejected_news_ids!r}",
+                        )
+
+                    prepared_generation_items = trailer_preflight.items
+
                 if batch_id is None:
 
                     async def generation_observer(
@@ -1392,6 +1474,9 @@ async def run_daily_production_workflow(
                             telegram_chat_id=(
                                 workflow
                                 .target_telegram_chat_id
+                            ),
+                            prepared_items=(
+                                prepared_generation_items
                             ),
                             reservation_observer=(
                                 generation_observer

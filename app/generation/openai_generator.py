@@ -33,15 +33,15 @@ from app.generation.post_contract import (
 )
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v6"
+    "openai_telegram_post_generator_v7"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
-    "movie_news_telegram_post_prompt_v6"
+    "movie_news_telegram_post_prompt_v7"
 )
 
 OPENAI_POST_REVISION_PROMPT_VERSION = (
-    "movie_news_telegram_post_revision_prompt_v4"
+    "movie_news_telegram_post_revision_prompt_v5"
 )
 
 OPENAI_POST_TEXT_FORMAT = "markdown"
@@ -85,6 +85,7 @@ class GenerationNewsItem:
     individual_score: Decimal
     selection_reason: str
     official_trailer_url: str | None = None
+    official_trailer_channel_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,11 @@ class OpenAIGeneratedNewsPayload(
         min_length=1,
         max_length=MAXIMUM_BODY_LENGTH,
     )
+
+    # Service metadata is attached by Python after the model response.
+    # The model JSON schema itself does not need to return these fields.
+    official_trailer_url: str | None = None
+    official_trailer_channel_name: str | None = None
 
     @field_validator(
         "headline",
@@ -323,7 +329,12 @@ SYSTEM_INSTRUCTIONS = """
    коротких абзацев.
 4. Передавай смысл своими словами.
 5. Не копируй длинные фрагменты публикаций.
-6. Пиши естественно и информативно.
+6. Пиши естественно и информативно. Избегай
+   обрубленных фраз без явного субъекта. Например,
+   вместо «Также снялись Рассел Кроу и Шейлин Вудли»
+   пиши «В фильме также снялись Рассел Кроу и
+   Шейлин Вудли», если это подтверждено исходными
+   данными.
 7. Не используй кликбейт, канцелярит и рекламу.
 8. Имена людей передавай кириллицей:
    используй общепринятую русскую форму или
@@ -353,27 +364,22 @@ SYSTEM_INSTRUCTIONS = """
     в текст публикации.
 15. Не вставляй ссылки на исходные статьи.
 16. Не добавляй длинный перечень источников.
-17. Если основным событием новости является
-    публикация нового официального трейлера
-    фильма или сериала, добавь прямую ссылку
-    на этот трейлер только при наличии во
-    входных данных отдельного подтверждённого
-    поля official_trailer_url.
-18. official_trailer_url должен вести на
-    официальный источник: канал или сайт студии,
-    дистрибьютора, стримингового сервиса либо
-    другого правообладателя.
-19. Не используй перезаливы, агрегаторы,
-    публикации СМИ или неофициальные каналы
-    вместо подтверждённого официального
-    первоисточника.
+17. Поля official_trailer_url и
+    official_trailer_channel_name являются
+    служебными подтверждёнными данными. Никогда
+    не вставляй URL трейлера, Markdown-ссылку или
+    отдельную строку «Официальный трейлер» в
+    headline, body или черновой post_text.
+18. Python-код сам детерминированно добавит
+    подтверждённую ссылку после body нужной новости.
+19. Не изменяй, не дополняй и не придумывай
+    official_trailer_url или название канала.
 20. Если official_trailer_url отсутствует,
     не придумывай URL и не пытайся восстановить
     его по названию фильма или сериала.
-21. Если трейлер лишь упоминается в новости,
-    но его публикация не является основным
-    событием новости, ссылка на трейлер
-    не обязательна.
+21. Наличие служебных trailer-полей не разрешает
+    добавлять в body новые факты, которых нет в
+    title и summary.
 22. Не называй событие скандалом, сенсацией или
     рекордом, если это прямо не подтверждено.
 23. Хештеги запрещены.
@@ -392,7 +398,10 @@ SYSTEM_INSTRUCTIONS = """
     __TARGET_POST_LENGTH_MIN__–__TARGET_POST_LENGTH_MAX__
     символов с пробелами, включая заголовок выпуска,
     разделители, номера новостей и строку подписки,
-    которые добавит Python-код.
+    которые добавит Python-код. Если хотя бы у одной
+    новости передан official_trailer_url, оставляй
+    примерно 120 символов запаса: Python добавит
+    отдельную Markdown-строку официального трейлера.
 32. Для каждого headline ориентируйся на
     __TARGET_HEADLINE_LENGTH_MIN__–__TARGET_HEADLINE_LENGTH_MAX__
     символов. Абсолютный максимум headline —
@@ -576,11 +585,28 @@ Telegram-пост с ежедневной подборкой TOP-3
 13. Верни только JSON-объект в той же структуре,
     что требуется основными инструкциями.
 
-14. Не сокращай source_post_text только ради
+14. Если во входных news переданы
+    official_trailer_url / official_trailer_channel_name,
+    не вставляй их в headline, body или post_text.
+    Python сам восстановит каноническую ссылку после
+    редакционной ревизии. Даже если редактор просит
+    «добавить ссылку на трейлер», отредактируй только
+    содержательный текст новости — ссылку добавит код.
+
+15. Следи за естественной русской связностью. Не
+    оставляй контекстно обрубленные конструкции вроде
+    «Также снялись…» без понятного субъекта; используй
+    «В фильме также снялись…» или другую естественную
+    конструкцию, подтверждённую исходными данными.
+
+16. Не сокращай source_post_text только ради
     лаконичности. Если исходный пост находится
     примерно в диапазоне 850–950 символов,
     по возможности сохраняй сопоставимый объём,
-    если замечания редактора не требуют иного.
+    если замечания редактора не требуют иного. Если
+    передан official_trailer_url, оставляй примерно
+    120 символов запаса для программно добавляемой
+    Markdown-строки официального трейлера.
 """.strip()
 
 
@@ -602,6 +628,9 @@ SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
 - понятно ли, кто такие упомянутые люди и какова
   их роль, если это существенно для смысла;
 - естественно ли звучат формулировки по-русски;
+- есть ли у фраз явный контекст и субъект; исправляй
+  обрубленные конструкции вроде «Также снялись…» на
+  естественные, например «В фильме также снялись…»;
 - нет ли двусмысленных, обрубленных или слишком
   буквальных переводов;
 - корректно ли переданы имена людей кириллицей;
@@ -657,11 +686,12 @@ SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
 8. Названия фильмов и сериалов сохраняй в исходном
    написании, если нет надёжно подтверждённого
    русского названия.
-9. Не добавляй в публикацию ссылки на веб-источники,
+9. Не добавляй в headline/body ссылки на веб-источники,
    поисковые цитаты, список источников или объяснение
-   своей проверки. Уже присутствующие в исходном
-   посте ссылки сохраняй, если нет явной причины
-   считать их ошибочными.
+   своей проверки. Если переданы official_trailer_url /
+   official_trailer_channel_name, не вставляй trailer URL
+   вручную: Python сам добавит каноническую строку после
+   body и сохранит её при revisions.
 10. Не добавляй хештеги, Markdown-заголовки, HTML
     или служебные комментарии.
 11. headline возвращай без внешних Markdown-маркеров.
@@ -682,7 +712,10 @@ SELF_REVIEW_SYSTEM_INSTRUCTIONS = """
     __TARGET_POST_LENGTH_MIN__–__TARGET_POST_LENGTH_MAX__
     символов с пробелами. Если исходный пост находится
     в этом диапазоне, по возможности сохраняй близкий
-    объём.
+    объём. Если хотя бы у одной новости передан
+    official_trailer_url, оставляй примерно 120
+    символов запаса для Markdown-строки, которую
+    программно добавит Python.
 18. Для каждого headline ориентируйся на
     __TARGET_HEADLINE_LENGTH_MIN__–__TARGET_HEADLINE_LENGTH_MAX__
     символов, для body —
@@ -848,6 +881,24 @@ def _build_revision_input_text(
                 "news_id": item.news_id,
                 "title": item.title.strip(),
                 "summary": item.summary.strip(),
+                **(
+                    {
+                        "official_trailer_url": (
+                            item.official_trailer_url.strip()
+                        ),
+                        **(
+                            {
+                                "official_trailer_channel_name": (
+                                    item.official_trailer_channel_name.strip()
+                                )
+                            }
+                            if item.official_trailer_channel_name is not None
+                            else {}
+                        ),
+                    }
+                    if item.official_trailer_url is not None
+                    else {}
+                ),
             }
             for item in items
         ],
@@ -913,10 +964,17 @@ def _build_self_review_input_text(
                 **(
                     {
                         "official_trailer_url": (
-                            item
-                            .official_trailer_url
-                            .strip()
-                        )
+                            item.official_trailer_url.strip()
+                        ),
+                        **(
+                            {
+                                "official_trailer_channel_name": (
+                                    item.official_trailer_channel_name.strip()
+                                )
+                            }
+                            if item.official_trailer_channel_name is not None
+                            else {}
+                        ),
                     }
                     if (
                         item.official_trailer_url
@@ -1055,6 +1113,22 @@ def _validate_news_items(
                     f"news_id={item.news_id}"
                 )
 
+        if item.official_trailer_channel_name is not None:
+            if item.official_trailer_url is None:
+                raise ValueError(
+                    "official_trailer_channel_name нельзя "
+                    "задавать без official_trailer_url: "
+                    f"news_id={item.news_id}"
+                )
+
+            _normalize_required_text(
+                item.official_trailer_channel_name,
+                field_name=(
+                    "official_trailer_channel_name "
+                    f"news_id={item.news_id}"
+                ),
+            )
+
         published_at = (
             item.source_published_at
         )
@@ -1130,10 +1204,17 @@ def _build_input_text(
                 **(
                     {
                         "official_trailer_url": (
-                            item
-                            .official_trailer_url
-                            .strip()
-                        )
+                            item.official_trailer_url.strip()
+                        ),
+                        **(
+                            {
+                                "official_trailer_channel_name": (
+                                    item.official_trailer_channel_name.strip()
+                                )
+                            }
+                            if item.official_trailer_channel_name is not None
+                            else {}
+                        ),
                     }
                     if (
                         item.official_trailer_url
@@ -1330,6 +1411,93 @@ def _validate_generated_body(
     return normalized_body
 
 
+def _normalize_trailer_channel_label(
+    value: str | None,
+) -> str | None:
+    """Возвращает безопасную подпись официального YouTube-канала."""
+
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return None
+
+    normalized = " ".join(value.strip().split())
+
+    if not normalized or len(normalized) > 80:
+        return None
+
+    if "http://" in normalized.casefold() or "https://" in normalized.casefold():
+        return None
+
+    allowed_punctuation = frozenset(".&+'-")
+    for character in normalized:
+        if (
+            character.isalnum()
+            or character.isspace()
+            or character in allowed_punctuation
+        ):
+            continue
+        return None
+
+    return normalized
+
+
+def build_official_trailer_markdown(
+    url: str,
+    channel_name: str | None,
+) -> str:
+    """Строит детерминированную Markdown-ссылку на официальный трейлер."""
+
+    normalized_url = _normalize_required_text(
+        url,
+        field_name="official_trailer_url",
+    )
+
+    parsed = urlsplit(normalized_url)
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "official_trailer_url должен быть абсолютным HTTP/HTTPS URL."
+        )
+
+    channel_label = _normalize_trailer_channel_label(channel_name)
+    if channel_label is None:
+        label = "▶️ Официальный трейлер"
+    else:
+        label = f"▶️ Официальный трейлер {channel_label}"
+
+    return f"[{label}]({normalized_url})"
+
+
+def _attach_trailer_metadata_to_payload(
+    payload: OpenAIGeneratedPostPayload,
+    source_items: tuple[GenerationNewsItem, ...],
+) -> OpenAIGeneratedPostPayload:
+    """Прикрепляет verified trailer metadata после model response."""
+
+    source_by_news_id = {
+        item.news_id: item
+        for item in source_items
+    }
+
+    updated_items: list[OpenAIGeneratedNewsPayload] = []
+
+    for generated_item in payload.items:
+        source_item = source_by_news_id[generated_item.news_id]
+        updated_items.append(
+            generated_item.model_copy(
+                update={
+                    "official_trailer_url": source_item.official_trailer_url,
+                    "official_trailer_channel_name": (
+                        source_item.official_trailer_channel_name
+                    ),
+                }
+            )
+        )
+
+    return payload.model_copy(update={"items": updated_items})
+
+
 def build_top3_post_text(
     items: list[
         OpenAIGeneratedNewsPayload
@@ -1379,10 +1547,21 @@ def build_top3_post_text(
             position=item.position,
         )
 
-        news_sections.append(
+        section = (
             f"{marker} **{headline}**"
             f"\n\n{body}"
         )
+
+        if item.official_trailer_url is not None:
+            section += (
+                "\n\n"
+                + build_official_trailer_markdown(
+                    item.official_trailer_url,
+                    item.official_trailer_channel_name,
+                )
+            )
+
+        news_sections.append(section)
 
     post_text = (
         f"{POST_HEADER}\n"
@@ -1569,6 +1748,11 @@ class OpenAITelegramPostGenerator:
             payload=payload,
         )
 
+        payload = _attach_trailer_metadata_to_payload(
+            payload,
+            items,
+        )
+
         canonical_post_text = (
             build_top3_post_text(
                 payload.items
@@ -1647,6 +1831,11 @@ class OpenAITelegramPostGenerator:
             payload=payload,
         )
 
+        payload = _attach_trailer_metadata_to_payload(
+            payload,
+            items,
+        )
+
         canonical_post_text = (
             build_top3_post_text(
                 payload.items
@@ -1712,6 +1901,11 @@ class OpenAITelegramPostGenerator:
                 expected_news_ids
             ),
             payload=payload,
+        )
+
+        payload = _attach_trailer_metadata_to_payload(
+            payload,
+            items,
         )
 
         canonical_post_text = (

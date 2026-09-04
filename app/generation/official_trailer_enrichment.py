@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -10,11 +11,14 @@ from app.collectors.article_http import (
 from app.collectors.feed_http import (
     resolve_host_addresses,
 )
+from app.generation.openai_generator import (
+    GenerationNewsItem,
+)
 from app.generation.official_trailer_verifier import (
     verify_official_trailer,
 )
 from app.generation.trailer_extractor import (
-    extract_youtube_iframe_urls,
+    extract_youtube_document_urls,
 )
 from app.generation.youtube_oembed import (
     YouTubeOEmbedError,
@@ -25,6 +29,8 @@ from app.generation.youtube_oembed import (
 _TRAILER_MARKERS = (
     "trailer",
     "teaser",
+    "трейлер",
+    "тизер",
 )
 
 
@@ -42,6 +48,34 @@ class OfficialTrailerEnrichmentResult:
     verification_reasons: tuple[str, ...]
     oembed_error_count: int
     error_type: str | None
+    official_trailer_channel_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OfficialTrailerPreflightResult:
+    """TOP-3 после best-effort проверки trailer contract."""
+
+    items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ]
+    required_news_ids: tuple[int, ...]
+    verified_news_ids: tuple[int, ...]
+    unverified_required_news_ids: tuple[int, ...]
+    reasons_by_news_id: tuple[tuple[int, str], ...]
+
+    @property
+    def ready(self) -> bool:
+        """Все trailer-news имеют verified official URL."""
+
+        return not self.unverified_required_news_ids
+
+
+OfficialTrailerEnricher = Callable[
+    ...,
+    Awaitable[OfficialTrailerEnrichmentResult],
+]
 
 
 def _required_string(
@@ -66,16 +100,28 @@ def _required_string(
     return normalized_value
 
 
-def _source_mentions_trailer(
+def source_requires_official_trailer(
     source_title: str,
     source_summary: str,
 ) -> bool:
     """
-    Выполняет дешёвую предварительную проверку.
+    Определяет, относится ли событие к trailer/teaser.
 
-    Если источник вообще не говорит о trailer/teaser,
-    HTML статьи не загружается.
+    Правило намеренно простое и прозрачное: если title
+    или summary исходной новости прямо содержат trailer,
+    teaser, трейлер или тизер, production пытается
+    приложить официальный ролик.
     """
+
+    if not isinstance(source_title, str):
+        raise TypeError(
+            "source_title должен быть строкой."
+        )
+
+    if not isinstance(source_summary, str):
+        raise TypeError(
+            "source_summary должен быть строкой."
+        )
 
     source_text = (
         source_title
@@ -92,7 +138,7 @@ def _source_mentions_trailer(
 def _decode_html_document(
     content: bytes,
 ) -> str:
-    """Декодирует HTML-документ для stdlib HTMLParser."""
+    """Декодирует HTML-документ."""
 
     return content.decode(
         "utf-8",
@@ -118,33 +164,21 @@ async def enrich_official_trailer(
     ) = None,
 ) -> OfficialTrailerEnrichmentResult:
     """
-    Ищет официальный трейлер только внутри статьи.
+    Ищет официальный трейлер внутри исходной статьи.
 
-    Поток:
+    Проверяются iframe, обычные ссылки, lazy-loaded
+    атрибуты и YouTube URL внутри script/JSON. Каждый
+    кандидат подтверждается через YouTube oEmbed и
+    conservative verifier.
 
-    source title/summary
-    -> предварительная trailer/teaser проверка
-    -> безопасная загрузка source_url
-    -> извлечение YouTube iframe URL
-    -> YouTube oEmbed для конкретных найденных видео
-    -> консервативная official trailer verification
-    -> official_trailer_url или None
-
-    Общий web search не выполняется.
-    Видео не скачивается.
-
-    Ошибки внешних HTTP-источников считаются
-    best-effort enrichment failure и не должны сами
-    по себе останавливать основной generation pipeline.
-
-    PostgreSQL, OpenAI и Telegram не используются.
+    Ошибки HTTP считаются best-effort failure и сами
+    по себе не должны ронять daily workflow.
     """
 
     normalized_source_url = _required_string(
         source_url,
         field_name="source_url",
     )
-
     normalized_source_title = _required_string(
         source_title,
         field_name="source_title",
@@ -155,11 +189,9 @@ async def enrich_official_trailer(
             "source_summary должен быть строкой."
         )
 
-    normalized_source_summary = (
-        source_summary.strip()
-    )
+    normalized_source_summary = source_summary.strip()
 
-    if not _source_mentions_trailer(
+    if not source_requires_official_trailer(
         normalized_source_title,
         normalized_source_summary,
     ):
@@ -179,15 +211,9 @@ async def enrich_official_trailer(
     try:
         article = await download_article_document(
             normalized_source_url,
-            timeout_seconds=(
-                article_timeout_seconds
-            ),
-            max_response_bytes=(
-                article_max_response_bytes
-            ),
-            max_redirects=(
-                article_max_redirects
-            ),
+            timeout_seconds=article_timeout_seconds,
+            max_response_bytes=article_max_response_bytes,
+            max_redirects=article_max_redirects,
             resolver=resolver,
             transport=article_transport,
         )
@@ -210,7 +236,7 @@ async def enrich_official_trailer(
     )
 
     youtube_candidate_urls = (
-        extract_youtube_iframe_urls(
+        extract_youtube_document_urls(
             html_content
         )
     )
@@ -220,7 +246,7 @@ async def enrich_official_trailer(
             attempted=True,
             verified=False,
             official_trailer_url=None,
-            reason="youtube_iframe_not_found",
+            reason="youtube_candidate_not_found",
             article_final_url=article.final_url,
             youtube_candidate_urls=(),
             checked_video_urls=(),
@@ -235,14 +261,10 @@ async def enrich_official_trailer(
 
     for video_url in youtube_candidate_urls:
         try:
-            metadata = (
-                await fetch_youtube_oembed_metadata(
-                    video_url,
-                    timeout_seconds=(
-                        youtube_timeout_seconds
-                    ),
-                    transport=youtube_transport,
-                )
+            metadata = await fetch_youtube_oembed_metadata(
+                video_url,
+                timeout_seconds=youtube_timeout_seconds,
+                transport=youtube_transport,
             )
         except YouTubeOEmbedError:
             oembed_error_count += 1
@@ -252,16 +274,10 @@ async def enrich_official_trailer(
             metadata.canonical_url
         )
 
-        verification = (
-            verify_official_trailer(
-                metadata,
-                source_title=(
-                    normalized_source_title
-                ),
-                source_summary=(
-                    normalized_source_summary
-                ),
-            )
+        verification = verify_official_trailer(
+            metadata,
+            source_title=normalized_source_title,
+            source_summary=normalized_source_summary,
         )
 
         verification_reasons.append(
@@ -277,15 +293,10 @@ async def enrich_official_trailer(
                 attempted=True,
                 verified=True,
                 official_trailer_url=(
-                    verification
-                    .official_trailer_url
+                    verification.official_trailer_url
                 ),
-                reason=(
-                    "verified_official_trailer"
-                ),
-                article_final_url=(
-                    article.final_url
-                ),
+                reason="verified_official_trailer",
+                article_final_url=article.final_url,
                 youtube_candidate_urls=(
                     youtube_candidate_urls
                 ),
@@ -295,15 +306,16 @@ async def enrich_official_trailer(
                 verification_reasons=tuple(
                     verification_reasons
                 ),
-                oembed_error_count=(
-                    oembed_error_count
-                ),
+                oembed_error_count=oembed_error_count,
                 error_type=None,
+                official_trailer_channel_name=(
+                    verification
+                    .official_trailer_channel_name
+                ),
             )
 
-    if (
-        oembed_error_count
-        == len(youtube_candidate_urls)
+    if oembed_error_count == len(
+        youtube_candidate_urls
     ):
         reason = "youtube_oembed_unavailable"
     else:
@@ -326,4 +338,107 @@ async def enrich_official_trailer(
         ),
         oembed_error_count=oembed_error_count,
         error_type=None,
+    )
+
+
+async def preflight_generation_official_trailers(
+    items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ],
+    *,
+    trailer_enricher: OfficialTrailerEnricher = (
+        enrich_official_trailer
+    ),
+) -> OfficialTrailerPreflightResult:
+    """
+    Проверяет trailer contract до платной text generation.
+
+    Ненайденный официальный URL не вызывает исключение.
+    Он возвращается как ``unverified_required_news_ids``;
+    daily orchestrator может заменить ranking combination.
+    """
+
+    if len(items) != 3:
+        raise ValueError(
+            "Для trailer preflight требуется ровно три новости."
+        )
+
+    enriched_items: list[GenerationNewsItem] = []
+    required_news_ids: list[int] = []
+    verified_news_ids: list[int] = []
+    unverified_news_ids: list[int] = []
+    reasons: list[tuple[int, str]] = []
+
+    for item in items:
+        required = source_requires_official_trailer(
+            item.title,
+            item.summary,
+        )
+
+        if not required:
+            enriched_items.append(item)
+            continue
+
+        required_news_ids.append(item.news_id)
+
+        if item.official_trailer_url is not None:
+            verified_news_ids.append(item.news_id)
+            reasons.append(
+                (item.news_id, "already_verified")
+            )
+            enriched_items.append(item)
+            continue
+
+        enrichment = await trailer_enricher(
+            source_url=item.source_url,
+            source_title=item.title,
+            source_summary=item.summary,
+        )
+
+        reasons.append(
+            (item.news_id, enrichment.reason)
+        )
+
+        if (
+            enrichment.verified
+            and enrichment.official_trailer_url
+            is not None
+        ):
+            verified_news_ids.append(item.news_id)
+            enriched_items.append(
+                replace(
+                    item,
+                    official_trailer_url=(
+                        enrichment.official_trailer_url
+                    ),
+                    official_trailer_channel_name=(
+                        enrichment
+                        .official_trailer_channel_name
+                    ),
+                )
+            )
+        else:
+            unverified_news_ids.append(
+                item.news_id
+            )
+            enriched_items.append(item)
+
+    return OfficialTrailerPreflightResult(
+        items=(
+            enriched_items[0],
+            enriched_items[1],
+            enriched_items[2],
+        ),
+        required_news_ids=tuple(
+            required_news_ids
+        ),
+        verified_news_ids=tuple(
+            verified_news_ids
+        ),
+        unverified_required_news_ids=tuple(
+            unverified_news_ids
+        ),
+        reasons_by_news_id=tuple(reasons),
     )

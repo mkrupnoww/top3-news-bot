@@ -61,6 +61,7 @@ TEST_SUITE_ID = uuid4().hex
 OFFICIAL_TRAILER_URL = (
     "https://www.youtube.com/watch?v=5fHXyqQOKL8"
 )
+OFFICIAL_TRAILER_CHANNEL_NAME = "A24"
 
 
 class SyntheticGenerationError(
@@ -128,6 +129,9 @@ class FakeOfficialTrailerEnricher:
                 ),
                 oembed_error_count=0,
                 error_type=None,
+                official_trailer_channel_name=(
+                    OFFICIAL_TRAILER_CHANNEL_NAME
+                ),
             )
 
         return OfficialTrailerEnrichmentResult(
@@ -1029,6 +1033,10 @@ async def test_successful_pipeline(
         "official_trailer_url"
     ] == OFFICIAL_TRAILER_URL
 
+    assert primary_input["news"][1][
+        "official_trailer_channel_name"
+    ] == OFFICIAL_TRAILER_CHANNEL_NAME
+
     assert (
         "official_trailer_url"
         not in primary_input["news"][2]
@@ -1044,6 +1052,10 @@ async def test_successful_pipeline(
     ][1][
         "official_trailer_url"
     ] == OFFICIAL_TRAILER_URL
+
+    assert self_review_input["news"][1][
+        "official_trailer_channel_name"
+    ] == OFFICIAL_TRAILER_CHANNEL_NAME
 
     assert (
         "official_trailer_url"
@@ -1276,7 +1288,7 @@ async def test_successful_pipeline(
         record["completion_version"]
         == (
             "reserved_generation_"
-            "completion_v1"
+            "completion_v2"
         )
     )
 
@@ -1304,6 +1316,13 @@ async def test_successful_pipeline(
         9,
         10,
     ]
+
+    assert generated_items[1]["official_trailer_url"] == (
+        OFFICIAL_TRAILER_URL
+    )
+    assert generated_items[1][
+        "official_trailer_channel_name"
+    ] == OFFICIAL_TRAILER_CHANNEL_NAME
 
     assert all(
         isinstance(

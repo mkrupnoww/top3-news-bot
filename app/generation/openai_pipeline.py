@@ -615,8 +615,10 @@ async def _enrich_generation_items(
                 replace(
                     item,
                     official_trailer_url=(
-                        enrichment
-                        .official_trailer_url
+                        enrichment.official_trailer_url
+                    ),
+                    official_trailer_channel_name=(
+                        enrichment.official_trailer_channel_name
                     ),
                 )
             )
@@ -628,6 +630,48 @@ async def _enrich_generation_items(
         enriched_items[1],
         enriched_items[2],
     )
+
+
+def _validate_prepared_generation_items(
+    selection: GenerationTop3Selection,
+    prepared_items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ],
+) -> tuple[
+    GenerationNewsItem,
+    GenerationNewsItem,
+    GenerationNewsItem,
+]:
+    """Разрешает preflight менять только verified trailer metadata."""
+
+    if len(prepared_items) != 3:
+        raise ValueError(
+            "prepared_items должен содержать ровно три новости."
+        )
+
+    for source_item, prepared_item in zip(
+        selection.items,
+        prepared_items,
+        strict=True,
+    ):
+        expected = replace(
+            source_item,
+            official_trailer_url=prepared_item.official_trailer_url,
+            official_trailer_channel_name=(
+                prepared_item.official_trailer_channel_name
+            ),
+        )
+
+        if prepared_item != expected:
+            raise ValueError(
+                "prepared_items могут отличаться от сохранённого TOP-3 "
+                "только official trailer metadata: "
+                f"news_id={source_item.news_id}"
+            )
+
+    return prepared_items
 
 
 async def _record_pipeline_failure(
@@ -680,6 +724,11 @@ async def run_reserved_openai_generation(
     trailer_enricher: OfficialTrailerEnricher = (
         enrich_official_trailer
     ),
+    prepared_items: tuple[
+        GenerationNewsItem,
+        GenerationNewsItem,
+        GenerationNewsItem,
+    ] | None = None,
     reservation_observer: (
         GenerationReservationObserver
         | None
@@ -698,9 +747,9 @@ async def run_reserved_openai_generation(
     4. Резервирует publication_batch.
     5. Блокирует повторный запуск до любых
        HTTP-запросов enrichment и OpenAI.
-    6. Только для нового выпуска best-effort
-       ищет verified official trailer внутри
-       исходных статей TOP-3.
+    6. Для нового выпуска использует уже проверенные
+       preflight items, если их передал orchestrator;
+       иначе выполняет прежний best-effort trailer enrichment.
     7. Формирует фактический OpenAI-запрос
        по временным enriched items.
     8. Выполняет первичную генерацию
@@ -796,12 +845,20 @@ async def run_reserved_openai_generation(
         )
 
     try:
-        generation_items = (
-            await _enrich_generation_items(
-                selection.items,
-                trailer_enricher=trailer_enricher,
+        if prepared_items is None:
+            generation_items = (
+                await _enrich_generation_items(
+                    selection.items,
+                    trailer_enricher=trailer_enricher,
+                )
             )
-        )
+        else:
+            generation_items = (
+                _validate_prepared_generation_items(
+                    selection,
+                    prepared_items,
+                )
+            )
 
         generation_model_request = (
             generator.build_request(

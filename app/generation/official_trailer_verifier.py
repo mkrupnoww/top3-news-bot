@@ -7,15 +7,38 @@ from app.generation.youtube_oembed import (
 
 
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_WORD_PATTERN = re.compile(
+    r"[a-zа-яё0-9]+",
+    flags=re.IGNORECASE,
+)
 
 _TRAILER_MARKERS = (
     "trailer",
     "teaser",
+    "трейлер",
+    "тизер",
 )
 
 _OFFICIAL_MARKERS = (
     "official",
+    "официаль",
 )
+
+_GENERIC_AUTHOR_TOKENS = {
+    "official",
+    "channel",
+    "pictures",
+    "picture",
+    "films",
+    "film",
+    "movies",
+    "movie",
+    "studios",
+    "studio",
+    "entertainment",
+    "productions",
+    "production",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +48,7 @@ class OfficialTrailerVerification:
     verified: bool
     official_trailer_url: str | None
     reason: str
+    official_trailer_channel_name: str | None = None
 
 
 def _normalize_text(value: str) -> str:
@@ -53,6 +77,59 @@ def _contains_any(
     )
 
 
+def _author_is_confirmed_by_source(
+    *,
+    author_name: str,
+    source_text: str,
+) -> bool:
+    """
+    Проверяет связь YouTube-канала с исходной новостью.
+
+    Полное совпадение остаётся предпочтительным, но
+    ``Amazon MGM Studios`` также может подтверждаться
+    упоминанием ``Amazon MGM`` в статье.
+    """
+
+    normalized_author = _normalize_text(
+        author_name
+    )
+
+    if not normalized_author:
+        return False
+
+    if normalized_author in source_text:
+        return True
+
+    source_tokens = set(
+        _WORD_PATTERN.findall(source_text)
+    )
+
+    author_tokens = [
+        token
+        for token in _WORD_PATTERN.findall(
+            normalized_author
+        )
+        if (
+            token not in _GENERIC_AUTHOR_TOKENS
+            and (
+                len(token) >= 4
+                or any(
+                    character.isdigit()
+                    for character in token
+                )
+            )
+        )
+    ]
+
+    if not author_tokens:
+        return False
+
+    return any(
+        token in source_tokens
+        for token in author_tokens
+    )
+
+
 def verify_official_trailer(
     metadata: YouTubeOEmbedMetadata,
     *,
@@ -67,33 +144,28 @@ def verify_official_trailer(
     - YouTube title должен быть о trailer/teaser;
     - хотя бы источник или YouTube title должны
       явно содержать marker official;
-    - имя YouTube-канала должно присутствовать
-      в title/summary исходной новости.
+    - название YouTube-канала должно быть связано
+      с исходной новостью хотя бы одним значимым
+      токеном либо полным совпадением.
 
     Функция ничего не ищет в интернете и не выполняет
     сетевых запросов.
     """
 
-    normalized_source_title = (
-        _normalize_text(source_title)
+    normalized_source_title = _normalize_text(
+        source_title
     )
-
-    normalized_source_summary = (
-        _normalize_text(source_summary)
+    normalized_source_summary = _normalize_text(
+        source_summary
     )
-
     normalized_source_text = (
         normalized_source_title
         + " "
         + normalized_source_summary
     )
 
-    normalized_video_title = (
-        _normalize_text(metadata.title)
-    )
-
-    normalized_author_name = (
-        _normalize_text(metadata.author_name)
+    normalized_video_title = _normalize_text(
+        metadata.title
     )
 
     if not _contains_any(
@@ -132,10 +204,9 @@ def verify_official_trailer(
             reason="official_marker_not_confirmed",
         )
 
-    if (
-        not normalized_author_name
-        or normalized_author_name
-        not in normalized_source_text
+    if not _author_is_confirmed_by_source(
+        author_name=metadata.author_name,
+        source_text=normalized_source_text,
     ):
         return OfficialTrailerVerification(
             verified=False,
@@ -152,4 +223,7 @@ def verify_official_trailer(
             metadata.canonical_url
         ),
         reason="verified_official_trailer",
+        official_trailer_channel_name=(
+            metadata.author_name.strip()
+        ),
     )

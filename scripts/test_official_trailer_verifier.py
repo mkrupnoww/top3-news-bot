@@ -58,6 +58,7 @@ def test_real_thr_case() -> None:
         result.reason
         == "verified_official_trailer"
     )
+    assert result.official_trailer_channel_name == "A24"
 
     print("Real THR/A24 trailer case: OK")
     print("verified=true")
@@ -170,6 +171,25 @@ def test_non_trailer_source() -> None:
     print("Non-trailer source blocking: OK")
 
 
+def test_channel_token_match() -> None:
+    """Разрешает безопасное сокращённое упоминание студии в source."""
+
+    result = verify_official_trailer(
+        build_metadata(
+            title="Film | Official Trailer | Amazon MGM Studios",
+            author_name="Amazon MGM Studios",
+        ),
+        source_title="Amazon MGM releases official trailer for Film",
+        source_summary="The new trailer is now online.",
+    )
+
+    assert result.verified is True
+    assert result.official_trailer_channel_name == "Amazon MGM Studios"
+
+    print()
+    print("Channel token confirmation: OK")
+
+
 def main() -> int:
     """Запускает pure-Python тест verifier."""
 
@@ -178,6 +198,7 @@ def main() -> int:
     test_unconfirmed_channel()
     test_missing_official_marker()
     test_non_trailer_source()
+    test_channel_token_match()
 
     print()
     print("Network requests: not performed")
