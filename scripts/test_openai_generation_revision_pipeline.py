@@ -1,6 +1,6 @@
 import asyncio
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -12,8 +12,16 @@ import asyncpg
 from app.config import get_settings
 from app.db.generation_selection import (
     GenerationTop3Selection,
-    load_generation_combination,
     load_generation_top3,
+)
+from app.db.ranking_run_completion import (
+    complete_reserved_ranking_run,
+)
+from app.db.ranking_run_reservation import (
+    reserve_ranking_run,
+)
+from app.db.ranking_scores import (
+    ManualNewsAssessment,
 )
 from app.db.pool import (
     close_database_pool,
@@ -28,16 +36,24 @@ from app.generation.openai_generator import (
 from app.generation.openai_revision_pipeline import (
     run_reserved_openai_generation_revision,
 )
+from app.ranking.evaluator import (
+    RankingEvaluatorMetadata,
+)
 from app.ranking.openai_usage import (
     OpenAICostEstimate,
     OpenAITokenUsage,
 )
+from app.ranking.request_key import (
+    REQUEST_KEY_VERSION,
+    RankingRequestKey,
+)
+from app.ranking.score_formula import (
+    FORMULA_VERSION,
+)
 
 
-TEST_RANKING_RUN_ID = 18
-REPLACEMENT_RANKING_RUN_ID = 142
-REPLACEMENT_COMBINATION_ID = 1845
-REPLACEMENT_NEWS_IDS = (1029, 1030, 986)
+TEST_NEWS_IDS = (11, 9, 10)
+REPLACEMENT_NEWS_IDS = (11, 10, 9)
 TEST_SUITE_ID = uuid4().hex
 
 SOURCE_POST_TEXT = (
@@ -421,6 +437,199 @@ def build_batch_request_key() -> str:
     return sha256(
         uuid4().bytes
     ).hexdigest()
+
+
+def build_ranking_metadata() -> RankingEvaluatorMetadata:
+    """Создаёт метаданные временной ranking-фикстуры."""
+
+    return RankingEvaluatorMetadata(
+        run_mode="openai_ranking",
+        evaluator_name=(
+            "TestOpenAIGenerationRevisionPipelineRankingFixture"
+        ),
+        evaluator_version=(
+            "test_openai_generation_revision_pipeline_"
+            "ranking_fixture_v1"
+        ),
+        prompt_version=(
+            "test_openai_generation_revision_pipeline_"
+            "ranking_prompt_v1"
+        ),
+        model_name="gpt-5.6-terra",
+    )
+
+
+def build_ranking_request_key() -> RankingRequestKey:
+    """Создаёт уникальный request_key ranking-фикстуры."""
+
+    payload = {
+        "test": (
+            "openai_generation_revision_pipeline_"
+            "ranking_fixture"
+        ),
+        "test_suite_id": TEST_SUITE_ID,
+        "news_ids": list(TEST_NEWS_IDS),
+    }
+
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    return RankingRequestKey(
+        value=sha256(
+            canonical_json.encode("utf-8")
+        ).hexdigest(),
+        version=REQUEST_KEY_VERSION,
+        canonical_json=canonical_json,
+    )
+
+
+def build_ranking_assessments() -> tuple[
+    ManualNewsAssessment,
+    ...,
+]:
+    """Создаёт временный legacy TOP-3 11, 9, 10."""
+
+    return (
+        ManualNewsAssessment(
+            news_id=11,
+            f_score=Decimal("10.000000"),
+            m_score=Decimal("10.000000"),
+            r_score=Decimal("10.000000"),
+            h_score=Decimal("10.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость для позиции 1."
+            ),
+        ),
+        ManualNewsAssessment(
+            news_id=9,
+            f_score=Decimal("9.000000"),
+            m_score=Decimal("9.000000"),
+            r_score=Decimal("9.000000"),
+            h_score=Decimal("9.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость для позиции 2."
+            ),
+        ),
+        ManualNewsAssessment(
+            news_id=10,
+            f_score=Decimal("8.000000"),
+            m_score=Decimal("8.000000"),
+            r_score=Decimal("8.000000"),
+            h_score=Decimal("8.000000"),
+            q_score=Decimal("1.000000"),
+            explanation=(
+                "Тестовая новость для позиции 3."
+            ),
+        ),
+    )
+
+
+async def create_test_ranking_run(
+    pool: asyncpg.Pool,
+    *,
+    created_ranking_run_ids: set[int],
+) -> int:
+    """Создаёт самодостаточную временную ranking-фикстуру."""
+
+    metadata = build_ranking_metadata()
+    request_key = build_ranking_request_key()
+
+    window_finished_at = datetime(
+        2026,
+        8,
+        9,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    reservation = await reserve_ranking_run(
+        pool,
+        request_key=request_key,
+        formula_version=FORMULA_VERSION,
+        metadata=metadata,
+        window_started_at=(
+            window_finished_at
+            - timedelta(hours=24)
+        ),
+        window_finished_at=window_finished_at,
+        news_ids=TEST_NEWS_IDS,
+    )
+
+    created_ranking_run_ids.add(
+        reservation.ranking_run_id
+    )
+
+    telemetry = build_telemetry(
+        model_name="gpt-5.6-terra"
+    )
+
+    completion = await complete_reserved_ranking_run(
+        pool,
+        ranking_run_id=reservation.ranking_run_id,
+        request_key=request_key.value,
+        metadata=metadata,
+        assessments=build_ranking_assessments(),
+        usage=telemetry.usage,
+        cost_estimate=telemetry.cost_estimate,
+    )
+
+    assert completion.run_status == "completed"
+    assert completion.scored_count == 3
+    assert completion.eligible_count == 3
+
+    print("Temporary revision ranking fixture: OK")
+    print(
+        "temporary_ranking_run_id="
+        f"{reservation.ranking_run_id}"
+    )
+    print("ranking_fixture_news_ids=11,9,10")
+
+    return reservation.ranking_run_id
+
+
+def build_replacement_batch_selection(
+    selection: GenerationTop3Selection,
+) -> GenerationTop3Selection:
+    """
+    Создаёт batch selection, отличающийся от ranking winner.
+
+    Для regression достаточно поменять сохранённый порядок двух
+    элементов: если revision ошибочно перечитает winner по ranking_run,
+    тест получит 11,9,10 вместо фактических batch_items 11,10,9.
+    """
+
+    first, second, third = selection.items
+    first_score, second_score, third_score = (
+        selection.score_ids
+    )
+
+    replacement_selection = replace(
+        selection,
+        score_ids=(
+            first_score,
+            third_score,
+            second_score,
+        ),
+        items=(
+            replace(first, position=1),
+            replace(third, position=2),
+            replace(second, position=3),
+        ),
+    )
+
+    assert replacement_selection.news_ids == (
+        REPLACEMENT_NEWS_IDS
+    )
+    assert replacement_selection.news_ids != selection.news_ids
+
+    return replacement_selection
 
 
 def decode_jsonb(
@@ -1867,6 +2076,7 @@ async def assert_test_batch_deleted(
     pool: asyncpg.Pool,
     *,
     batch_id: int,
+    ranking_run_id: int,
 ) -> None:
     """Проверяет каскадное удаление."""
 
@@ -1907,7 +2117,7 @@ async def assert_test_batch_deleted(
                 ) AS ranking_run_exists
             """,
             batch_id,
-            TEST_RANKING_RUN_ID,
+            ranking_run_id,
         )
 
     if record is None:
@@ -1927,6 +2137,7 @@ async def cleanup_test_batches(
     pool: asyncpg.Pool,
     *,
     created_batch_ids: set[int],
+    ranking_run_id: int | None,
 ) -> None:
     """Удаляет временные данные pipeline."""
 
@@ -1938,9 +2149,15 @@ async def cleanup_test_batches(
             batch_id=batch_id,
         )
 
+        if ranking_run_id is None:
+            raise AssertionError(
+                "ranking_run_id отсутствует при cleanup batch."
+            )
+
         await assert_test_batch_deleted(
             pool,
             batch_id=batch_id,
+            ranking_run_id=ranking_run_id,
         )
 
         print()
@@ -1955,8 +2172,56 @@ async def cleanup_test_batches(
             "temporary_revision_requests_deleted=true"
         )
         print(
-            "ranking_run_18_preserved=true"
+            "temporary_ranking_run_preserved=true"
         )
+
+
+async def cleanup_test_ranking_runs(
+    pool: asyncpg.Pool,
+    *,
+    created_ranking_run_ids: set[int],
+) -> None:
+    """Удаляет временные ranking runs и scores."""
+
+    deleted_ranking_run_ids: list[int] = []
+
+    for ranking_run_id in sorted(
+        created_ranking_run_ids
+    ):
+        async with pool.acquire() as connection:
+            result = await connection.execute(
+                """
+                DELETE FROM top3_news.ranking_runs
+                WHERE ranking_run_id = $1
+                """,
+                ranking_run_id,
+            )
+
+        if result != "DELETE 1":
+            raise RuntimeError(
+                "Не удалось удалить временный ranking_run: "
+                f"ranking_run_id={ranking_run_id}, "
+                f"result={result}"
+            )
+
+        deleted_ranking_run_ids.append(
+            ranking_run_id
+        )
+
+    print()
+    print("Revision ranking fixture cleanup: OK")
+    print(
+        "deleted_ranking_run_ids="
+        + (
+            ",".join(
+                str(value)
+                for value in deleted_ranking_run_ids
+            )
+            if deleted_ranking_run_ids
+            else "none"
+        )
+    )
+    print("temporary_ranking_data_deleted=true")
 
 
 async def main() -> int:
@@ -1969,54 +2234,27 @@ async def main() -> int:
     )
 
     created_batch_ids: set[int] = set()
+    created_ranking_run_ids: set[int] = set()
+    ranking_run_id: int | None = None
 
     try:
-        selection = (
-            await load_generation_top3(
-                pool,
-                ranking_run_id=(
-                    TEST_RANKING_RUN_ID
-                ),
-            )
+        ranking_run_id = await create_test_ranking_run(
+            pool,
+            created_ranking_run_ids=(
+                created_ranking_run_ids
+            ),
         )
 
-        replacement_combination = (
-            await load_generation_combination(
-                pool,
-                ranking_run_id=(
-                    REPLACEMENT_RANKING_RUN_ID
-                ),
-                combination_id=(
-                    REPLACEMENT_COMBINATION_ID
-                ),
-            )
+        selection = await load_generation_top3(
+            pool,
+            ranking_run_id=ranking_run_id,
         )
-
-        if replacement_combination.is_winner:
-            raise AssertionError(
-                "Replacement revision fixture неожиданно является winner."
-            )
 
         replacement_selection = (
-            replacement_combination.selection
-        )
-
-        if replacement_selection.news_ids != REPLACEMENT_NEWS_IDS:
-            raise AssertionError(
-                "Replacement revision fixture изменился: "
-                f"actual={replacement_selection.news_ids!r}, "
-                f"expected={REPLACEMENT_NEWS_IDS!r}"
+            build_replacement_batch_selection(
+                selection
             )
-
-        winner_142 = await load_generation_top3(
-            pool,
-            ranking_run_id=REPLACEMENT_RANKING_RUN_ID,
         )
-
-        if winner_142.news_ids == replacement_selection.news_ids:
-            raise AssertionError(
-                "Replacement fixture должен отличаться от winner TOP-3."
-            )
 
         reviewer_telegram_user_id = (
             await load_test_reviewer(pool)
@@ -2082,10 +2320,10 @@ async def main() -> int:
             "Replacement combination -> revision: OK"
         )
         print(
-            f"replacement_ranking_run_id={REPLACEMENT_RANKING_RUN_ID}"
+            f"replacement_ranking_run_id={ranking_run_id}"
         )
         print(
-            f"replacement_combination_id={REPLACEMENT_COMBINATION_ID}"
+            "replacement_fixture=batch_items_reordered"
         )
         print(
             "replacement_news_ids="
@@ -2101,9 +2339,18 @@ async def main() -> int:
                 created_batch_ids=(
                     created_batch_ids
                 ),
+                ranking_run_id=ranking_run_id,
             )
         finally:
-            await close_database_pool(pool)
+            try:
+                await cleanup_test_ranking_runs(
+                    pool,
+                    created_ranking_run_ids=(
+                        created_ranking_run_ids
+                    ),
+                )
+            finally:
+                await close_database_pool(pool)
 
     print()
     print("API key required: no")
