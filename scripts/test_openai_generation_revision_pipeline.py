@@ -36,6 +36,10 @@ from app.generation.openai_generator import (
 from app.generation.openai_revision_pipeline import (
     run_reserved_openai_generation_revision,
 )
+from app.generation.post_contract import (
+    MAXIMUM_BODY_LENGTH,
+    MAXIMUM_HEADLINE_LENGTH,
+)
 from app.ranking.evaluator import (
     RankingEvaluatorMetadata,
 )
@@ -290,8 +294,12 @@ class FakeRevisionGenerationClient:
                     "summary не может быть пустым."
                 )
 
-            headline = normalized_title[:220]
-            body = normalized_summary[:700]
+            headline = normalized_title[
+                :MAXIMUM_HEADLINE_LENGTH
+            ].rstrip()
+            body = normalized_summary[
+                :MAXIMUM_BODY_LENGTH
+            ].rstrip()
 
             generated_items.append(
                 {
