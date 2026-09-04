@@ -31,6 +31,9 @@ from app.generation.openai_generator import (
 from app.generation.openai_pipeline import (
     run_reserved_openai_generation,
 )
+from app.generation.post_contract import (
+    MAXIMUM_HEADLINE_LENGTH,
+)
 from app.generation.official_trailer_enrichment import (
     OfficialTrailerEnrichmentResult,
 )
@@ -338,18 +341,27 @@ class FakeStructuredGenerationClient:
                     "summary не может быть пустым."
                 )
 
+            self_review_suffix = (
+                " — self-review"
+                if is_self_review
+                else ""
+            )
+
+            headline_limit = (
+                MAXIMUM_HEADLINE_LENGTH
+                - len(self_review_suffix)
+            )
+
             headline = (
-                normalized_title[:80]
+                normalized_title[
+                    :headline_limit
+                ].rstrip()
+                + self_review_suffix
             )
 
             body = (
                 normalized_summary[:160]
             )
-
-            if is_self_review:
-                headline = (
-                    f"{headline} — self-review"
-                )
 
             generated_items.append(
                 {
