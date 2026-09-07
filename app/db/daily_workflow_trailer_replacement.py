@@ -103,11 +103,14 @@ async def replace_daily_workflow_after_trailer_unverified(
 
             if (
                 workflow["workflow_status"] != "running"
-                or workflow["current_stage"] != "generation"
+                or workflow["current_stage"] not in {
+                    "ranking",
+                    "generation",
+                }
             ):
                 raise DailyWorkflowTrailerReplacementError(
                     "Trailer replacement разрешён только для "
-                    "workflow running/generation."
+                    "workflow running/ranking или running/generation."
                 )
 
             if any(

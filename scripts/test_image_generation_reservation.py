@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import date, timedelta
 from hashlib import sha256
 import json
@@ -757,6 +758,114 @@ async def assert_test_batch_deleted(
     assert record["generated_post_count"] == 0
     assert record["image_request_count"] == 0
     assert record["ranking_run_exists"] is True
+
+
+async def test_replacement_batch_initial_reservation(
+    pool: asyncpg.Pool,
+    *,
+    selection: GenerationTop3Selection,
+    telegram_chat_id: int,
+    created_batch_ids: set[int],
+) -> None:
+    """Проверяет initial image reservation для replacement batch."""
+
+    first, second, third = selection.items
+    first_score, second_score, third_score = selection.score_ids
+
+    replacement_selection = replace(
+        selection,
+        score_ids=(
+            first_score,
+            third_score,
+            second_score,
+        ),
+        items=(
+            replace(first, position=1),
+            replace(third, position=2),
+            replace(second, position=3),
+        ),
+    )
+
+    if replacement_selection.news_ids == selection.news_ids:
+        raise AssertionError(
+            "Replacement image fixture должен отличаться от ranking winner."
+        )
+
+    generator = OpenAIMovieNewsImageGenerator(
+        client=NoCallImageGenerationClient(),
+        model_name=TEST_IMAGE_MODEL_NAME,
+        size=TEST_IMAGE_SIZE,
+    )
+
+    items = build_image_items(
+        replacement_selection
+    )
+
+    (
+        batch_id,
+        generated_post_id,
+    ) = await create_test_batch_and_post(
+        pool,
+        selection=replacement_selection,
+        telegram_chat_id=telegram_chat_id,
+        existing_image=False,
+        test_name=(
+            "image_generation_replacement_batch_reservation"
+        ),
+        created_batch_ids=created_batch_ids,
+    )
+
+    model_request = generator.build_request(
+        items=items,
+    )
+
+    request_key = create_image_request_key(
+        batch_id=batch_id,
+        ranking_run_id=(
+            replacement_selection.ranking_run_id
+        ),
+        request_kind="initial",
+        review_action_id=None,
+        metadata=generator.metadata,
+        model_request=model_request,
+        items=items,
+    )
+
+    reservation = await reserve_image_generation(
+        pool,
+        request_key=request_key,
+        batch_id=batch_id,
+        generated_post_id=generated_post_id,
+        ranking_run_id=(
+            replacement_selection.ranking_run_id
+        ),
+        request_kind="initial",
+        review_action_id=None,
+        editorial_comment=None,
+        issues=(),
+        metadata=generator.metadata,
+        model_request=model_request,
+        items=items,
+    )
+
+    assert reservation.created_new is True
+    assert reservation.should_call_model is True
+    assert reservation.image_status == "reserved"
+
+    print()
+    print("Replacement batch initial image reservation: OK")
+    print(
+        "ranking_winner_news_ids="
+        + ",".join(str(value) for value in selection.news_ids)
+    )
+    print(
+        "replacement_batch_news_ids="
+        + ",".join(
+            str(value)
+            for value in replacement_selection.news_ids
+        )
+    )
+    print("Image API requests=not_performed")
 
 
 async def test_initial_reservation(
@@ -1742,6 +1851,17 @@ async def main() -> int:
         )
 
         await test_initial_reservation(
+            pool,
+            selection=selection,
+            telegram_chat_id=(
+                settings.telegram_channel_id
+            ),
+            created_batch_ids=(
+                created_batch_ids
+            ),
+        )
+
+        await test_replacement_batch_initial_reservation(
             pool,
             selection=selection,
             telegram_chat_id=(

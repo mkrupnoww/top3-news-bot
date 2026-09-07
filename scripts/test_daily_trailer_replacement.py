@@ -130,7 +130,7 @@ async def main() -> int:
                     UPDATE top3_news.daily_workflow_runs
                     SET
                         workflow_status = 'running',
-                        current_stage = 'generation',
+                        current_stage = 'ranking',
                         batch_id = NULL,
                         generated_post_id = NULL,
                         image_generation_id = NULL,
@@ -222,7 +222,7 @@ async def main() -> int:
                     == result.replacement_selection_attempt_id
                 )
 
-                print("Trailer selection replacement: OK")
+                print("Ranking-stage trailer selection replacement: OK")
                 print("Replacement idempotency: OK")
                 print(f"fixture_workflow_id={workflow_id}")
                 print(f"rejected_news_id={rejected_news_id}")

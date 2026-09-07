@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import asyncpg
 
 from app.db.generation_selection import (
-    _load_generation_top3,
+    _load_generation_batch_selection,
 )
 from app.generation.image_generator import (
     ImageGenerationNewsItem,
@@ -1139,17 +1139,19 @@ async def _validate_current_top3(
     connection: asyncpg.Connection,
     *,
     ranking_run_id: int,
+    batch_id: int,
     items: tuple[
         ImageGenerationNewsItem,
         ...,
     ],
 ) -> tuple[int, int, int]:
-    """Сверяет image input с сохранённым TOP-3."""
+    """Сверяет image input с фактическим TOP-3 publication batch."""
 
     current_selection = (
-        await _load_generation_top3(
+        await _load_generation_batch_selection(
             connection,
             ranking_run_id=ranking_run_id,
+            batch_id=batch_id,
         )
     )
 
@@ -1173,7 +1175,7 @@ async def _validate_current_top3(
 
     if current_projection != expected_projection:
         raise ValueError(
-            "Сохранённый TOP-3 изменился "
+            "Фактический TOP-3 publication batch изменился "
             "после подготовки image request. "
             "Нужно сформировать prompt "
             "и request_key заново."
@@ -1566,6 +1568,9 @@ async def reserve_image_generation(
                             ranking_run_id=(
                                 normalized_ranking_run_id
                             ),
+                            batch_id=(
+                                normalized_batch_id
+                            ),
                             items=normalized_items,
                         )
                     )
@@ -1661,6 +1666,9 @@ async def reserve_image_generation(
                     connection,
                     ranking_run_id=(
                         normalized_ranking_run_id
+                    ),
+                    batch_id=(
+                        normalized_batch_id
                     ),
                     items=normalized_items,
                 )
