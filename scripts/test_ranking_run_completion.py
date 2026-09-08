@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -44,10 +45,24 @@ from app.ranking.score_formula import (
 )
 
 
-TEST_NEWS_IDS = (
+TEST_NEWS_IDS: tuple[int, ...] = ()
+
+WINDOW_STARTED_AT = datetime(
+    2026,
     7,
-    8,
-    9,
+    30,
+    11,
+    21,
+    tzinfo=timezone.utc,
+)
+
+WINDOW_FINISHED_AT = datetime(
+    2026,
+    7,
+    31,
+    11,
+    21,
+    tzinfo=timezone.utc,
 )
 
 
@@ -104,9 +119,18 @@ def build_assessments() -> tuple[
 ]:
     """Создаёт три тестовые оценки."""
 
+    if len(TEST_NEWS_IDS) != 3:
+        raise RuntimeError(
+            "Тестовые news_id не настроены."
+        )
+
+    news_id_1, news_id_2, news_id_3 = (
+        TEST_NEWS_IDS
+    )
+
     return (
         ManualNewsAssessment(
-            news_id=7,
+            news_id=news_id_1,
             f_score=Decimal("9.000000"),
             m_score=Decimal("4.000000"),
             r_score=Decimal("4.000000"),
@@ -118,7 +142,7 @@ def build_assessments() -> tuple[
             ),
         ),
         ManualNewsAssessment(
-            news_id=8,
+            news_id=news_id_2,
             f_score=Decimal("8.500000"),
             m_score=Decimal("8.000000"),
             r_score=Decimal("7.000000"),
@@ -130,7 +154,7 @@ def build_assessments() -> tuple[
             ),
         ),
         ManualNewsAssessment(
-            news_id=9,
+            news_id=news_id_3,
             f_score=Decimal("9.500000"),
             m_score=Decimal("6.500000"),
             r_score=Decimal("6.500000"),
@@ -174,6 +198,150 @@ def decode_jsonb(
     return value
 
 
+async def create_test_news_items(
+    pool: asyncpg.Pool,
+) -> tuple[int, ...]:
+    """Создаёт три временных news_items для теста."""
+
+    fixture_token = uuid4().hex
+
+    async with pool.acquire() as connection:
+        source_id = await connection.fetchval(
+            """
+            SELECT source_id
+            FROM top3_news.sources
+            WHERE source_code = 'variety_film'
+            """
+        )
+
+        if source_id is None:
+            raise LookupError(
+                "Тестовый источник variety_film не найден."
+            )
+
+        created_news_ids: list[int] = []
+
+        async with connection.transaction():
+            for position in range(1, 4):
+                news_id = await connection.fetchval(
+                    """
+                    INSERT INTO top3_news.news_items (
+                        source_id,
+                        external_id,
+                        source_url,
+                        raw_title,
+                        raw_summary,
+                        author_name,
+                        source_published_at,
+                        processing_status,
+                        metadata
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        $5,
+                        'Integration Test',
+                        $6,
+                        'collected',
+                        jsonb_build_object(
+                            'integration_test',
+                            true,
+                            'fixture_token',
+                            $7::text
+                        )
+                    )
+                    RETURNING news_id
+                    """,
+                    source_id,
+                    (
+                        "ranking-run-completion-"
+                        f"{fixture_token}-{position}"
+                    ),
+                    (
+                        "https://example.com/"
+                        "ranking-run-completion/"
+                        f"{fixture_token}/{position}"
+                    ),
+                    (
+                        "Ranking completion test news "
+                        f"{position}"
+                    ),
+                    (
+                        "Ranking completion test summary "
+                        f"{position}"
+                    ),
+                    WINDOW_FINISHED_AT,
+                    fixture_token,
+                )
+
+                if news_id is None:
+                    raise RuntimeError(
+                        "Не удалось создать тестовый news_item."
+                    )
+
+                created_news_ids.append(int(news_id))
+
+    if len(created_news_ids) != 3:
+        raise RuntimeError(
+            "Ожидалось три тестовых news_items."
+        )
+
+    return tuple(created_news_ids)
+
+
+def configure_test_news_ids(
+    news_ids: tuple[int, ...],
+) -> None:
+    """Настраивает идентификаторы временной фикстуры."""
+
+    global TEST_NEWS_IDS
+
+    if len(news_ids) != 3:
+        raise ValueError(
+            "Для теста требуется три news_id."
+        )
+
+    TEST_NEWS_IDS = news_ids
+
+
+async def cleanup_test_news_items(
+    pool: asyncpg.Pool,
+    *,
+    news_ids: tuple[int, ...],
+) -> None:
+    """Удаляет только созданные тестом news_items."""
+
+    if not news_ids:
+        return
+
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            DELETE FROM top3_news.news_items
+            WHERE news_id = ANY($1::bigint[])
+            """,
+            list(news_ids),
+        )
+
+    expected = f"DELETE {len(news_ids)}"
+
+    if result != expected:
+        raise RuntimeError(
+            "Удалено неожиданное число тестовых news_items: "
+            f"expected={expected}, actual={result}"
+        )
+
+    print()
+    print("Test news cleanup: OK")
+    print(
+        "temporary_news_ids="
+        + ",".join(str(news_id) for news_id in news_ids)
+    )
+    print("temporary_news_items_deleted=true")
+
+
 async def reserve_test_run(
     pool: asyncpg.Pool,
     *,
@@ -184,29 +352,13 @@ async def reserve_test_run(
 
     metadata = build_metadata()
 
-    from datetime import datetime, timezone
-
     reservation = await reserve_ranking_run(
         pool,
         request_key=request_key,
         formula_version=FORMULA_VERSION,
         metadata=metadata,
-        window_started_at=datetime(
-            2026,
-            7,
-            30,
-            11,
-            21,
-            tzinfo=timezone.utc,
-        ),
-        window_finished_at=datetime(
-            2026,
-            7,
-            31,
-            11,
-            21,
-            tzinfo=timezone.utc,
-        ),
+        window_started_at=WINDOW_STARTED_AT,
+        window_finished_at=WINDOW_FINISHED_AT,
         news_ids=TEST_NEWS_IDS,
     )
 
@@ -337,9 +489,9 @@ async def test_successful_completion(
         score.news_id
         for score in result.scores
     ] == [
-        8,
-        9,
-        7,
+        TEST_NEWS_IDS[1],
+        TEST_NEWS_IDS[2],
+        TEST_NEWS_IDS[0],
     ]
 
     assert [
@@ -843,8 +995,23 @@ async def main() -> int:
     )
 
     created_run_ids: set[int] = set()
+    created_news_ids: tuple[int, ...] = ()
 
     try:
+        created_news_ids = await create_test_news_items(
+            pool
+        )
+        configure_test_news_ids(created_news_ids)
+
+        print("Temporary news fixture: OK")
+        print(
+            "temporary_news_ids="
+            + ",".join(
+                str(news_id)
+                for news_id in created_news_ids
+            )
+        )
+
         await test_successful_completion(
             pool,
             created_run_ids=created_run_ids,
@@ -861,12 +1028,18 @@ async def main() -> int:
                 created_run_ids=created_run_ids,
             )
         finally:
-            await close_database_pool(pool)
+            try:
+                await cleanup_test_news_items(
+                    pool,
+                    news_ids=created_news_ids,
+                )
+            finally:
+                await close_database_pool(pool)
 
     print()
     print("OpenAI requests: not performed")
     print(
-        "Database changes: temporary runs "
+        "Database changes: temporary news, runs "
         "and scores inserted and deleted"
     )
     print("Telegram publication: not performed")
