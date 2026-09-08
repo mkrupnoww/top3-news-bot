@@ -1783,8 +1783,15 @@ async def _insert_event_scores(
             )
             VALUES (
                 $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10,
-                $11, $12, $13, $14::jsonb,
+                $6, $7, $8,
+                CASE
+                    WHEN $9::numeric IS NULL
+                    THEN NULL
+                    ELSE top3_news.calculate_individual_score_v3(
+                        $4, $5, $6, $7, $8
+                    )
+                END,
+                $10, $11, $12, $13, $14::jsonb,
                 $15, $16, $17, $18, $19,
                 $20, $21, $22, $23, $24,
                 $25, $26, $27
@@ -1844,7 +1851,7 @@ async def _insert_event_scores(
             .individual_score
         ):
             raise RuntimeError(
-                "Сохранённый individual_score "
+                "PostgreSQL individual_score "
                 "не совпал с Python: "
                 f"news_id={score.news_id}."
             )

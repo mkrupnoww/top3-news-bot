@@ -1030,7 +1030,13 @@ async def complete_reserved_ranking_run(
                             $5,
                             $6,
                             $7,
-                            $8,
+                            CASE
+                                WHEN $8::numeric IS NULL
+                                THEN NULL
+                                ELSE top3_news.calculate_individual_score_v3(
+                                    $3, $4, $5, $6, $7
+                                )
+                            END,
                             true,
                             $9,
                             $10,
@@ -1065,7 +1071,7 @@ async def complete_reserved_ranking_run(
                     != calculated.individual_score
                 ):
                     raise RuntimeError(
-                        "Сохранённый individual_score "
+                        "PostgreSQL individual_score "
                         "не совпал с Python: "
                         f"news_id={item.news_id}, "
                         "python="
