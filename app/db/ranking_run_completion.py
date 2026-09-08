@@ -764,7 +764,7 @@ async def complete_reserved_ranking_run(
     В одной транзакции:
     - проверяет reservation;
     - записывает news_scores;
-    - сверяет Python и PostgreSQL;
+    - проверяет сохранённый individual_score;
     - сохраняет usage и стоимость;
     - переводит запуск в completed.
     """
@@ -1016,6 +1016,7 @@ async def complete_reserved_ranking_run(
                                 r_score,
                                 h_score,
                                 q_score,
+                                individual_score,
                                 is_eligible,
                                 rank_position,
                                 score_explanation,
@@ -1029,10 +1030,11 @@ async def complete_reserved_ranking_run(
                             $5,
                             $6,
                             $7,
-                            true,
                             $8,
+                            true,
                             $9,
-                            $10::jsonb
+                            $10,
+                            $11::jsonb
                         )
                         RETURNING
                             score_id,
@@ -1045,6 +1047,7 @@ async def complete_reserved_ranking_run(
                         components.r_score,
                         components.h_score,
                         components.q_score,
+                        calculated.individual_score,
                         item.rank_position,
                         item.explanation,
                         score_details,
@@ -1062,7 +1065,7 @@ async def complete_reserved_ranking_run(
                     != calculated.individual_score
                 ):
                     raise RuntimeError(
-                        "Расчёт PostgreSQL "
+                        "Сохранённый individual_score "
                         "не совпал с Python: "
                         f"news_id={item.news_id}, "
                         "python="

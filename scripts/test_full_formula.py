@@ -193,7 +193,7 @@ def test_full_news_score_and_eligibility() -> None:
     assert eligible.m_score == Decimal("9.200000")
     assert eligible.resonance.r_score == Decimal("6.300000")
     assert eligible.h_score == Decimal("5.450000")
-    assert eligible.individual.individual_score == Decimal("6.752354")
+    assert eligible.individual.individual_score == Decimal("6.939854")
     assert eligible.is_eligible is True
     assert eligible.exclusion_reason is None
 
@@ -365,9 +365,9 @@ def test_diversity_and_combination_selection() -> None:
     assert selection.winner.is_winner is True
     assert selection.winner.news_ids == (2, 3, 4)
     assert selection.winner.ordered_news_ids == (4, 2, 3)
-    assert selection.winner.mean_individual_score == Decimal("6.457519")
+    assert selection.winner.mean_individual_score == Decimal("6.578596")
     assert selection.winner.diversity_score == Decimal("10.000000")
-    assert selection.winner.final_top_score == Decimal("7.957519")
+    assert selection.winner.final_top_score == Decimal("8.078596")
     assert selection.winner.distinct_macro_topic_count == 3
 
     assert sum(

@@ -15,7 +15,7 @@ ScoreInput: TypeAlias = (
 )
 
 
-FORMULA_VERSION = "individual_score_v2"
+FORMULA_VERSION = "individual_score_v3"
 
 SCORE_QUANTUM = Decimal("0.000001")
 
@@ -26,9 +26,9 @@ QUALITY_SCORE_MIN = Decimal("0")
 QUALITY_SCORE_MAX = Decimal("1")
 
 F_WEIGHT = Decimal("0.20")
-M_WEIGHT = Decimal("0.30")
+M_WEIGHT = Decimal("0.35")
 R_WEIGHT = Decimal("0.20")
-HQ_WEIGHT = Decimal("0.15")
+HQ_WEIGHT = Decimal("0.10")
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,12 +190,13 @@ def calculate_individual_score(
     Рассчитывает индивидуальный рейтинг новости.
 
     B = 0.20F
-        + 0.30M
+        + 0.35M
         + 0.20R
-        + 0.15(H × Q)
+        + 0.10(H × Q)
 
     Итог округляется один раз после вычисления
-    всей формулы, как generated-колонка PostgreSQL.
+    всей формулы до масштаба numeric(20, 6)
+    перед явным сохранением в PostgreSQL.
     """
 
     freshness_component = _quantize_result(

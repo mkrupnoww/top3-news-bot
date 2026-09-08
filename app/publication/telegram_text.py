@@ -11,6 +11,11 @@ PROJECT_ITALIC_PATTERN = re.compile(
     r"__(?=\S)(.+?)(?<=\S)__"
 )
 
+PROJECT_LINK_PATTERN = re.compile(
+    r"\[(?P<label>[^\]\r\n]+)\]"
+    r"\((?P<url>https?://[^\s<>()]+)\)"
+)
+
 PROJECT_SEPARATOR_LINE_PATTERN = re.compile(
     r"^_{3,}$"
 )
@@ -134,8 +139,56 @@ def _convert_markdown_line_to_html(
     из Markdown в безопасный HTML.
     """
 
+    link_html_by_placeholder: dict[str, str] = {}
+
+    def replace_link(
+        match: re.Match[str],
+    ) -> str:
+        link_index = len(
+            link_html_by_placeholder
+        )
+
+        placeholder = (
+            f"\ue000TG_LINK_{link_index}\ue001"
+        )
+
+        while (
+            placeholder in line
+            or placeholder
+            in link_html_by_placeholder
+        ):
+            link_index += 1
+            placeholder = (
+                f"\ue000TG_LINK_{link_index}\ue001"
+            )
+
+        label = escape(
+            match.group("label"),
+            quote=False,
+        )
+
+        url = escape(
+            match.group("url"),
+            quote=True,
+        )
+
+        link_html_by_placeholder[
+            placeholder
+        ] = (
+            f'<a href="{url}">{label}</a>'
+        )
+
+        return placeholder
+
+    line_with_link_placeholders = (
+        PROJECT_LINK_PATTERN.sub(
+            replace_link,
+            line,
+        )
+    )
+
     escaped_line = escape(
-        line,
+        line_with_link_placeholders,
         quote=False,
     )
 
@@ -152,6 +205,16 @@ def _convert_markdown_line_to_html(
             converted_line,
         )
     )
+
+    for placeholder, link_html in (
+        link_html_by_placeholder.items()
+    ):
+        converted_line = (
+            converted_line.replace(
+                placeholder,
+                link_html,
+            )
+        )
 
     if "**" in converted_line:
         raise ValueError(
@@ -174,10 +237,11 @@ def convert_project_markdown_to_html(
     """
     Преобразует внутренний Markdown проекта в HTML.
 
-    Поддерживаются только:
+    Поддерживаются:
 
     **жирный текст**
     __курсив__
+    [текст ссылки](https://example.com)
 
     Строки, состоящие минимум из трёх символов
     подчёркивания, считаются текстовыми

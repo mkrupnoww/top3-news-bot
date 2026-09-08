@@ -48,6 +48,83 @@ def test_markdown_conversion() -> None:
     print("Project Markdown conversion: OK")
 
 
+def test_markdown_link_conversion() -> None:
+    """Преобразует trailer Markdown-link в Telegram HTML."""
+
+    source_text = (
+        "[▶️ Официальный трейлер Musk]"
+        "(https://www.youtube.com/watch?v=oYwso9mF-fA)"
+    )
+
+    expected_text = (
+        '<a href="https://www.youtube.com/watch?v=oYwso9mF-fA">'
+        "▶️ Официальный трейлер Musk</a>"
+    )
+
+    converted_text = (
+        convert_project_markdown_to_html(
+            source_text
+        )
+    )
+
+    assert converted_text == expected_text
+
+    prepared = prepare_telegram_text(
+        source_text,
+        text_format="markdown",
+    )
+
+    assert prepared.text == expected_text
+    assert prepared.text_format == "html"
+    assert prepared.parse_mode == "HTML"
+
+    print("Markdown HTTP link conversion: OK")
+
+
+def test_markdown_link_escaping() -> None:
+    """Экранирует label и URL внутри HTML-ссылки."""
+
+    source_text = (
+        "[Трейлер & тизер]"
+        '(https://example.com/watch?v=1&x="safe")'
+    )
+
+    expected_text = (
+        '<a href="https://example.com/watch?v=1&amp;x=&quot;safe&quot;">'
+        "Трейлер &amp; тизер</a>"
+    )
+
+    converted_text = (
+        convert_project_markdown_to_html(
+            source_text
+        )
+    )
+
+    assert converted_text == expected_text
+
+    print("Markdown HTTP link escaping: OK")
+
+
+def test_non_http_link_not_converted() -> None:
+    """Не превращает произвольную схему в HTML-ссылку."""
+
+    source_text = (
+        "[Небезопасная ссылка]"
+        "(javascript:alert)"
+    )
+
+    converted_text = (
+        convert_project_markdown_to_html(
+            source_text
+        )
+    )
+
+    assert converted_text == source_text
+    assert "<a " not in converted_text
+
+    print("Non-HTTP Markdown link: not converted")
+
+
 def test_plain_text() -> None:
     """Проверяет обычный текст без parse_mode."""
 
@@ -212,6 +289,9 @@ def main() -> int:
     """Запускает изолированный тест."""
 
     test_markdown_conversion()
+    test_markdown_link_conversion()
+    test_markdown_link_escaping()
+    test_non_http_link_not_converted()
     test_plain_text()
     test_existing_html()
     test_markdown_v2()

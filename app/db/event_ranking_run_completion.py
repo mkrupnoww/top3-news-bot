@@ -1761,6 +1761,7 @@ async def _insert_event_scores(
                 r_score,
                 h_score,
                 q_score,
+                individual_score,
                 is_eligible,
                 exclusion_reason,
                 rank_position,
@@ -1783,10 +1784,10 @@ async def _insert_event_scores(
             VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
-                $11, $12, $13::jsonb, $14,
+                $11, $12, $13, $14::jsonb,
                 $15, $16, $17, $18, $19,
                 $20, $21, $22, $23, $24,
-                $25, $26
+                $25, $26, $27
             )
             RETURNING
                 score_id,
@@ -1800,6 +1801,7 @@ async def _insert_event_scores(
             score.resonance.r_score,
             score.h_score,
             score.q_score,
+            score.individual.individual_score,
             score.is_eligible,
             score.exclusion_reason,
             rank_positions[
@@ -1842,7 +1844,7 @@ async def _insert_event_scores(
             .individual_score
         ):
             raise RuntimeError(
-                "Расчёт PostgreSQL "
+                "Сохранённый individual_score "
                 "не совпал с Python: "
                 f"news_id={score.news_id}."
             )

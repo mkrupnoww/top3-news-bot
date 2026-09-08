@@ -51,7 +51,7 @@ def test_quality_modifier() -> None:
 
     assert (
         without_quality.individual_score
-        == Decimal("7.000000")
+        == Decimal("7.500000")
     )
 
     assert (
@@ -87,7 +87,7 @@ def test_regular_score() -> None:
 
     assert (
         result.magnitude_component
-        == Decimal("1.800000")
+        == Decimal("2.100000")
     )
 
     assert (
@@ -97,12 +97,12 @@ def test_regular_score() -> None:
 
     assert (
         result.hook_quality_component
-        == Decimal("0.945000")
+        == Decimal("0.630000")
     )
 
     assert (
         result.individual_score
-        == Decimal("5.345000")
+        == Decimal("5.330000")
     )
 
     print()
@@ -127,6 +127,59 @@ def test_regular_score() -> None:
         f"individual_score="
         f"{result.individual_score}"
     )
+
+
+def test_magnitude_weight_exceeds_hook_weight() -> None:
+    """Фиксирует сниженный приоритет H×Q относительно M."""
+
+    baseline = calculate_individual_score(
+        create_score_components(
+            f_score=5,
+            m_score=5,
+            r_score=5,
+            h_score=5,
+            q_score=1,
+        )
+    )
+
+    magnitude_plus_one = calculate_individual_score(
+        create_score_components(
+            f_score=5,
+            m_score=6,
+            r_score=5,
+            h_score=5,
+            q_score=1,
+        )
+    )
+
+    hook_plus_one = calculate_individual_score(
+        create_score_components(
+            f_score=5,
+            m_score=5,
+            r_score=5,
+            h_score=6,
+            q_score=1,
+        )
+    )
+
+    magnitude_delta = (
+        magnitude_plus_one.individual_score
+        - baseline.individual_score
+    )
+
+    hook_delta = (
+        hook_plus_one.individual_score
+        - baseline.individual_score
+    )
+
+    assert magnitude_delta == Decimal("0.350000")
+    assert hook_delta == Decimal("0.100000")
+    assert magnitude_delta > hook_delta
+
+    print()
+    print("Magnitude vs hook priority: OK")
+    print(f"magnitude_delta={magnitude_delta}")
+    print(f"hook_delta={hook_delta}")
 
 
 def test_single_final_rounding() -> None:
@@ -156,11 +209,11 @@ def test_single_final_rounding() -> None:
     )
 
     assert rounded_component_sum == (
-        Decimal("1.298945")
+        Decimal("1.259660")
     )
 
     assert result.individual_score == (
-        Decimal("1.298946")
+        Decimal("1.259661")
     )
 
     assert (
@@ -236,7 +289,7 @@ def main() -> int:
     """Запускает тесты математической формулы."""
 
     assert FORMULA_VERSION == (
-        "individual_score_v2"
+        "individual_score_v3"
     )
 
     print(
@@ -244,7 +297,7 @@ def main() -> int:
     )
     print(
         "formula="
-        "0.20F + 0.30M + 0.20R + 0.15(H × Q)"
+        "0.20F + 0.35M + 0.20R + 0.10(H × Q)"
     )
     print(
         "scales="
@@ -255,6 +308,7 @@ def main() -> int:
     test_maximum_score()
     test_quality_modifier()
     test_regular_score()
+    test_magnitude_weight_exceeds_hook_weight()
     test_single_final_rounding()
     test_invalid_values()
 

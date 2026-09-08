@@ -12,7 +12,7 @@ from app.db.ranking_scores import (
 )
 
 
-TEST_KEY = "variety_formula_sync_v1"
+TEST_KEY = "variety_formula_sync_v2"
 
 WINDOW_STARTED_AT = datetime(
     2026,
@@ -107,6 +107,27 @@ async def main() -> int:
     )
 
     try:
+        async with database_pool.acquire() as connection:
+            column_state = await connection.fetchrow(
+                """
+                SELECT
+                    is_generated,
+                    is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'top3_news'
+                  AND table_name = 'news_scores'
+                  AND column_name = 'individual_score'
+                """
+            )
+
+        if column_state is None:
+            raise AssertionError(
+                "news_scores.individual_score не найден."
+            )
+
+        assert column_state["is_generated"] == "NEVER"
+        assert column_state["is_nullable"] == "NO"
+
         result = await persist_manual_ranking_test(
             database_pool,
             test_key=TEST_KEY,
@@ -118,6 +139,11 @@ async def main() -> int:
         await close_database_pool(
             database_pool
         )
+
+    print(
+        "individual_score_storage="
+        "versioned_persisted"
+    )
 
     if result.already_persisted:
         print(
@@ -181,13 +207,13 @@ async def main() -> int:
         for score in result.scores
     ):
         print()
-        print("Formula synchronization test: FAILED")
+        print("Score persistence synchronization test: FAILED")
         return 1
 
     print()
     print("OpenAI requests: not performed")
     print("Telegram publication: not performed")
-    print("Formula synchronization test: OK")
+    print("Score persistence synchronization test: OK")
 
     return 0
 

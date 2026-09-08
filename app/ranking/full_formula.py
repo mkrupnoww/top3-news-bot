@@ -15,7 +15,7 @@ from app.ranking.score_formula import (
 ScoreInput: TypeAlias = Decimal | int | float | str
 OptionalScoreInput: TypeAlias = ScoreInput | None
 
-FULL_FORMULA_VERSION = "top3_cinema_v5"
+FULL_FORMULA_VERSION = "top3_cinema_v6"
 LEGACY_TOP3_SELECTION_POLICY_VERSION = (
     "macro_topic_diversity_v1"
 )

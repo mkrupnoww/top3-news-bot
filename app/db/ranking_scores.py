@@ -840,6 +840,7 @@ async def persist_manual_ranking_test(
                         r_score,
                         h_score,
                         q_score,
+                        individual_score,
                         is_eligible,
                         rank_position,
                         score_explanation,
@@ -853,10 +854,11 @@ async def persist_manual_ranking_test(
                         $5,
                         $6,
                         $7,
-                        true,
                         $8,
+                        true,
                         $9,
-                        $10::jsonb
+                        $10,
+                        $11::jsonb
                     )
                     RETURNING
                         score_id,
@@ -869,6 +871,7 @@ async def persist_manual_ranking_test(
                     components.r_score,
                     components.h_score,
                     components.q_score,
+                    calculated.individual_score,
                     item.rank_position,
                     item.explanation,
                     score_details,
@@ -879,8 +882,8 @@ async def persist_manual_ranking_test(
                     != calculated.individual_score
                 ):
                     raise RuntimeError(
-                        "Расчёт PostgreSQL не совпал "
-                        "с расчётом Python: "
+                        "Сохранённый individual_score "
+                        "не совпал с расчётом Python: "
                         f"news_id={item.news_id}, "
                         "python="
                         f"{calculated.individual_score}, "
