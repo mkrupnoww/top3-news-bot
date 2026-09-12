@@ -32,19 +32,19 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v3"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v4"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 HISTORICAL_FALLBACK_PROMPT_VERSION = (
     "movie_news_image_moderation_fallback_v1"
 )
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v5"
+    "movie_news_image_moderation_fallback_v6"
 )
 
-SENSITIVE_FALLBACK_TERMS = (
+EXPECTED_FALLBACK_FACTUAL_TERMS = (
     "X-Men",
     "Marvel",
-    "Frozen",
+    "Frozen 3",
     "Disney",
     "Anna",
     "Kristoff",
@@ -52,6 +52,7 @@ SENSITIVE_FALLBACK_TERMS = (
     "Paramount",
     "Warner Bros",
 )
+
 
 
 class _NeverCalledImageClient:
@@ -113,7 +114,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-moderation-fallback-v5-test:"
+        "daily-workflow-moderation-fallback-v6-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -125,10 +126,12 @@ def _synthetic_request_key(
 
 def _assert_generator_fallback_identity() -> None:
     """
-    Проверяет новую fallback identity и обезличивание prompt.
+    Проверяет новую NORMAL/fallback identity.
 
-    Normal prompt обязан сохранить исходные новости.
-    Fallback v5 обязан передавать только semantic_visual_brief.
+    NORMAL v4 обязан включать safe-poster правило.
+    Fallback v6 обязан сохранять factual title/summary, но использовать
+    stricter title-poster/mini-poster strategy вместо обезличенного
+    semantic_visual_brief.
     """
 
     generator = OpenAIMovieNewsImageGenerator(
@@ -188,12 +191,15 @@ def _assert_generator_fallback_identity() -> None:
         == CURRENT_NORMAL_PROMPT_VERSION
     )
 
-    for term in SENSITIVE_FALLBACK_TERMS:
-        if term not in normal_request.prompt:
-            raise AssertionError(
-                "Normal prompt неожиданно не содержит "
-                f"исходный термин: {term!r}"
-            )
+    if "САМОДЕЛЬНОГО ПОСТЕРА" not in normal_request.prompt:
+        raise AssertionError(
+            "NORMAL v4 не содержит safe custom-poster rule."
+        )
+
+    if "коллаж из двух или нескольких оригинальных мини-постеров" not in normal_request.prompt:
+        raise AssertionError(
+            "NORMAL v4 не содержит multi-film poster collage rule."
+        )
 
     generator.set_moderation_safe_editorial_fallback(
         True
@@ -215,56 +221,45 @@ def _assert_generator_fallback_identity() -> None:
     )
 
     assert (
-        '"mode":"semantic_visual_brief_v5"'
-        in fallback_request.prompt
-    )
-
-    assert (
-        '"semantic_visual_brief":'
-        in fallback_request.prompt
-    )
-
-    assert (
-        '"moderation_safe_editorial_fallback":'
+        '"mode":"safer_title_poster_editorial_v6"'
         in fallback_request.prompt
     )
 
     assert (
         '"title":'
-        not in fallback_request.prompt
+        in fallback_request.prompt
     )
 
     assert (
         '"summary":'
-        not in fallback_request.prompt
+        in fallback_request.prompt
     )
 
-    for term in SENSITIVE_FALLBACK_TERMS:
-        if term in fallback_request.prompt:
+    if '"semantic_visual_brief":' in fallback_request.prompt:
+        raise AssertionError(
+            "Fallback v6 не должен использовать старый semantic_visual_brief."
+        )
+
+    for term in EXPECTED_FALLBACK_FACTUAL_TERMS:
+        if term not in fallback_request.prompt:
             raise AssertionError(
-                "Fallback prompt содержит "
-                "исходный чувствительный термин: "
+                "Fallback v6 потерял factual term: "
                 f"{term!r}"
             )
 
-    if (
-        "Если новость относится к конкретному "
-        "фильму или франшизе"
-        in fallback_request.prompt
-    ):
+    if "Это НЕ режим абстрактных универсальных картинок" not in fallback_request.prompt:
         raise AssertionError(
-            "Fallback v5 не должен включать "
-            "основной permissive IMAGE_PROMPT_INSTRUCTIONS."
+            "Fallback v6 не запрещает бессодержательную абстракцию."
         )
 
     print(
-        "Fallback v5 changes prompt identity: OK"
+        "NORMAL v4 safe custom-poster strategy: OK"
     )
     print(
-        "Fallback v5 removes title/summary from Image API prompt: OK"
+        "Fallback v6 keeps factual title/summary: OK"
     )
     print(
-        "Fallback v5 removes franchise/person/company terms: OK"
+        "Fallback v6 uses safer title-poster strategy: OK"
     )
 
 
@@ -505,7 +500,7 @@ async def _prepare_retry_fixture(
     Production workflow может в реальности быть awaiting_review/approved/
     published и иметь successful historical fallback. Сначала переключаем
     workflow на historical failed normal image, затем временно убираем
-    active/completed initial image rows и attempts текущего fallback-v5.
+    active/completed initial image rows и attempts текущего fallback-v6.
     После rollback исходное production-состояние восстанавливается PostgreSQL.
     """
 

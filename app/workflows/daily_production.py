@@ -1,8 +1,10 @@
 import inspect
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import AsyncIterator, Callable
 
 import asyncpg
@@ -26,9 +28,6 @@ from app.db.daily_workflow import (
     reopen_daily_workflow_for_image_moderation_retry,
     require_daily_workflow_image_moderation_retry,
     reserve_daily_workflow,
-)
-from app.db.daily_workflow_replacement import (
-    replace_daily_workflow_after_image_moderation,
 )
 from app.db.daily_workflow_trailer_replacement import (
     replace_daily_workflow_after_trailer_unverified,
@@ -62,8 +61,19 @@ from app.generation.openai_factory import (
     create_openai_generation_runtime,
 )
 from app.generation.image_generator import (
+    DEFAULT_IMAGE_BACKGROUND,
+    DEFAULT_IMAGE_COUNT,
+    DEFAULT_IMAGE_MODERATION,
+    DEFAULT_IMAGE_OUTPUT_FORMAT,
     OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
     OPENAI_IMAGE_PROMPT_VERSION,
+    OPENAI_IMAGE_VERSATILE_PROMPT_VERSION,
+    ImageGenerationNewsItem,
+    ImageModelRequest,
+    ImageModelResponse,
+    OpenAIImageGenerationResult,
+    OpenAIImageGeneratorMetadata,
+    OpenAIImageUsage,
 )
 from app.generation.openai_image_factory import (
     OpenAIImageGenerationRuntime,
@@ -117,6 +127,122 @@ _DAILY_WORKFLOW_LOCK_BASE = (
 )
 
 MAX_TOP3_REPLACEMENTS = 3
+
+VERSATILE_OPTION_IMAGE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data/images/versatile_option/versatile_option.png"
+)
+
+
+class _StaticPNGImageGenerator:
+    """Локальный генератор, завершающий pipeline готовым PNG-файлом."""
+
+    def __init__(
+        self,
+        *,
+        image_path: str | Path,
+        prompt_version: str,
+        prompt: str,
+        model_name: str = "local_static_png_asset",
+        size: str = "1024x1536",
+        quality: str = "medium",
+    ) -> None:
+        self._image_path = Path(image_path)
+        self._prompt_version = prompt_version
+        self._prompt = prompt.strip()
+        self._model_name = model_name
+        self._size = size
+        self._quality = quality
+
+    @property
+    def metadata(self) -> OpenAIImageGeneratorMetadata:
+        return OpenAIImageGeneratorMetadata(
+            generator_name=(
+                "local_static_png_image_generator"
+            ),
+            generator_version=(
+                "local_static_png_image_generator_v1"
+            ),
+            prompt_version=self._prompt_version,
+            model_name=self._model_name,
+        )
+
+    def build_request(
+        self,
+        *,
+        items: tuple[ImageGenerationNewsItem, ...],
+        editorial_comment: str | None = None,
+        issues: tuple[str, ...] = (),
+    ) -> ImageModelRequest:
+        return ImageModelRequest(
+            model=self._model_name,
+            prompt=self._prompt,
+            size=self._size,
+            quality=self._quality,
+            output_format=DEFAULT_IMAGE_OUTPUT_FORMAT,
+            background=DEFAULT_IMAGE_BACKGROUND,
+            moderation=DEFAULT_IMAGE_MODERATION,
+            n=DEFAULT_IMAGE_COUNT,
+        )
+
+    async def generate(
+        self,
+        *,
+        items: tuple[ImageGenerationNewsItem, ...],
+        editorial_comment: str | None = None,
+        issues: tuple[str, ...] = (),
+    ) -> OpenAIImageGenerationResult:
+        model_request = self.build_request(
+            items=items,
+            editorial_comment=editorial_comment,
+            issues=issues,
+        )
+
+        image_bytes = self._image_path.read_bytes()
+
+        model_response = ImageModelResponse(
+            image_bytes=image_bytes,
+            created=int(time.time()),
+            output_format=DEFAULT_IMAGE_OUTPUT_FORMAT,
+            quality=self._quality,
+            size=self._size,
+            background=DEFAULT_IMAGE_BACKGROUND,
+            usage=OpenAIImageUsage(
+                input_tokens=0,
+                input_text_tokens=0,
+                input_image_tokens=0,
+                output_tokens=0,
+                output_text_tokens=0,
+                output_image_tokens=0,
+                total_tokens=0,
+            ),
+            revised_prompt=self._prompt,
+        )
+
+        return OpenAIImageGenerationResult(
+            model_request=model_request,
+            model_response=model_response,
+        )
+
+
+def _build_versatile_option_prompt() -> str:
+    return (
+        "Используй заранее подготовленную универсальную резервную PNG-иллюстрацию "
+        "для ежедневного TOP-3 киноновостей. Это финальный локальный fallback, "
+        "который применяется только после исчерпания normal image и moderation-safe "
+        "fallback попыток. Не вызывай внешнюю модель. Сохрани файл как итоговую "
+        "картинку выпуска без дополнительных изменений."
+    )
+
+
+def _create_versatile_option_generator() -> _StaticPNGImageGenerator:
+    return _StaticPNGImageGenerator(
+        image_path=VERSATILE_OPTION_IMAGE_PATH,
+        prompt_version=(
+            OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
+        ),
+        prompt=_build_versatile_option_prompt(),
+    )
 
 
 class DailyProductionWorkflowError(RuntimeError):
@@ -996,14 +1122,15 @@ async def run_daily_production_workflow(
     - normal image выполняется один раз;
     - moderation-safe fallback сохраняет собственный
       prompt_version/request key и текущий retry budget;
-    - после исчерпания fallback budget выбирается следующая
-      сохранённая ranking combination с максимальным overlap;
-    - старые batch/post атомарно переводятся в superseded;
-    - новый combination получает новый batch/post/image budget.
+    - после двух definitive moderation-blocked fallback attempts
+      TOP-3 больше не меняется из-за картинки;
+    - workflow использует локальный versatile_option.png как
+      финальный резерв без дополнительного OpenAI Image API call.
 
-    На этом этапе разрешено максимум три replacement TOP-3
-    после исходного winner. Emergency title-poster/local PNG
-    добавляются отдельным следующим слоем.
+    Replacement TOP-3 остаётся только для независимых
+    редакционных причин, например неподтверждённого обязательного
+    официального трейлера. Image moderation сама по себе больше
+    не меняет выбранные новости.
     """
 
     if (
@@ -1799,6 +1926,85 @@ async def run_daily_production_workflow(
 
                     return result_image_id
 
+                async def run_versatile_option_image_once() -> int:
+                    """Завершает image stage локальной универсальной PNG-картинкой."""
+
+                    versatile_path = VERSATILE_OPTION_IMAGE_PATH
+
+                    if not versatile_path.is_file():
+                        raise DailyProductionWorkflowError(
+                            "Не найден файл универсального image fallback: "
+                            f"{versatile_path}"
+                        )
+
+                    local_generator = (
+                        _create_versatile_option_generator()
+                    )
+
+                    _report_progress(
+                        progress,
+                        "[image] moderation exhausted; use local versatile option "
+                        f"path={versatile_path}",
+                    )
+
+                    async def image_observer(
+                        reservation,
+                    ) -> None:
+                        await checkpoint_image_reservation(
+                            pool,
+                            daily_workflow_run_id=(
+                                workflow_id
+                            ),
+                            image_generation_id=(
+                                reservation
+                                .image_generation_id
+                            ),
+                        )
+
+                    image_result = (
+                        await run_reserved_openai_image_generation(
+                            pool,
+                            generator=local_generator,
+                            selection=selection,
+                            batch_id=batch_id,
+                            generated_post_id=(
+                                generated_post_id
+                            ),
+                            request_kind="initial",
+                            cost_estimator=None,
+                            reservation_observer=(
+                                image_observer
+                            ),
+                        )
+                    )
+
+                    result_image_id = _positive_integer(
+                        image_result.image_generation_id,
+                        field_name="image_generation_id",
+                    )
+
+                    result_state = await _load_image_request_state(
+                        pool,
+                        image_generation_id=(
+                            result_image_id
+                        ),
+                        expected_batch_id=(
+                            batch_id
+                        ),
+                        expected_generated_post_id=(
+                            generated_post_id
+                        ),
+                    )
+
+                    if result_state.image_status != "completed":
+                        raise DailyProductionWorkflowError(
+                            "Versatile local image fallback не завершился в completed: "
+                            f"image_generation_id={result_image_id}, "
+                            f"image_status={result_state.image_status}"
+                        )
+
+                    return result_image_id
+
                 moderation_exhausted = False
                 failed_image_generation_id: (
                     int | None
@@ -2085,83 +2291,19 @@ async def run_daily_production_workflow(
                         )
                     )
 
-                    replacement_candidate = (
-                        await _choose_workflow_replacement(
-                            pool,
-                            daily_workflow_run_id=(
-                                workflow_id
-                            ),
-                            ranking_run_id=(
-                                ranking_run_id
-                            ),
-                            active_selection=(
-                                active_selection
-                            ),
-                            current_selection=(
-                                selection
-                            ),
-                        )
-                    )
-
-                    if replacement_candidate is None:
-                        raise DailyProductionWorkflowError(
-                            "Image moderation fallback "
-                            "исчерпан и replacement limit "
-                            "достигнут либо подходящих "
-                            "ranking combinations больше нет: "
-                            f"combination_id="
-                            f"{combination_id}, "
-                            f"selection_attempt="
-                            f"{active_selection.attempt_number}, "
-                            f"max_replacements="
-                            f"{MAX_TOP3_REPLACEMENTS}"
-                        )
-
-                    replacement_result = (
-                        await
-                        replace_daily_workflow_after_image_moderation(
-                            pool,
-                            daily_workflow_run_id=(
-                                workflow_id
-                            ),
-                            current_selection_attempt_id=(
-                                active_selection
-                                .selection_attempt_id
-                            ),
-                            replacement_combination_id=(
-                                replacement_candidate
-                                .combination
-                                .combination_id
-                            ),
-                            failed_image_generation_id=(
-                                failed_image_generation_id
-                            ),
-                        )
-                    )
-
                     _report_progress(
                         progress,
-                        "[selection] moderation exhausted; "
-                        "replace TOP-3 "
-                        f"source_combination_id="
-                        f"{combination_id}; "
-                        f"replacement_combination_id="
-                        f"{replacement_result.replacement_combination_id}; "
-                        f"removed_news_ids="
-                        f"{replacement_candidate.removed_news_ids!r}; "
-                        f"added_news_ids="
-                        f"{replacement_candidate.added_news_ids!r}",
+                        "[image] moderation fallback exhausted; "
+                        "switch to local versatile option "
+                        f"combination_id={combination_id}; "
+                        f"failed_image_generation_id={failed_image_generation_id}",
                     )
 
-                    # Atomic replacement уже:
-                    # - superseded старые batch/post;
-                    # - создал новую active selection;
-                    # - очистил workflow batch/post/image;
-                    # - вернул workflow в running/generation.
-                    #
-                    # Следующая итерация заново строит text request key
-                    # и получает новый image budget для нового batch/post.
-                    continue
+                    image_generation_id = (
+                        await run_versatile_option_image_once()
+                    )
+
+                    moderation_exhausted = False
 
                 image_generation_id = (
                     _positive_integer(

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from tempfile import TemporaryDirectory
 
 import asyncpg
 
@@ -11,9 +12,6 @@ from app.db.daily_workflow import (
 from app.db.daily_workflow_checkpoints import (
     checkpoint_image_reservation,
 )
-from app.db.daily_workflow_replacement import (
-    replace_daily_workflow_after_image_moderation,
-)
 from app.db.daily_workflow_selection_attempts import (
     load_active_daily_workflow_selection,
 )
@@ -24,10 +22,14 @@ from app.db.pool import (
 from app.generation.image_generator import (
     OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
     OPENAI_IMAGE_PROMPT_VERSION,
+    OPENAI_IMAGE_VERSATILE_PROMPT_VERSION,
+)
+from app.generation.openai_image_pipeline import (
+    run_reserved_openai_image_generation,
 )
 from app.workflows.daily_production import (
-    MAX_TOP3_REPLACEMENTS,
-    _choose_workflow_replacement,
+    VERSATILE_OPTION_IMAGE_PATH,
+    _create_versatile_option_generator,
     _fallback_budget_is_exhausted,
     _resolve_active_selection,
 )
@@ -38,11 +40,10 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v3"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v4"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 
 WINNER_COMBINATION_ID = 1844
-FIRST_REPLACEMENT_ID = 1845
 
 WINNER_NEWS_IDS = (
     1029,
@@ -98,7 +99,7 @@ def _synthetic_request_key(
     """Создаёт уникальный request key synthetic fallback."""
 
     payload = (
-        "daily-production-replacement-budget-test:"
+        "daily-production-versatile-budget-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}:"
         f"{OPENAI_IMAGE_FALLBACK_PROMPT_VERSION}"
@@ -320,7 +321,7 @@ async def _prepare_fixture(
 ) -> None:
     """
     В rollback-транзакции восстанавливает состояние:
-    normal image -> moderation_blocked, current fallback-v5 budget ещё свежий.
+    normal image -> moderation_blocked, current fallback-v6 budget ещё свежий.
     """
 
     await connection.execute(
@@ -389,7 +390,7 @@ async def _prepare_fixture(
     # Production fixture уже мог иметь successful historical fallback
     # (сейчас это fallback-v2). Он корректно блокирует новый retry.
     # Для synthetic branch-test временно удаляем любой active/completed
-    # initial image request, а также attempts текущего fallback-v5,
+    # initial image request, а также attempts текущего fallback-v6,
     # чтобы его version-aware budget начинался с нуля.
     # Всё изменение находится во внешней rollback transaction.
     await connection.execute(
@@ -520,20 +521,15 @@ async def _mark_synthetic_moderation_failed(
 
 async def main() -> int:
     """
-    Доказывает критическую production-развилку:
+    Доказывает новую критическую production-развилку:
 
     normal block
     -> fallback #1 block
     -> fallback #2 block
     -> budget exhausted
-    -> replacement 1845
+    -> local versatile_option.png
+    -> исходный TOP-3/batch/post сохраняются.
     """
-
-    if MAX_TOP3_REPLACEMENTS != 3:
-        raise AssertionError(
-            "Неожиданный MAX_TOP3_REPLACEMENTS: "
-            f"{MAX_TOP3_REPLACEMENTS}"
-        )
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
@@ -542,6 +538,25 @@ async def main() -> int:
         raise AssertionError(
             "Неожиданная current normal prompt_version: "
             f"{OPENAI_IMAGE_PROMPT_VERSION}"
+        )
+
+    if not VERSATILE_OPTION_IMAGE_PATH.is_file():
+        raise AssertionError(
+            "Universal image asset не найден: "
+            f"{VERSATILE_OPTION_IMAGE_PATH}"
+        )
+
+    versatile_generator = (
+        _create_versatile_option_generator()
+    )
+
+    if (
+        versatile_generator.metadata.prompt_version
+        != OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
+    ):
+        raise AssertionError(
+            "Unexpected versatile prompt_version: "
+            f"{versatile_generator.metadata.prompt_version}"
         )
 
     settings = get_settings()
@@ -765,71 +780,66 @@ async def main() -> int:
                     "Third fallback attempt blocked: OK"
                 )
 
-                replacement_candidate = (
-                    await _choose_workflow_replacement(
+                async def image_observer(
+                    reservation,
+                ) -> None:
+                    await checkpoint_image_reservation(
                         pool,
                         daily_workflow_run_id=(
                             WORKFLOW_ID
                         ),
-                        ranking_run_id=(
-                            RANKING_RUN_ID
-                        ),
-                        active_selection=(
-                            active_selection
-                        ),
-                        current_selection=(
-                            selection
+                        image_generation_id=(
+                            reservation
+                            .image_generation_id
                         ),
                     )
-                )
 
-                if replacement_candidate is None:
-                    raise AssertionError(
-                        "Replacement candidate "
-                        "не найден после budget exhaustion."
+                with TemporaryDirectory(
+                    prefix="top3-versatile-test-"
+                ) as output_dir:
+                    versatile_result = (
+                        await run_reserved_openai_image_generation(
+                            pool,
+                            generator=(
+                                versatile_generator
+                            ),
+                            selection=selection,
+                            batch_id=BATCH_ID,
+                            generated_post_id=(
+                                GENERATED_POST_ID
+                            ),
+                            request_kind="initial",
+                            output_dir=output_dir,
+                            cost_estimator=None,
+                            reservation_observer=(
+                                image_observer
+                            ),
+                        )
                     )
 
-                assert (
-                    replacement_candidate
-                    .combination
-                    .combination_id
-                    == FIRST_REPLACEMENT_ID
-                )
-                assert (
-                    replacement_candidate.overlap_count
-                    == 2
-                )
-
-                print(
-                    "Replacement candidate 1845 selected: OK"
-                )
-
-                replacement_result = (
-                    await
-                    replace_daily_workflow_after_image_moderation(
-                        pool,
-                        daily_workflow_run_id=(
-                            WORKFLOW_ID
-                        ),
-                        current_selection_attempt_id=(
-                            active_selection
-                            .selection_attempt_id
-                        ),
-                        replacement_combination_id=(
-                            FIRST_REPLACEMENT_ID
-                        ),
-                        failed_image_generation_id=(
-                            second_fallback_id
-                        ),
+                    assert versatile_result.completed is True
+                    assert versatile_result.artifact is not None
+                    assert (
+                        versatile_result
+                        .reservation
+                        .prompt_version
+                        == OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
                     )
-                )
 
-                assert replacement_result.created_new is True
-                assert (
-                    replacement_result
-                    .replacement_combination_id
-                    == FIRST_REPLACEMENT_ID
-                )
+                    stored_path = (
+                        versatile_result
+                        .artifact
+                        .image_path
+                    )
+
+                    if not stored_path:
+                        raise AssertionError(
+                            "Versatile artifact path пуст."
+                        )
+
+                    print(
+                        "Versatile local PNG completed: OK"
+                    )
 
                 active_after = (
                     await
@@ -843,15 +853,14 @@ async def main() -> int:
 
                 if active_after is None:
                     raise AssertionError(
-                        "Active replacement selection "
-                        "не найдена."
+                        "Active original selection не найдена."
                     )
 
                 assert (
                     active_after.combination_id
-                    == FIRST_REPLACEMENT_ID
+                    == WINNER_COMBINATION_ID
                 )
-                assert active_after.attempt_number == 2
+                assert active_after.attempt_number == 1
 
                 state = await connection.fetchrow(
                     """
@@ -862,63 +871,67 @@ async def main() -> int:
                         dw.generated_post_id,
                         dw.image_generation_id,
                         b.batch_status,
-                        gp.post_status
+                        gp.post_status,
+                        gp.image_path,
+                        gp.image_model_name,
+                        gp.image_prompt_version,
+                        igr.image_status,
+                        igr.model_name,
+                        igr.prompt_version
                     FROM
                         top3_news.daily_workflow_runs AS dw
                     JOIN
                         top3_news.publication_batches AS b
-                      ON b.batch_id = $2
+                      ON b.batch_id = dw.batch_id
                     JOIN top3_news.generated_posts AS gp
-                      ON gp.generated_post_id = $3
+                      ON gp.generated_post_id = dw.generated_post_id
+                    JOIN top3_news.image_generation_requests AS igr
+                      ON igr.image_generation_id = dw.image_generation_id
                     WHERE dw.daily_workflow_run_id = $1
                     """,
                     WORKFLOW_ID,
-                    BATCH_ID,
-                    GENERATED_POST_ID,
                 )
 
                 if state is None:
                     raise AssertionError(
-                        "Post-replacement state "
-                        "не найден."
+                        "Post-versatile state не найден."
                     )
 
+                assert state["workflow_status"] == "running"
+                assert state["current_stage"] == "image"
+                assert int(state["batch_id"]) == BATCH_ID
                 assert (
-                    state["workflow_status"]
-                    == "running"
+                    int(state["generated_post_id"])
+                    == GENERATED_POST_ID
+                )
+                assert state["batch_status"] == "awaiting_review"
+                assert state["post_status"] == "awaiting_review"
+                assert state["image_status"] == "completed"
+                assert (
+                    state["model_name"]
+                    == "local_static_png_asset"
                 )
                 assert (
-                    state["current_stage"]
-                    == "generation"
-                )
-                assert state["batch_id"] is None
-                assert (
-                    state["generated_post_id"]
-                    is None
+                    state["prompt_version"]
+                    == OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
                 )
                 assert (
-                    state["image_generation_id"]
-                    is None
+                    state["image_model_name"]
+                    == "local_static_png_asset"
                 )
                 assert (
-                    state["batch_status"]
-                    == "superseded"
-                )
-                assert (
-                    state["post_status"]
-                    == "superseded"
+                    state["image_prompt_version"]
+                    == OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
                 )
 
                 print(
-                    "Atomic replacement after "
-                    "retry exhaustion: OK"
+                    "Original TOP-3 preserved: OK"
                 )
                 print(
-                    "workflow_stage=generation"
+                    "Original batch/post preserved: OK"
                 )
                 print(
-                    "active_combination_id="
-                    f"{FIRST_REPLACEMENT_ID}"
+                    "No image-driven replacement: OK"
                 )
 
             finally:
@@ -947,8 +960,7 @@ async def main() -> int:
             "Telegram requests=not_performed"
         )
         print(
-            "Daily production moderation budget "
-            "to replacement test: OK"
+            "Daily production moderation to versatile option test: OK"
         )
 
         return 0
