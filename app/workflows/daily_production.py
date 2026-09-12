@@ -73,7 +73,6 @@ from app.generation.image_generator import (
     ImageModelResponse,
     OpenAIImageGenerationResult,
     OpenAIImageGeneratorMetadata,
-    OpenAIImageUsage,
 )
 from app.generation.openai_image_factory import (
     OpenAIImageGenerationRuntime,
@@ -207,15 +206,7 @@ class _StaticPNGImageGenerator:
             quality=self._quality,
             size=self._size,
             background=DEFAULT_IMAGE_BACKGROUND,
-            usage=OpenAIImageUsage(
-                input_tokens=0,
-                input_text_tokens=0,
-                input_image_tokens=0,
-                output_tokens=0,
-                output_text_tokens=0,
-                output_image_tokens=0,
-                total_tokens=0,
-            ),
+            usage=None,
             revised_prompt=self._prompt,
         )
 

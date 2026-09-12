@@ -819,6 +819,14 @@ async def main() -> int:
 
                     assert versatile_result.completed is True
                     assert versatile_result.artifact is not None
+                    assert versatile_result.generation is not None
+                    assert (
+                        versatile_result
+                        .generation
+                        .model_response
+                        .usage
+                        is None
+                    )
                     assert (
                         versatile_result
                         .reservation

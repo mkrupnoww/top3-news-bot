@@ -621,7 +621,7 @@ async def _insert_synthetic_fallback_reservation(
     attempt_number: int,
 ) -> int:
     """
-    Создаёт synthetic fallback-v5 reservation.
+    Создаёт synthetic fallback-v6 reservation.
 
     Все изменения выполняются внутри внешней rollback transaction.
     """
@@ -686,7 +686,7 @@ async def _insert_synthetic_fallback_reservation(
     if image_generation_id is None:
         raise RuntimeError(
             "Не удалось создать synthetic "
-            "fallback-v5 reservation."
+            "fallback-v6 reservation."
         )
 
     return int(
@@ -722,12 +722,12 @@ async def _mark_synthetic_moderation_failed(
     if result != "UPDATE 1":
         raise RuntimeError(
             "Не удалось перевести synthetic "
-            "fallback-v5 reservation в failed."
+            "fallback-v6 reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет fallback-v5 prompt и retry budget без OpenAI/Telegram."""
+    """Проверяет fallback-v6 prompt и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
@@ -801,7 +801,7 @@ async def main() -> int:
                     "Synthetic failed/image fixture prepared: OK"
                 )
                 print(
-                    "Fallback v5 prompt version "
+                    "Fallback v6 prompt version "
                     "has fresh budget: OK"
                 )
 
@@ -827,7 +827,7 @@ async def main() -> int:
 
                 print(
                     "Synthetic failed workflow "
-                    "reopens for fallback v5: OK"
+                    "reopens for fallback v6: OK"
                 )
 
                 first_fallback_id = (
@@ -881,7 +881,7 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second fallback-v5 attempt allowed: OK"
+                    "Second fallback-v6 attempt allowed: OK"
                 )
 
                 second_fallback_id = (
@@ -935,11 +935,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third fallback-v5 attempt blocked: OK"
+                        "Third fallback-v6 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух fallback-v5 failures "
+                        "После двух fallback-v6 failures "
                         "третья попытка не была заблокирована."
                     )
 
@@ -969,7 +969,7 @@ async def main() -> int:
             "Telegram requests=not_performed"
         )
         print(
-            "Moderation-safe image fallback v5 test: OK"
+            "Moderation-safe image fallback v6 test: OK"
         )
 
         return 0
