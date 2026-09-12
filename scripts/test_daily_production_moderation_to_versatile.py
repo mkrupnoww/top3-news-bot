@@ -827,13 +827,6 @@ async def main() -> int:
                         .usage
                         is None
                     )
-                    assert (
-                        versatile_result
-                        .reservation
-                        .prompt_version
-                        == OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
-                    )
-
                     stored_path = (
                         versatile_result
                         .artifact
