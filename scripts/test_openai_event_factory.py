@@ -99,6 +99,7 @@ def build_settings(
         OPENAI_RANKING_MODEL=(
             "test-model-no-network"
         ),
+        OPENAI_RANKING_TIMEOUT_SECONDS=17.5,
         OPENAI_TIMEOUT_SECONDS=12.5,
         OPENAI_MAX_RETRIES=1,
     )
@@ -128,7 +129,15 @@ def test_factory_arguments() -> None:
         "sk-local-event-factory-test"
     )
 
-    assert call["timeout"] == 12.5
+    assert (
+        settings.openai_timeout_seconds
+        == 12.5
+    )
+    assert (
+        settings.openai_ranking_timeout_seconds
+        == 17.5
+    )
+    assert call["timeout"] == 17.5
     assert call["max_retries"] == 1
 
     assert runtime.sdk_client is (
@@ -172,7 +181,7 @@ def test_factory_arguments() -> None:
         f"{len(factory.calls)}"
     )
     print(
-        f"timeout_seconds="
+        f"ranking_timeout_seconds="
         f"{call['timeout']}"
     )
     print(

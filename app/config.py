@@ -140,6 +140,15 @@ class Settings(BaseSettings):
         ),
     )
 
+    openai_ranking_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        le=1800,
+        validation_alias=(
+            "OPENAI_RANKING_TIMEOUT_SECONDS"
+        ),
+    )
+
     openai_timeout_seconds: float = Field(
         default=60.0,
         gt=0,

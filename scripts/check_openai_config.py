@@ -58,6 +58,10 @@ def main(
         f"{settings.openai_ranking_model}"
     )
     print(
+        f"ranking_timeout_seconds="
+        f"{settings.openai_ranking_timeout_seconds}"
+    )
+    print(
         f"timeout_seconds="
         f"{settings.openai_timeout_seconds}"
     )

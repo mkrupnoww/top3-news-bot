@@ -11,7 +11,7 @@ from app.ranking.openai_event_evaluator import (
 )
 from app.ranking.openai_factory import (
     AsyncOpenAIClientFactory,
-    create_openai_sdk_client,
+    require_openai_api_key,
 )
 from app.ranking.openai_client import (
     AsyncOpenAIClientProtocol,
@@ -45,9 +45,17 @@ def create_openai_event_ranking_runtime(
     запросов к OpenAI API.
     """
 
-    sdk_client = create_openai_sdk_client(
-        settings,
-        client_factory=client_factory,
+    sdk_client = client_factory(
+        api_key=require_openai_api_key(
+            settings
+        ),
+        timeout=(
+            settings
+            .openai_ranking_timeout_seconds
+        ),
+        max_retries=(
+            settings.openai_max_retries
+        ),
     )
 
     responses_client = (
