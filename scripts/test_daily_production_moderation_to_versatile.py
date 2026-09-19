@@ -40,7 +40,7 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v4"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v5"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 
 WINNER_COMBINATION_ID = 1844
@@ -321,7 +321,7 @@ async def _prepare_fixture(
 ) -> None:
     """
     В rollback-транзакции восстанавливает состояние:
-    normal image -> moderation_blocked, current fallback-v6 budget ещё свежий.
+    normal image -> moderation_blocked, current fallback-v7 budget ещё свежий.
     """
 
     await connection.execute(
@@ -390,7 +390,7 @@ async def _prepare_fixture(
     # Production fixture уже мог иметь successful historical fallback
     # (сейчас это fallback-v2). Он корректно блокирует новый retry.
     # Для synthetic branch-test временно удаляем любой active/completed
-    # initial image request, а также attempts текущего fallback-v6,
+    # initial image request, а также attempts текущего fallback-v7,
     # чтобы его version-aware budget начинался с нуля.
     # Всё изменение находится во внешней rollback transaction.
     await connection.execute(

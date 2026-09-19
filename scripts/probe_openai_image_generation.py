@@ -20,7 +20,7 @@ from app.generation.openai_image_factory import (
 PROBE_IMAGE_GENERATION_ID = 1
 
 EXPECTED_MODEL = "gpt-image-2"
-EXPECTED_SIZE = "1024x1536"
+EXPECTED_SIZE = "1024x1024"
 EXPECTED_QUALITY = "medium"
 EXPECTED_OUTPUT_FORMAT = "png"
 EXPECTED_BACKGROUND = "opaque"

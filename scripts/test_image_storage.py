@@ -11,8 +11,8 @@ from app.generation.image_storage import (
 
 
 TEST_WIDTH = 64
-TEST_HEIGHT = 96
-TEST_SIZE = "64x96"
+TEST_HEIGHT = 64
+TEST_SIZE = "64x64"
 
 
 def build_png_bytes(
@@ -335,7 +335,7 @@ def test_wrong_dimensions_blocked(
 def test_invalid_expected_size_blocked(
     output_dir: Path,
 ) -> None:
-    """Проверяет общий проектный валидатор 2:3."""
+    """Проверяет общий проектный валидатор 1:1."""
 
     before = set(
         output_dir.iterdir()
@@ -345,17 +345,17 @@ def test_invalid_expected_size_blocked(
         store_png_image(
             build_png_bytes(),
             image_generation_id=105,
-            expected_size="64x95",
+            expected_size="64x63",
             output_dir=output_dir,
         )
     except ValueError as error:
-        if "соотношение сторон 2:3" not in str(
+        if "соотношение сторон 1:1" not in str(
             error
         ):
             raise
     else:
         raise AssertionError(
-            "Размер не 2:3 не был заблокирован."
+            "Неквадратный размер не был заблокирован."
         )
 
     after = set(
@@ -366,7 +366,7 @@ def test_invalid_expected_size_blocked(
 
     print()
     print("Invalid expected size blocking: OK")
-    print("non_2_to_3_size_blocked=true")
+    print("non_square_size_blocked=true")
     print("artifact_created=false")
 
 

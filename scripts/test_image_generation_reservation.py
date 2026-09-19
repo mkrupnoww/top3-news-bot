@@ -46,7 +46,7 @@ TEST_IMAGE_MODEL_NAME = (
     "synthetic-image-model"
 )
 
-TEST_IMAGE_SIZE = "1024x1536"
+TEST_IMAGE_SIZE = "1024x1024"
 
 TEST_TEXT_MODEL_NAME = (
     "synthetic-text-model"

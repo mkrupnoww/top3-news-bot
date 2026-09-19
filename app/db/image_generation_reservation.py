@@ -274,7 +274,7 @@ def _normalize_metadata(
 def _normalize_image_size(
     value: str,
 ) -> str:
-    """Проверяет размер и проектное соотношение 2:3."""
+    """Проверяет размер и проектное соотношение 1:1."""
 
     normalized_value = _normalize_required_text(
         value,
@@ -294,10 +294,10 @@ def _normalize_image_size(
     width = int(match.group("width"))
     height = int(match.group("height"))
 
-    if width * 3 != height * 2:
+    if width != height:
         raise ValueError(
             "Для итоговой иллюстрации требуется "
-            "соотношение сторон 2:3."
+            "соотношение сторон 1:1."
         )
 
     return normalized_value

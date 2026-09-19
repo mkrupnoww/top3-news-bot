@@ -143,7 +143,7 @@ class _StaticPNGImageGenerator:
         prompt_version: str,
         prompt: str,
         model_name: str = "local_static_png_asset",
-        size: str = "1024x1536",
+        size: str = "1024x1024",
         quality: str = "medium",
     ) -> None:
         self._image_path = Path(image_path)

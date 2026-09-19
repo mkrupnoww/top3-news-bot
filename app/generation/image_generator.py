@@ -5,19 +5,19 @@ from typing import Literal, Protocol, runtime_checkable
 
 
 OPENAI_IMAGE_GENERATOR_VERSION = (
-    "openai_movie_news_image_generator_v3"
+    "openai_movie_news_image_generator_v4"
 )
 
 OPENAI_IMAGE_PROMPT_VERSION = (
-    "movie_news_image_v4"
+    "movie_news_image_v5"
 )
 
 OPENAI_IMAGE_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v6"
+    "movie_news_image_moderation_fallback_v7"
 )
 
 OPENAI_IMAGE_VERSATILE_PROMPT_VERSION = (
-    "movie_news_image_versatile_option_v1"
+    "movie_news_image_versatile_option_v2"
 )
 
 DEFAULT_IMAGE_QUALITY = "medium"
@@ -236,7 +236,7 @@ class ImageGenerationClient(
 
 
 IMAGE_PROMPT_INSTRUCTIONS = """
-Создай одну цельную вертикальную редакционную иллюстрацию для публикации
+Создай одну цельную квадратную редакционную иллюстрацию для публикации
 ежедневного TOP-3 киноновостей в Telegram.
 
 Это должна быть качественная современная кинематографичная редакционная
@@ -353,6 +353,12 @@ film-centric news внутри соответствующей зоны разр�
 
 Если новость касается смерти человека, используй уважительную,
 сдержанную редакционную подачу.
+
+Если новость касается смерти человека, НЕ добавляй на изображение
+годы жизни, даты рождения или смерти, диапазоны дат вида
+«1945–2026» и другие мемориальные даты, даже если такие данные
+присутствуют в заголовке или описании новости.
+Не пытайся вычислять, исправлять или воспроизводить такие даты.
 
 Можно использовать:
 
@@ -610,7 +616,7 @@ NORMAL IMAGE режиме, потому что он лучше передаёт 
 """.strip()
 
 MODERATION_SAFE_EDITORIAL_FALLBACK_INSTRUCTIONS = """
-Создай одну цельную вертикальную редакционную иллюстрацию
+Создай одну цельную квадратную редакционную иллюстрацию
 для трёх киноновостей.
 
 Этот специальный режим используется только после того,
@@ -666,6 +672,12 @@ MODERATION_SAFE_EDITORIAL_FALLBACK_INSTRUCTIONS = """
 ============================================================
 3. ЛЮДИ И ЧУВСТВИТЕЛЬНЫЕ НОВОСТИ
 ============================================================
+
+Если новость касается смерти человека, НЕ добавляй на изображение
+годы жизни, даты рождения или смерти, диапазоны дат вида
+«1945–2026» и другие мемориальные даты, даже если они есть
+в исходных данных новости.
+Не пытайся вычислять, исправлять или воспроизводить такие даты.
 
 Если новость person-centric, показывай человека нейтрально и уважительно:
 
@@ -755,7 +767,7 @@ def _normalize_positive_integer(
 def _normalize_image_size(
     value: str,
 ) -> str:
-    """Проверяет размер и проектное соотношение 2:3."""
+    """Проверяет размер и проектное соотношение 1:1."""
 
     normalized_value = _normalize_required_text(
         value,
@@ -774,10 +786,10 @@ def _normalize_image_size(
     width = int(match.group("width"))
     height = int(match.group("height"))
 
-    if width * 3 != height * 2:
+    if width != height:
         raise ValueError(
             "Для итоговой иллюстрации требуется "
-            "соотношение сторон 2:3."
+            "соотношение сторон 1:1."
         )
 
     return normalized_value

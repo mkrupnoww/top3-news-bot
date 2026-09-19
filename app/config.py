@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     )
 
     openai_image_size: str = Field(
-        default="1024x1536",
+        default="1024x1024",
         min_length=3,
         max_length=32,
         pattern=(

@@ -32,13 +32,13 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v4"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v5"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 HISTORICAL_FALLBACK_PROMPT_VERSION = (
     "movie_news_image_moderation_fallback_v1"
 )
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v6"
+    "movie_news_image_moderation_fallback_v7"
 )
 
 EXPECTED_FALLBACK_FACTUAL_TERMS = (
@@ -114,7 +114,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-moderation-fallback-v6-test:"
+        "daily-workflow-moderation-fallback-v7-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -128,8 +128,8 @@ def _assert_generator_fallback_identity() -> None:
     """
     Проверяет новую NORMAL/fallback identity.
 
-    NORMAL v4 обязан включать safe-poster правило.
-    Fallback v6 обязан сохранять factual title/summary, но использовать
+    NORMAL v5 обязан включать safe-poster правило.
+    Fallback v7 обязан сохранять factual title/summary, но использовать
     stricter title-poster/mini-poster strategy вместо обезличенного
     semantic_visual_brief.
     """
@@ -137,7 +137,7 @@ def _assert_generator_fallback_identity() -> None:
     generator = OpenAIMovieNewsImageGenerator(
         client=_NeverCalledImageClient(),
         model_name="gpt-image-2",
-        size="1024x1536",
+        size="1024x1024",
         quality="medium",
     )
 
@@ -193,12 +193,12 @@ def _assert_generator_fallback_identity() -> None:
 
     if "САМОДЕЛЬНОГО ПОСТЕРА" not in normal_request.prompt:
         raise AssertionError(
-            "NORMAL v4 не содержит safe custom-poster rule."
+            "NORMAL v5 не содержит safe custom-poster rule."
         )
 
     if "коллаж из двух или нескольких оригинальных мини-постеров" not in normal_request.prompt:
         raise AssertionError(
-            "NORMAL v4 не содержит multi-film poster collage rule."
+            "NORMAL v5 не содержит multi-film poster collage rule."
         )
 
     generator.set_moderation_safe_editorial_fallback(
@@ -237,29 +237,29 @@ def _assert_generator_fallback_identity() -> None:
 
     if '"semantic_visual_brief":' in fallback_request.prompt:
         raise AssertionError(
-            "Fallback v6 не должен использовать старый semantic_visual_brief."
+            "Fallback v7 не должен использовать старый semantic_visual_brief."
         )
 
     for term in EXPECTED_FALLBACK_FACTUAL_TERMS:
         if term not in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v6 потерял factual term: "
+                "Fallback v7 потерял factual term: "
                 f"{term!r}"
             )
 
     if "Это НЕ режим абстрактных универсальных картинок" not in fallback_request.prompt:
         raise AssertionError(
-            "Fallback v6 не запрещает бессодержательную абстракцию."
+            "Fallback v7 не запрещает бессодержательную абстракцию."
         )
 
     print(
-        "NORMAL v4 safe custom-poster strategy: OK"
+        "NORMAL v5 safe custom-poster strategy: OK"
     )
     print(
-        "Fallback v6 keeps factual title/summary: OK"
+        "Fallback v7 keeps factual title/summary: OK"
     )
     print(
-        "Fallback v6 uses safer title-poster strategy: OK"
+        "Fallback v7 uses safer title-poster strategy: OK"
     )
 
 
@@ -500,7 +500,7 @@ async def _prepare_retry_fixture(
     Production workflow может в реальности быть awaiting_review/approved/
     published и иметь successful historical fallback. Сначала переключаем
     workflow на historical failed normal image, затем временно убираем
-    active/completed initial image rows и attempts текущего fallback-v6.
+    active/completed initial image rows и attempts текущего fallback-v7.
     После rollback исходное production-состояние восстанавливается PostgreSQL.
     """
 
@@ -621,7 +621,7 @@ async def _insert_synthetic_fallback_reservation(
     attempt_number: int,
 ) -> int:
     """
-    Создаёт synthetic fallback-v6 reservation.
+    Создаёт synthetic fallback-v7 reservation.
 
     Все изменения выполняются внутри внешней rollback transaction.
     """
@@ -686,7 +686,7 @@ async def _insert_synthetic_fallback_reservation(
     if image_generation_id is None:
         raise RuntimeError(
             "Не удалось создать synthetic "
-            "fallback-v6 reservation."
+            "fallback-v7 reservation."
         )
 
     return int(
@@ -722,12 +722,12 @@ async def _mark_synthetic_moderation_failed(
     if result != "UPDATE 1":
         raise RuntimeError(
             "Не удалось перевести synthetic "
-            "fallback-v6 reservation в failed."
+            "fallback-v7 reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет fallback-v6 prompt и retry budget без OpenAI/Telegram."""
+    """Проверяет fallback-v7 prompt и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
@@ -801,7 +801,7 @@ async def main() -> int:
                     "Synthetic failed/image fixture prepared: OK"
                 )
                 print(
-                    "Fallback v6 prompt version "
+                    "Fallback v7 prompt version "
                     "has fresh budget: OK"
                 )
 
@@ -881,7 +881,7 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second fallback-v6 attempt allowed: OK"
+                    "Second fallback-v7 attempt allowed: OK"
                 )
 
                 second_fallback_id = (
@@ -935,11 +935,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third fallback-v6 attempt blocked: OK"
+                        "Third fallback-v7 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух fallback-v6 failures "
+                        "После двух fallback-v7 failures "
                         "третья попытка не была заблокирована."
                     )
 

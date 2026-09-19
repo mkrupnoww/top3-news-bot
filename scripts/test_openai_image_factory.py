@@ -84,7 +84,7 @@ class FakeImagesResource:
             ],
             output_format="png",
             quality="medium",
-            size="1024x1536",
+            size="1024x1024",
             usage=usage,
         )
 
@@ -165,7 +165,7 @@ def build_settings(
         OPENAI_IMAGE_MODEL=(
             "test-image-model"
         ),
-        OPENAI_IMAGE_SIZE="1024x1536",
+        OPENAI_IMAGE_SIZE="1024x1024",
         OPENAI_TIMEOUT_SECONDS=12.5,
         OPENAI_MAX_RETRIES=1,
     )
@@ -241,7 +241,7 @@ def test_factory_arguments() -> None:
         )
     )
 
-    assert request.size == "1024x1536"
+    assert request.size == "1024x1024"
     assert request.quality == "medium"
     assert request.output_format == "png"
     assert request.background == "opaque"
@@ -281,7 +281,7 @@ async def test_image_adapter_request() -> None:
     request = ImageModelRequest(
         model="test-image-model",
         prompt="Синтетический image prompt.",
-        size="1024x1536",
+        size="1024x1024",
         quality="medium",
         output_format="png",
         background="opaque",
@@ -302,7 +302,7 @@ async def test_image_adapter_request() -> None:
     assert response.created == 1_800_000_000
     assert response.output_format == "png"
     assert response.quality == "medium"
-    assert response.size == "1024x1536"
+    assert response.size == "1024x1024"
     assert response.background == "opaque"
     assert response.revised_prompt is None
 
@@ -334,7 +334,7 @@ async def test_image_adapter_request() -> None:
             "Синтетический image prompt."
         ),
         "n": 1,
-        "size": "1024x1536",
+        "size": "1024x1024",
         "quality": "medium",
         "output_format": "png",
         "background": "opaque",
@@ -369,7 +369,7 @@ async def test_optional_usage() -> None:
         ImageModelRequest(
             model="test-image-model",
             prompt="No usage response.",
-            size="1024x1536",
+            size="1024x1024",
             quality="medium",
             output_format="png",
             background="opaque",

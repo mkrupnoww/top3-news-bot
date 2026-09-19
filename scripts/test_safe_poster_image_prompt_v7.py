@@ -8,9 +8,9 @@ from app.generation.image_generator import (
 )
 
 
-EXPECTED_NORMAL_PROMPT_VERSION = "movie_news_image_v4"
+EXPECTED_NORMAL_PROMPT_VERSION = "movie_news_image_v5"
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v6"
+    "movie_news_image_moderation_fallback_v7"
 )
 
 
@@ -48,7 +48,7 @@ def main() -> int:
     generator = OpenAIMovieNewsImageGenerator(
         client=_NeverCalledImageClient(),
         model_name="gpt-image-2",
-        size="1024x1536",
+        size="1024x1024",
         quality="medium",
     )
 
@@ -92,6 +92,10 @@ def main() -> int:
     )
 
     required_normal_fragments = (
+        "квадратную редакционную иллюстрацию",
+        "НЕ добавляй на изображение",
+        "годы жизни, даты рождения или смерти",
+        "«1945–2026»",
         "САМОДЕЛЬНОГО ПОСТЕРА",
         "коллаж из двух или нескольких оригинальных мини-постеров",
         "не должен быть копией официального постера",
@@ -102,7 +106,7 @@ def main() -> int:
     for fragment in required_normal_fragments:
         if fragment not in normal_request.prompt:
             raise AssertionError(
-                "NORMAL v4 missing fragment: "
+                "NORMAL v5 missing fragment: "
                 f"{fragment!r}"
             )
 
@@ -115,6 +119,10 @@ def main() -> int:
     )
 
     required_fallback_fragments = (
+        "квадратную редакционную иллюстрацию",
+        "НЕ добавляй на изображение",
+        "годы жизни, даты рождения или смерти",
+        "«1945–2026»",
         '"mode":"safer_title_poster_editorial_v6"',
         '"title":"Practical Magic 2 challenges Spider-Man: Brand New Day"',
         '"summary":"The release is compared with Spider-Man: Brand New Day at the box office."',
@@ -126,7 +134,7 @@ def main() -> int:
     for fragment in required_fallback_fragments:
         if fragment not in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v6 missing fragment: "
+                "Fallback v7 missing fragment: "
                 f"{fragment!r}"
             )
 
@@ -138,7 +146,7 @@ def main() -> int:
     for fragment in forbidden_fallback_fragments:
         if fragment in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v6 still contains legacy semantic fallback: "
+                "Fallback v7 still contains legacy semantic fallback: "
                 f"{fragment!r}"
             )
 
@@ -148,16 +156,16 @@ def main() -> int:
         )
 
     print(
-        "NORMAL v4 safe custom-poster strategy: OK"
+        "NORMAL v5 safe custom-poster strategy: OK"
     )
     print(
-        "NORMAL v4 multi-film poster collage strategy: OK"
+        "NORMAL v5 multi-film poster collage strategy: OK"
     )
     print(
-        "Fallback v6 keeps factual title/summary: OK"
+        "Fallback v7 keeps factual title/summary: OK"
     )
     print(
-        "Fallback v6 avoids legacy semantic abstraction: OK"
+        "Fallback v7 avoids legacy semantic abstraction: OK"
     )
     print(
         "OpenAI requests: not performed"
