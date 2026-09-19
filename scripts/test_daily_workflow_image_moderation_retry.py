@@ -827,7 +827,7 @@ async def main() -> int:
 
                 print(
                     "Synthetic failed workflow "
-                    "reopens for fallback v6: OK"
+                    "reopens for fallback v7: OK"
                 )
 
                 first_fallback_id = (
@@ -969,7 +969,7 @@ async def main() -> int:
             "Telegram requests=not_performed"
         )
         print(
-            "Moderation-safe image fallback v6 test: OK"
+            "Moderation-safe image fallback v7 test: OK"
         )
 
         return 0
