@@ -1295,36 +1295,138 @@ async def test_modified_request_blocking() -> None:
     )
 
 
-async def test_event_time_outside_window() -> None:
-    """Блокирует время события вне окна."""
+async def test_event_time_repair_success() -> None:
+    """Исправляет event_time вне окна единственным repair."""
 
-    payload = build_valid_payload()
-    events = payload["events"]
-    assert isinstance(events, list)
-    first_event = events[0]
-    assert isinstance(first_event, dict)
-    first_event["event_time_utc"] = (
+    primary_payload = build_valid_payload()
+    primary_events = primary_payload["events"]
+    assert isinstance(primary_events, list)
+
+    primary_event = primary_events[0]
+    assert isinstance(primary_event, dict)
+    assert primary_event["representative_news_id"] == 103
+    primary_event["event_time_utc"] = (
         "2026-08-01T11:59:59Z"
     )
+
     evaluator, client = build_evaluator(
-        build_response(payload)
+        build_response(
+            primary_payload,
+            with_telemetry=True,
+        ),
+        build_response(
+            build_valid_payload(),
+            with_telemetry=True,
+        ),
     )
 
-    try:
-        await evaluator.evaluate(
-            build_selection()
-        )
-    except ValueError as error:
-        assert "вне окна" in str(error)
-        assert len(client.requests) == 1
-        print()
-        print("Event time window blocking: OK")
-        return
-
-    raise AssertionError(
-        "Время события вне окна "
-        "не было заблокировано."
+    result = await evaluator.evaluate_detailed(
+        build_selection()
     )
+
+    assert len(client.requests) == 2
+
+    repair_payload = json.loads(
+        client.requests[1].input_text
+    )
+    assert repair_payload[
+        "invalid_event_time_news_ids"
+    ] == [103]
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is True
+    assert diagnostics.initial_invalid_event_time_news_ids == (
+        103,
+    )
+    assert diagnostics.event_time_fallback_news_ids == ()
+    assert diagnostics.event_time_fallback_used is False
+    assert diagnostics.degraded is False
+    assert diagnostics.model_call_count == 2
+
+    print()
+    print("Event time repair success: OK")
+
+
+async def test_event_time_source_published_fallback() -> None:
+    """После неудачного repair использует source_published_at."""
+
+    primary_payload = build_valid_payload()
+    primary_events = primary_payload["events"]
+    assert isinstance(primary_events, list)
+
+    primary_event = primary_events[0]
+    assert isinstance(primary_event, dict)
+    assert primary_event["representative_news_id"] == 103
+    primary_event["event_time_utc"] = (
+        "2026-08-01T11:59:59Z"
+    )
+
+    repair_payload = build_valid_payload()
+    repair_events = repair_payload["events"]
+    assert isinstance(repair_events, list)
+
+    repair_event = repair_events[0]
+    assert isinstance(repair_event, dict)
+    assert repair_event["representative_news_id"] == 103
+    repair_event["event_time_utc"] = (
+        "2026-08-01T11:59:59Z"
+    )
+
+    evaluator, client = build_evaluator(
+        build_response(
+            primary_payload,
+            with_telemetry=True,
+        ),
+        build_response(
+            repair_payload,
+            with_telemetry=True,
+        ),
+    )
+
+    selection = build_selection()
+    result = await evaluator.evaluate_detailed(
+        selection
+    )
+
+    assert len(client.requests) == 2
+
+    diagnostics = result.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+    assert diagnostics.initial_invalid_event_time_news_ids == (
+        103,
+    )
+    assert diagnostics.event_time_fallback_news_ids == (
+        103,
+    )
+    assert diagnostics.event_time_fallback_used is True
+    assert diagnostics.event_time_fallback_policy_version == (
+        "event_time_source_published_fallback_v1"
+    )
+    assert diagnostics.degraded is True
+    assert diagnostics.model_call_count == 2
+
+    candidate = next(
+        candidate
+        for candidate in selection.candidates
+        if candidate.news_id == 103
+    )
+    normalized_event = next(
+        event
+        for event in result.events
+        if event.representative_news_id == 103
+    )
+
+    assert normalized_event.event_time_utc == (
+        candidate.source_published_at
+        .astimezone(timezone.utc)
+    )
+
+    print()
+    print("Event time source_published_at fallback: OK")
 
 
 async def test_invalid_json_and_empty_response() -> None:
@@ -1431,7 +1533,8 @@ async def main() -> int:
     await test_model_source_weight_rejected()
     test_missing_configured_source_weight()
     await test_modified_request_blocking()
-    await test_event_time_outside_window()
+    await test_event_time_repair_success()
+    await test_event_time_source_published_fallback()
     await test_invalid_json_and_empty_response()
     test_empty_selection()
     await test_common_interface()

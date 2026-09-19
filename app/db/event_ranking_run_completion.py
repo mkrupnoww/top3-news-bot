@@ -311,11 +311,24 @@ def _build_coverage_payload(
 ) -> dict[str, Any]:
     """Формирует JSON-диагностику полного или degraded run."""
 
-    degraded_reason = (
-        "incomplete_model_coverage_after_repair"
-        if diagnostics.degraded
-        else None
-    )
+    if (
+        diagnostics.missing_news_ids
+        and diagnostics.event_time_fallback_used
+    ):
+        degraded_reason = (
+            "incomplete_model_coverage_and_"
+            "event_time_fallback"
+        )
+    elif diagnostics.missing_news_ids:
+        degraded_reason = (
+            "incomplete_model_coverage_after_repair"
+        )
+    elif diagnostics.event_time_fallback_used:
+        degraded_reason = (
+            "event_time_source_published_fallback"
+        )
+    else:
+        degraded_reason = None
 
     repair_error_type = diagnostics.repair_error_type
     repair_error_message = (
@@ -346,6 +359,27 @@ def _build_coverage_payload(
         "missing_news_ids": list(
             diagnostics.missing_news_ids
         ),
+        "event_time_fallback": {
+            "used": (
+                diagnostics.event_time_fallback_used
+            ),
+            "policy_version": (
+                diagnostics
+                .event_time_fallback_policy_version
+            ),
+            "initial_invalid_event_time_news_ids": list(
+                diagnostics
+                .initial_invalid_event_time_news_ids
+            ),
+            "fallback_news_ids": list(
+                diagnostics
+                .event_time_fallback_news_ids
+            ),
+            "fallback_count": len(
+                diagnostics
+                .event_time_fallback_news_ids
+            ),
+        },
         "repair_attempted": (
             diagnostics.repair_attempted
         ),

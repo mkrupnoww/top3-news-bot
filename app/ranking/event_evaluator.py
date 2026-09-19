@@ -678,6 +678,11 @@ class StoryClusterVerificationChange:
         )
 
 
+EVENT_TIME_FALLBACK_POLICY_VERSION = (
+    "event_time_source_published_fallback_v1"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class EventRankingCoverageDiagnostics:
     """Диагностика coverage, repair и cluster verifier."""
@@ -686,6 +691,9 @@ class EventRankingCoverageDiagnostics:
     processed_news_ids: tuple[int, ...]
     initial_missing_news_ids: tuple[int, ...] = ()
     missing_news_ids: tuple[int, ...] = ()
+    initial_invalid_event_time_news_ids: tuple[int, ...] = ()
+    event_time_fallback_news_ids: tuple[int, ...] = ()
+    event_time_fallback_policy_version: str | None = None
     repair_attempted: bool = False
     repair_succeeded: bool = False
     repair_error_type: str | None = None
@@ -730,10 +738,30 @@ class EventRankingCoverageDiagnostics:
             field_name="missing_news_ids",
             allow_empty=True,
         )
+        initial_invalid_event_time = (
+            _normalize_news_ids(
+                self.initial_invalid_event_time_news_ids,
+                field_name=(
+                    "initial_invalid_event_time_news_ids"
+                ),
+                allow_empty=True,
+            )
+        )
+        event_time_fallback = _normalize_news_ids(
+            self.event_time_fallback_news_ids,
+            field_name="event_time_fallback_news_ids",
+            allow_empty=True,
+        )
 
         expected_set = set(expected)
         processed_set = set(processed)
         missing_set = set(missing)
+        initial_invalid_event_time_set = set(
+            initial_invalid_event_time
+        )
+        event_time_fallback_set = set(
+            event_time_fallback
+        )
 
         if not processed_set.issubset(expected_set):
             raise ValueError(
@@ -748,6 +776,25 @@ class EventRankingCoverageDiagnostics:
         if not missing_set.issubset(expected_set):
             raise ValueError(
                 "missing_news_ids содержит неожиданные news_id."
+            )
+
+        if not (
+            initial_invalid_event_time_set
+            .issubset(expected_set)
+        ):
+            raise ValueError(
+                "initial_invalid_event_time_news_ids "
+                "содержит неожиданные news_id."
+            )
+
+        if not (
+            event_time_fallback_set
+            .issubset(processed_set)
+        ):
+            raise ValueError(
+                "event_time_fallback_news_ids "
+                "должен быть подмножеством "
+                "processed_news_ids."
             )
 
         if processed_set & missing_set:
@@ -798,9 +845,54 @@ class EventRankingCoverageDiagnostics:
                 "Успешный repair не может оставлять missing_news_ids."
             )
 
+        if (
+            self.repair_succeeded
+            and event_time_fallback
+        ):
+            raise ValueError(
+                "Успешный repair не может требовать "
+                "event-time fallback."
+            )
+
         if initial_missing and not self.repair_attempted:
             raise ValueError(
                 "Пропуск в первом ответе требует repair_attempted=true."
+            )
+
+        if (
+            initial_invalid_event_time
+            and not self.repair_attempted
+        ):
+            raise ValueError(
+                "Некорректный event_time в первом "
+                "ответе требует repair_attempted=true."
+            )
+
+        if (
+            event_time_fallback
+            and not self.repair_attempted
+        ):
+            raise ValueError(
+                "event-time fallback требует "
+                "repair_attempted=true."
+            )
+
+        if event_time_fallback:
+            if (
+                self.event_time_fallback_policy_version
+                != EVENT_TIME_FALLBACK_POLICY_VERSION
+            ):
+                raise ValueError(
+                    "Некорректная версия политики "
+                    "event-time fallback."
+                )
+        elif (
+            self.event_time_fallback_policy_version
+            is not None
+        ):
+            raise ValueError(
+                "Версия политики event-time fallback "
+                "допустима только при использовании fallback."
             )
 
         if (
@@ -890,6 +982,7 @@ class EventRankingCoverageDiagnostics:
         for field_name in (
             "repair_error_type",
             "repair_error_message",
+            "event_time_fallback_policy_version",
             "story_cluster_verification_skipped_reason",
             "story_cluster_verification_error_type",
             "story_cluster_verification_error_message",
@@ -909,14 +1002,35 @@ class EventRankingCoverageDiagnostics:
         object.__setattr__(self, "processed_news_ids", processed)
         object.__setattr__(self, "initial_missing_news_ids", initial_missing)
         object.__setattr__(self, "missing_news_ids", missing)
+        object.__setattr__(
+            self,
+            "initial_invalid_event_time_news_ids",
+            initial_invalid_event_time,
+        )
+        object.__setattr__(
+            self,
+            "event_time_fallback_news_ids",
+            event_time_fallback,
+        )
         for field_name, value in normalized_optional_text.items():
             object.__setattr__(self, field_name, value)
 
     @property
-    def degraded(self) -> bool:
-        """Показывает неполное итоговое покрытие."""
+    def event_time_fallback_used(self) -> bool:
+        """Показывает применение локального fallback времени."""
 
-        return bool(self.missing_news_ids)
+        return bool(
+            self.event_time_fallback_news_ids
+        )
+
+    @property
+    def degraded(self) -> bool:
+        """Показывает итоговый degraded ranking."""
+
+        return bool(
+            self.missing_news_ids
+            or self.event_time_fallback_news_ids
+        )
 
     @property
     def story_cluster_verification_degraded(self) -> bool:

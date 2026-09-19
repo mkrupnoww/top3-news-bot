@@ -25,6 +25,7 @@ from app.ranking.full_formula import (
 from app.ranking.event_evaluator import (
     EVENT_EVALUATOR_VERSION,
     EVENT_PROMPT_VERSION,
+    EVENT_TIME_FALLBACK_POLICY_VERSION,
     MACRO_TOPICS,
     SOURCE_RELATIONS,
     STORY_CLUSTER_KEY_MAX_LENGTH,
@@ -308,6 +309,7 @@ class _ValidatedPayload:
     story_cluster_fallback_used: bool
     story_cluster_error_type: str | None = None
     story_cluster_error_message: str | None = None
+    invalid_event_time_news_ids: tuple[int, ...] = ()
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
@@ -626,6 +628,7 @@ def _build_repair_request(
     selection: CandidateSelectionResult,
     expected_news_ids: tuple[int, ...],
     missing_news_ids: tuple[int, ...],
+    invalid_event_time_news_ids: tuple[int, ...],
     original_payload: OpenAIEventRankingPayload,
     story_cluster_error_type: str | None,
     story_cluster_error_message: str | None,
@@ -633,6 +636,9 @@ def _build_repair_request(
     """Формирует единственный запрос исправления payload."""
 
     missing_set = set(missing_news_ids)
+    invalid_event_time_set = set(
+        invalid_event_time_news_ids
+    )
 
     payload = {
         "task": (
@@ -648,6 +654,15 @@ def _build_repair_request(
         "missing_news_ids": list(
             missing_news_ids
         ),
+        "invalid_event_time_news_ids": list(
+            invalid_event_time_news_ids
+        ),
+        "invalid_event_time_candidates": [
+            _candidate_payload(candidate)
+            for candidate in selection.candidates
+            if candidate.news_id
+            in invalid_event_time_set
+        ],
         "story_cluster_validation": {
             "valid": (
                 story_cluster_error_type is None
@@ -693,6 +708,7 @@ def _build_repair_request(
             "every_representative_news_id_exactly_once": True,
             "duplicate_story_cluster_keys_forbidden": True,
             "stable_overarching_story_keys": True,
+            "event_time_must_be_inside_window": True,
         },
     }
 
@@ -1304,12 +1320,12 @@ def _validate_event_coverage(
         )
 
 
-def _validate_event_times(
+def _invalid_event_time_news_ids(
     *,
     selection: CandidateSelectionResult,
     events: tuple[EventAssessment, ...],
-) -> None:
-    """Проверяет попадание времени события в окно."""
+) -> tuple[int, ...]:
+    """Возвращает events со временем вне ranking window."""
 
     window_start = (
         selection.window_start
@@ -1320,26 +1336,15 @@ def _validate_event_times(
         .astimezone(timezone.utc)
     )
 
-    invalid_events = [
-        event
+    return tuple(
+        event.representative_news_id
         for event in events
         if not (
             window_start
             <= event.event_time_utc
             <= window_end
         )
-    ]
-
-    if invalid_events:
-        details = ",".join(
-            str(event.representative_news_id)
-            for event in invalid_events
-        )
-        raise ValueError(
-            "event_time_utc находится вне "
-            "окна для representative_news_id: "
-            f"{details}"
-        )
+    )
 
 
 def _sort_events_by_input_order(
@@ -1424,9 +1429,11 @@ def _validate_payload(
         expected_news_ids=processed_news_ids,
         events=events,
     )
-    _validate_event_times(
-        selection=selection,
-        events=events,
+    invalid_event_time_news_ids = (
+        _invalid_event_time_news_ids(
+            selection=selection,
+            events=events,
+        )
     )
 
     return _ValidatedPayload(
@@ -1449,16 +1456,20 @@ def _validate_payload(
         story_cluster_error_message=(
             story_cluster_error_message
         ),
+        invalid_event_time_news_ids=(
+            invalid_event_time_news_ids
+        ),
     )
 
 
 def _payload_quality(
     payload: _ValidatedPayload,
-) -> tuple[int, int]:
-    """Сравнивает ответы: coverage важнее cluster-registry."""
+) -> tuple[int, int, int]:
+    """Сравнивает coverage, event time и cluster-registry."""
 
     return (
         len(payload.missing_news_ids),
+        len(payload.invalid_event_time_news_ids),
         0 if payload.story_cluster_valid else 1,
     )
 
@@ -1725,9 +1736,13 @@ class OpenAIEventRankingEvaluator:
         repair_error_type: str | None = None
         repair_error_message: str | None = None
 
-        repair_required = bool(
-            primary.missing_news_ids
-        ) or not primary.story_cluster_valid
+        repair_required = (
+            bool(primary.missing_news_ids)
+            or bool(
+                primary.invalid_event_time_news_ids
+            )
+            or not primary.story_cluster_valid
+        )
 
         if repair_required:
             repair_attempted = True
@@ -1747,6 +1762,9 @@ class OpenAIEventRankingEvaluator:
                 ),
                 missing_news_ids=(
                     primary.missing_news_ids
+                ),
+                invalid_event_time_news_ids=(
+                    primary.invalid_event_time_news_ids
                 ),
                 original_payload=(
                     primary.payload
@@ -1787,6 +1805,10 @@ class OpenAIEventRankingEvaluator:
 
                 if (
                     not repaired.missing_news_ids
+                    and not (
+                        repaired
+                        .invalid_event_time_news_ids
+                    )
                     and repaired.story_cluster_valid
                 ):
                     chosen = repaired
@@ -1812,7 +1834,80 @@ class OpenAIEventRankingEvaluator:
                 chosen.story_cluster_error_message
             )
 
-        final_events = chosen.events
+        event_time_fallback_news_ids = (
+            chosen.invalid_event_time_news_ids
+        )
+
+        if event_time_fallback_news_ids:
+            fallback_news_id_set = set(
+                event_time_fallback_news_ids
+            )
+            candidates_by_news_id = {
+                candidate.news_id: candidate
+                for candidate in selection.candidates
+            }
+
+            normalized_events: list[
+                EventAssessment
+            ] = []
+
+            for event in chosen.events:
+                representative_news_id = (
+                    event.representative_news_id
+                )
+
+                if (
+                    representative_news_id
+                    not in fallback_news_id_set
+                ):
+                    normalized_events.append(event)
+                    continue
+
+                candidate = candidates_by_news_id.get(
+                    representative_news_id
+                )
+
+                if candidate is None:
+                    raise RuntimeError(
+                        "Не найден representative candidate "
+                        "для event-time fallback: "
+                        f"news_id={representative_news_id}"
+                    )
+
+                normalized_events.append(
+                    replace(
+                        event,
+                        event_time_utc=(
+                            candidate
+                            .source_published_at
+                            .astimezone(timezone.utc)
+                        ),
+                    )
+                )
+
+            final_events = tuple(normalized_events)
+
+            remaining_invalid_event_time_news_ids = (
+                _invalid_event_time_news_ids(
+                    selection=selection,
+                    events=final_events,
+                )
+            )
+
+            if remaining_invalid_event_time_news_ids:
+                details = ",".join(
+                    str(news_id)
+                    for news_id
+                    in remaining_invalid_event_time_news_ids
+                )
+                raise RuntimeError(
+                    "event-time fallback не смог "
+                    "нормализовать время для "
+                    "representative_news_id: "
+                    f"{details}"
+                )
+        else:
+            final_events = chosen.events
         clusters_before = _story_clusters_by_key(
             final_events
         )
@@ -1918,6 +2013,17 @@ class OpenAIEventRankingEvaluator:
                 ),
                 missing_news_ids=(
                     chosen.missing_news_ids
+                ),
+                initial_invalid_event_time_news_ids=(
+                    primary.invalid_event_time_news_ids
+                ),
+                event_time_fallback_news_ids=(
+                    event_time_fallback_news_ids
+                ),
+                event_time_fallback_policy_version=(
+                    EVENT_TIME_FALLBACK_POLICY_VERSION
+                    if event_time_fallback_news_ids
+                    else None
                 ),
                 repair_attempted=(
                     repair_attempted
