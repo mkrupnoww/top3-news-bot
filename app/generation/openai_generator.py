@@ -33,7 +33,7 @@ from app.generation.post_contract import (
 )
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v7"
+    "openai_telegram_post_generator_v8"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
@@ -1498,6 +1498,52 @@ def _attach_trailer_metadata_to_payload(
     return payload.model_copy(update={"items": updated_items})
 
 
+class PostTextLengthOverflowError(ValueError):
+    """Канонический post_text превышает проектный лимит."""
+
+    def __init__(
+        self,
+        *,
+        actual_length: int,
+        maximum_length: int,
+    ) -> None:
+        self.actual_length = actual_length
+        self.maximum_length = maximum_length
+
+        super().__init__(
+            "Собранный post_text превышает "
+            f"{maximum_length} символов: "
+            f"actual={actual_length}"
+        )
+
+
+def _canonicalize_generated_payload_post_text(
+    payload: OpenAIGeneratedPostPayload,
+) -> OpenAIGeneratedPostPayload:
+    """
+    Канонизирует post_text, если он помещается в лимит.
+
+    Только length overflow откладывается до integrity
+    recovery. Все остальные ошибки канонической сборки
+    остаются terminal и не маскируются.
+    """
+
+    try:
+        canonical_post_text = (
+            build_top3_post_text(
+                payload.items
+            )
+        )
+    except PostTextLengthOverflowError:
+        return payload
+
+    return payload.model_copy(
+        update={
+            "post_text": canonical_post_text,
+        }
+    )
+
+
 def build_top3_post_text(
     items: list[
         OpenAIGeneratedNewsPayload
@@ -1573,10 +1619,9 @@ def build_top3_post_text(
     )
 
     if len(post_text) > MAXIMUM_POST_LENGTH:
-        raise ValueError(
-            "Собранный post_text превышает "
-            f"{MAXIMUM_POST_LENGTH} символов: "
-            f"actual={len(post_text)}"
+        raise PostTextLengthOverflowError(
+            actual_length=len(post_text),
+            maximum_length=MAXIMUM_POST_LENGTH,
         )
 
     return post_text
@@ -1753,18 +1798,10 @@ class OpenAITelegramPostGenerator:
             items,
         )
 
-        canonical_post_text = (
-            build_top3_post_text(
-                payload.items
+        payload = (
+            _canonicalize_generated_payload_post_text(
+                payload
             )
-        )
-
-        payload = payload.model_copy(
-            update={
-                "post_text": (
-                    canonical_post_text
-                ),
-            }
         )
 
         return OpenAIPostGenerationResult(
@@ -1836,18 +1873,10 @@ class OpenAITelegramPostGenerator:
             items,
         )
 
-        canonical_post_text = (
-            build_top3_post_text(
-                payload.items
+        payload = (
+            _canonicalize_generated_payload_post_text(
+                payload
             )
-        )
-
-        payload = payload.model_copy(
-            update={
-                "post_text": (
-                    canonical_post_text
-                ),
-            }
         )
 
         return OpenAIPostGenerationResult(
@@ -1908,18 +1937,10 @@ class OpenAITelegramPostGenerator:
             items,
         )
 
-        canonical_post_text = (
-            build_top3_post_text(
-                payload.items
+        payload = (
+            _canonicalize_generated_payload_post_text(
+                payload
             )
-        )
-
-        payload = payload.model_copy(
-            update={
-                "post_text": (
-                    canonical_post_text
-                ),
-            }
         )
 
         return OpenAIPostGenerationResult(

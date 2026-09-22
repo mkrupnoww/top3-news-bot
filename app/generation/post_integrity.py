@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 
 from app.generation.openai_generator import (
+    OpenAIGeneratedNewsPayload,
     OpenAIGeneratedPostPayload,
+    PostTextLengthOverflowError,
     build_top3_post_text,
 )
 from app.generation.post_contract import (
@@ -181,6 +183,42 @@ def _last_complete_sentence_prefix(
     return candidate
 
 
+def _shorter_complete_sentence_prefix(
+    body: str,
+) -> str | None:
+    """
+    Возвращает более короткий законченный префикс body.
+
+    Если body уже заканчивается полной фразой, функция
+    ищет предыдущую завершённую фразу и тем самым убирает
+    только последний sentence-tail.
+    """
+
+    normalized = body.strip()
+
+    matches = list(
+        _COMPLETE_SENTENCE_END_PATTERN.finditer(
+            normalized
+        )
+    )
+
+    for match in reversed(matches):
+        candidate = normalized[
+            :match.end()
+        ].rstrip()
+
+        if (
+            candidate
+            and len(candidate) < len(normalized)
+            and body_has_terminal_punctuation(
+                candidate
+            )
+        ):
+            return candidate
+
+    return None
+
+
 def _headline_fallback_body(
     headline: str,
 ) -> str:
@@ -265,6 +303,200 @@ def salvage_body_deterministically(
     return _headline_fallback_body(
         headline
     )
+
+
+def _compact_items_to_post_limit(
+    items: list[OpenAIGeneratedNewsPayload],
+) -> tuple[
+    list[OpenAIGeneratedNewsPayload],
+    str,
+]:
+    """
+    Минимально сокращает body до проектного post limit.
+
+    Приоритет:
+    1. убрать только последний sentence-tail;
+    2. заменить body factual headline-фразой.
+
+    Заголовки, порядок, trailer metadata и служебный
+    шаблон не изменяются.
+    """
+
+    working_items = list(items)
+    seen_states: set[tuple[str, str, str]] = set()
+
+    while True:
+        state = tuple(
+            item.body
+            for item in working_items
+        )
+
+        if state in seen_states:
+            raise ValueError(
+                "Deterministic post compaction "
+                "зациклился."
+            )
+
+        seen_states.add(state)
+
+        try:
+            post_text = build_top3_post_text(
+                working_items
+            )
+        except PostTextLengthOverflowError as error:
+            required_reduction = (
+                error.actual_length
+                - error.maximum_length
+            )
+        else:
+            return working_items, post_text
+
+        candidates: list[
+            tuple[
+                int,
+                int,
+                int,
+                str,
+            ]
+        ] = []
+
+        for index, item in enumerate(
+            working_items
+        ):
+            current_body = item.body.strip()
+
+            candidate_bodies: list[
+                tuple[int, str]
+            ] = []
+
+            shorter_prefix = (
+                _shorter_complete_sentence_prefix(
+                    current_body
+                )
+            )
+
+            if shorter_prefix is not None:
+                candidate_bodies.append(
+                    (0, shorter_prefix)
+                )
+
+            headline_body = (
+                _headline_fallback_body(
+                    item.headline
+                )
+            )
+
+            if all(
+                candidate_body != headline_body
+                for _, candidate_body
+                in candidate_bodies
+            ):
+                candidate_bodies.append(
+                    (1, headline_body)
+                )
+
+            for priority, candidate_body in (
+                candidate_bodies
+            ):
+                reduction = (
+                    len(current_body)
+                    - len(candidate_body)
+                )
+
+                if reduction <= 0:
+                    continue
+
+                trial_items = list(
+                    working_items
+                )
+
+                trial_items[index] = (
+                    item.model_copy(
+                        update={
+                            "body": candidate_body,
+                        }
+                    )
+                )
+
+                try:
+                    build_top3_post_text(
+                        trial_items
+                    )
+                except PostTextLengthOverflowError:
+                    pass
+                except ValueError:
+                    # Не принимаем candidate, если он
+                    # нарушает любой другой контракт.
+                    continue
+
+                candidates.append(
+                    (
+                        priority,
+                        reduction,
+                        index,
+                        candidate_body,
+                    )
+                )
+
+        if not candidates:
+            raise ValueError(
+                "Deterministic post compaction "
+                "не нашёл безопасного сокращения."
+            )
+
+        preferred_priority = min(
+            candidate[0]
+            for candidate in candidates
+        )
+
+        preferred_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[0] == preferred_priority
+        ]
+
+        sufficient = [
+            candidate
+            for candidate in preferred_candidates
+            if candidate[1] >= required_reduction
+        ]
+
+        if sufficient:
+            (
+                _,
+                reduction,
+                index,
+                candidate_body,
+            ) = min(
+                sufficient,
+                key=lambda candidate: (
+                    candidate[1],
+                    candidate[2],
+                ),
+            )
+        else:
+            (
+                _,
+                reduction,
+                index,
+                candidate_body,
+            ) = max(
+                preferred_candidates,
+                key=lambda candidate: (
+                    candidate[1],
+                    -candidate[2],
+                ),
+            )
+
+        del reduction
+
+        working_items[index] = (
+            working_items[index].model_copy(
+                update={
+                    "body": candidate_body,
+                }
+            )
+        )
 
 
 def validate_generated_post_integrity(
@@ -473,6 +705,13 @@ def build_deterministic_integrity_fallback(
                 repaired_items
             )
         )
+    except PostTextLengthOverflowError:
+        (
+            repaired_items,
+            canonical_post_text,
+        ) = _compact_items_to_post_limit(
+            repaired_items
+        )
     except ValueError:
         compact_items = []
 
@@ -493,11 +732,20 @@ def build_deterministic_integrity_fallback(
                 compact_items.append(item)
 
         repaired_items = compact_items
-        canonical_post_text = (
-            build_top3_post_text(
+
+        try:
+            canonical_post_text = (
+                build_top3_post_text(
+                    repaired_items
+                )
+            )
+        except PostTextLengthOverflowError:
+            (
+                repaired_items,
+                canonical_post_text,
+            ) = _compact_items_to_post_limit(
                 repaired_items
             )
-        )
 
     repaired_payload = payload.model_copy(
         update={

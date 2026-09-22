@@ -376,7 +376,7 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v7"
+        "openai_telegram_post_generator_v8"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (

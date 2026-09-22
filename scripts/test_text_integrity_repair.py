@@ -11,11 +11,16 @@ from app.generation.openai_generator import (
     OpenAIGeneratedNewsPayload,
     OpenAIGeneratedPostPayload,
     OpenAIPostGenerationResult,
+    PostTextLengthOverflowError,
+    _canonicalize_generated_payload_post_text,
     build_top3_post_text,
 )
 from app.generation.openai_pipeline import (
     _combine_generation_results,
     _run_integrity_repairs_if_needed,
+)
+from app.generation.post_contract import (
+    MAXIMUM_POST_LENGTH,
 )
 from app.generation.post_integrity import (
     body_has_suspicious_unterminated_tail,
@@ -166,6 +171,245 @@ def _result(
     )
 
 
+def _overflow_payload() -> OpenAIGeneratedPostPayload:
+    """
+    Строит точный regression fixture:
+
+    canonical post после trailer metadata имеет длину
+    MAXIMUM_POST_LENGTH + 1 — тот же класс ошибки,
+    который остановил daily workflow 2026-09-22.
+    """
+
+    base_body = "Т."
+
+    def build_items(
+        body_lengths: tuple[int, int, int],
+    ) -> list[OpenAIGeneratedNewsPayload]:
+        result = []
+
+        for position, body_length in zip(
+            (1, 2, 3),
+            body_lengths,
+            strict=True,
+        ):
+            if body_length < 2 or body_length > 210:
+                raise AssertionError(
+                    "Invalid regression body length: "
+                    f"{body_length}"
+                )
+
+            result.append(
+                OpenAIGeneratedNewsPayload(
+                    position=position,
+                    news_id=200 + position,
+                    headline="З" * 70,
+                    body=(
+                        ("Т" * (body_length - 1))
+                        + "."
+                    ),
+                    official_trailer_url=(
+                        "https://www.youtube.com/"
+                        f"watch?v=testvideo0{position}"
+                    ),
+                    official_trailer_channel_name=(
+                        "Test Studio"
+                    ),
+                )
+            )
+
+        return result
+
+    base_items = build_items(
+        (
+            len(base_body),
+            len(base_body),
+            len(base_body),
+        )
+    )
+
+    base_post_text = build_top3_post_text(
+        base_items
+    )
+
+    required_extra = (
+        MAXIMUM_POST_LENGTH
+        + 1
+        - len(base_post_text)
+    )
+
+    if required_extra <= 0:
+        raise AssertionError(
+            "Base overflow fixture is already too long."
+        )
+
+    body_lengths = [
+        len(base_body),
+        len(base_body),
+        len(base_body),
+    ]
+
+    for index in range(3):
+        capacity = 210 - body_lengths[index]
+        added = min(required_extra, capacity)
+
+        body_lengths[index] += added
+        required_extra -= added
+
+        if required_extra == 0:
+            break
+
+    if required_extra != 0:
+        raise AssertionError(
+            "Cannot construct exact +1 overflow fixture."
+        )
+
+    payload_items = build_items(
+        (
+            body_lengths[0],
+            body_lengths[1],
+            body_lengths[2],
+        )
+    )
+
+    return OpenAIGeneratedPostPayload(
+        post_text="Допустимый модельный черновик.",
+        items=payload_items,
+    )
+
+
+def _priority_overflow_payload() -> tuple[
+    OpenAIGeneratedPostPayload,
+    str,
+]:
+    """
+    Строит +1 overflow для проверки приоритета compaction.
+
+    У первой новости body содержит два завершённых
+    предложения. Удаление последнего предложения сокращает
+    текст сильнее, чем headline fallback. Старая логика,
+    выбирающая минимальное сокращение без учёта типа
+    кандидата, поэтому выбрала бы headline fallback.
+    """
+
+    first_sentence = ("П" * 48) + "."
+    first_body = (
+        first_sentence
+        + " "
+        + ("В" * 159)
+        + "."
+    )
+
+    if len(first_body) != 210:
+        raise AssertionError(
+            "Priority regression body must have "
+            "exactly 210 characters."
+        )
+
+    def build_item(
+        *,
+        position: int,
+        body: str,
+    ) -> OpenAIGeneratedNewsPayload:
+        return OpenAIGeneratedNewsPayload(
+            position=position,
+            news_id=300 + position,
+            headline="З" * 70,
+            body=body,
+            official_trailer_url=(
+                "https://www.youtube.com/"
+                f"watch?v=priority0{position}"
+            ),
+            official_trailer_channel_name=(
+                "Priority Test Studio"
+            ),
+        )
+
+    base_items = [
+        build_item(
+            position=1,
+            body=first_body,
+        ),
+        build_item(
+            position=2,
+            body="Т.",
+        ),
+        build_item(
+            position=3,
+            body="Т.",
+        ),
+    ]
+
+    base_post_text = build_top3_post_text(
+        base_items
+    )
+
+    required_extra = (
+        MAXIMUM_POST_LENGTH
+        + 1
+        - len(base_post_text)
+    )
+
+    if required_extra <= 0:
+        raise AssertionError(
+            "Priority regression base is already "
+            "too long."
+        )
+
+    trailing_body_lengths = [2, 2]
+
+    for index in range(2):
+        capacity = (
+            210
+            - trailing_body_lengths[index]
+        )
+        added = min(
+            required_extra,
+            capacity,
+        )
+
+        trailing_body_lengths[index] += added
+        required_extra -= added
+
+        if required_extra == 0:
+            break
+
+    if required_extra != 0:
+        raise AssertionError(
+            "Cannot construct exact +1 priority "
+            "overflow fixture."
+        )
+
+    payload_items = [
+        base_items[0],
+        build_item(
+            position=2,
+            body=(
+                ("Т" * (
+                    trailing_body_lengths[0] - 1
+                ))
+                + "."
+            ),
+        ),
+        build_item(
+            position=3,
+            body=(
+                ("Т" * (
+                    trailing_body_lengths[1] - 1
+                ))
+                + "."
+            ),
+        ),
+    ]
+
+    return (
+        OpenAIGeneratedPostPayload(
+            post_text="Допустимый модельный черновик.",
+            items=payload_items,
+        ),
+        first_sentence,
+    )
+
+
 async def main() -> int:
     if body_has_suspicious_unterminated_tail(
         "Короткая нормальная фраза без точки"
@@ -181,6 +425,183 @@ async def main() -> int:
         )
 
     print("Targeted truncation heuristic: OK")
+
+    overflow_payload = _overflow_payload()
+
+    try:
+        build_top3_post_text(
+            overflow_payload.items
+        )
+    except PostTextLengthOverflowError as error:
+        if error.actual_length != (
+            MAXIMUM_POST_LENGTH + 1
+        ):
+            raise AssertionError(
+                "Overflow fixture must reproduce "
+                "exactly MAXIMUM_POST_LENGTH + 1: "
+                f"actual={error.actual_length}"
+            )
+    else:
+        raise AssertionError(
+            "Overflow fixture did not overflow."
+        )
+
+    deferred_payload = (
+        _canonicalize_generated_payload_post_text(
+            overflow_payload
+        )
+    )
+
+    if (
+        deferred_payload.post_text
+        != overflow_payload.post_text
+    ):
+        raise AssertionError(
+            "Overflow canonicalization must defer "
+            "to integrity recovery."
+        )
+
+    overflow_issues = (
+        validate_generated_post_integrity(
+            deferred_payload
+        )
+    )
+
+    if not any(
+        "Не удалось канонически собрать post_text"
+        in issue
+        for issue in overflow_issues
+    ):
+        raise AssertionError(
+            "Integrity gate must detect canonical "
+            "post overflow."
+        )
+
+    compacted_payload = (
+        build_deterministic_integrity_fallback(
+            deferred_payload
+        )
+    )
+
+    if (
+        len(compacted_payload.post_text)
+        > MAXIMUM_POST_LENGTH
+    ):
+        raise AssertionError(
+            "Deterministic compaction must fit "
+            "MAXIMUM_POST_LENGTH."
+        )
+
+    if validate_generated_post_integrity(
+        compacted_payload
+    ):
+        raise AssertionError(
+            "Compacted overflow payload must pass "
+            "integrity gate."
+        )
+
+    if not any(
+        len(compacted.body) < len(original.body)
+        for compacted, original in zip(
+            compacted_payload.items,
+            overflow_payload.items,
+            strict=True,
+        )
+    ):
+        raise AssertionError(
+            "Overflow recovery must shorten at "
+            "least one body."
+        )
+
+    print(
+        "Canonical post overflow deferred and "
+        "deterministically compacted: OK"
+    )
+
+    priority_payload, expected_first_sentence = (
+        _priority_overflow_payload()
+    )
+
+    try:
+        build_top3_post_text(
+            priority_payload.items
+        )
+    except PostTextLengthOverflowError as error:
+        if error.actual_length != (
+            MAXIMUM_POST_LENGTH + 1
+        ):
+            raise AssertionError(
+                "Priority overflow fixture must "
+                "reproduce exactly "
+                "MAXIMUM_POST_LENGTH + 1: "
+                f"actual={error.actual_length}"
+            )
+    else:
+        raise AssertionError(
+            "Priority overflow fixture did not "
+            "overflow."
+        )
+
+    priority_compacted = (
+        build_deterministic_integrity_fallback(
+            priority_payload
+        )
+    )
+
+    if (
+        priority_compacted.items[0].body
+        != expected_first_sentence
+    ):
+        raise AssertionError(
+            "Sentence-tail compaction must be used "
+            "before headline fallback."
+        )
+
+    if (
+        priority_compacted.items[1].body
+        != priority_payload.items[1].body
+        or priority_compacted.items[2].body
+        != priority_payload.items[2].body
+    ):
+        raise AssertionError(
+            "Priority compaction must not modify "
+            "other bodies once sentence-tail "
+            "reduction is sufficient."
+        )
+
+    if (
+        priority_compacted.items[0].headline
+        != priority_payload.items[0].headline
+        or (
+            priority_compacted.items[0]
+            .official_trailer_url
+            != priority_payload.items[0]
+            .official_trailer_url
+        )
+        or (
+            priority_compacted.items[0]
+            .official_trailer_channel_name
+            != priority_payload.items[0]
+            .official_trailer_channel_name
+        )
+    ):
+        raise AssertionError(
+            "Priority compaction must preserve "
+            "headline and trailer metadata."
+        )
+
+    if validate_generated_post_integrity(
+        priority_compacted
+    ):
+        raise AssertionError(
+            "Priority-compacted payload must pass "
+            "integrity gate."
+        )
+
+    print(
+        "Sentence-tail compaction has priority "
+        "over headline fallback: OK"
+    )
 
     primary = _result(
         (
