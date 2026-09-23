@@ -114,7 +114,7 @@ def _synthetic_request_key(
     """Создаёт уникальный synthetic request key."""
 
     payload = (
-        "daily-workflow-moderation-fallback-v7-test:"
+        "daily-workflow-moderation-fallback-v8-test:"
         f"{WORKFLOW_ID}:"
         f"{attempt_number}"
     )
@@ -128,8 +128,8 @@ def _assert_generator_fallback_identity() -> None:
     """
     Проверяет новую NORMAL/fallback identity.
 
-    NORMAL v5 обязан включать safe-poster правило.
-    Fallback v7 обязан сохранять factual title/summary, но использовать
+    NORMAL v6 обязан включать safe-poster правило.
+    Fallback v8 обязан сохранять factual title/summary, но использовать
     stricter title-poster/mini-poster strategy вместо обезличенного
     semantic_visual_brief.
     """
@@ -193,12 +193,12 @@ def _assert_generator_fallback_identity() -> None:
 
     if "САМОДЕЛЬНОГО ПОСТЕРА" not in normal_request.prompt:
         raise AssertionError(
-            "NORMAL v5 не содержит safe custom-poster rule."
+            "NORMAL v6 не содержит safe custom-poster rule."
         )
 
     if "коллаж из двух или нескольких оригинальных мини-постеров" not in normal_request.prompt:
         raise AssertionError(
-            "NORMAL v5 не содержит multi-film poster collage rule."
+            "NORMAL v6 не содержит multi-film poster collage rule."
         )
 
     generator.set_moderation_safe_editorial_fallback(
@@ -237,29 +237,29 @@ def _assert_generator_fallback_identity() -> None:
 
     if '"semantic_visual_brief":' in fallback_request.prompt:
         raise AssertionError(
-            "Fallback v7 не должен использовать старый semantic_visual_brief."
+            "Fallback v8 не должен использовать старый semantic_visual_brief."
         )
 
     for term in EXPECTED_FALLBACK_FACTUAL_TERMS:
         if term not in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v7 потерял factual term: "
+                "Fallback v8 потерял factual term: "
                 f"{term!r}"
             )
 
     if "Это НЕ режим абстрактных универсальных картинок" not in fallback_request.prompt:
         raise AssertionError(
-            "Fallback v7 не запрещает бессодержательную абстракцию."
+            "Fallback v8 не запрещает бессодержательную абстракцию."
         )
 
     print(
-        "NORMAL v5 safe custom-poster strategy: OK"
+        "NORMAL v6 safe custom-poster strategy: OK"
     )
     print(
-        "Fallback v7 keeps factual title/summary: OK"
+        "Fallback v8 keeps factual title/summary: OK"
     )
     print(
-        "Fallback v7 uses safer title-poster strategy: OK"
+        "Fallback v8 uses safer title-poster strategy: OK"
     )
 
 
@@ -500,7 +500,7 @@ async def _prepare_retry_fixture(
     Production workflow может в реальности быть awaiting_review/approved/
     published и иметь successful historical fallback. Сначала переключаем
     workflow на historical failed normal image, затем временно убираем
-    active/completed initial image rows и attempts текущего fallback-v7.
+    active/completed initial image rows и attempts текущего fallback-v8.
     После rollback исходное production-состояние восстанавливается PostgreSQL.
     """
 
@@ -568,7 +568,7 @@ async def _prepare_retry_fixture(
     # Successful historical fallback (например fallback-v2) блокирует
     # новый moderation retry по production-правилам. Для synthetic test
     # временно убираем active/completed initial requests независимо от
-    # их исторической версии. Одновременно очищаем attempts текущего v5,
+    # их исторической версии. Одновременно очищаем attempts текущего fallback-v8,
     # чтобы его version-aware budget начинался с нуля.
     await connection.execute(
         """
@@ -621,7 +621,7 @@ async def _insert_synthetic_fallback_reservation(
     attempt_number: int,
 ) -> int:
     """
-    Создаёт synthetic fallback-v7 reservation.
+    Создаёт synthetic fallback-v8 reservation.
 
     Все изменения выполняются внутри внешней rollback transaction.
     """
@@ -686,7 +686,7 @@ async def _insert_synthetic_fallback_reservation(
     if image_generation_id is None:
         raise RuntimeError(
             "Не удалось создать synthetic "
-            "fallback-v7 reservation."
+            "fallback-v8 reservation."
         )
 
     return int(
@@ -722,12 +722,12 @@ async def _mark_synthetic_moderation_failed(
     if result != "UPDATE 1":
         raise RuntimeError(
             "Не удалось перевести synthetic "
-            "fallback-v7 reservation в failed."
+            "fallback-v8 reservation в failed."
         )
 
 
 async def main() -> int:
-    """Проверяет fallback-v7 prompt и retry budget без OpenAI/Telegram."""
+    """Проверяет fallback-v8 prompt и retry budget без OpenAI/Telegram."""
 
     if (
         OPENAI_IMAGE_PROMPT_VERSION
@@ -801,7 +801,7 @@ async def main() -> int:
                     "Synthetic failed/image fixture prepared: OK"
                 )
                 print(
-                    "Fallback v7 prompt version "
+                    "Fallback v8 prompt version "
                     "has fresh budget: OK"
                 )
 
@@ -827,7 +827,7 @@ async def main() -> int:
 
                 print(
                     "Synthetic failed workflow "
-                    "reopens for fallback v7: OK"
+                    "reopens for fallback v8: OK"
                 )
 
                 first_fallback_id = (
@@ -881,7 +881,7 @@ async def main() -> int:
                 assert attempts_used == 1
 
                 print(
-                    "Second fallback-v7 attempt allowed: OK"
+                    "Second fallback-v8 attempt allowed: OK"
                 )
 
                 second_fallback_id = (
@@ -935,11 +935,11 @@ async def main() -> int:
                     DailyWorkflowImageModerationRetryNotAllowedError
                 ):
                     print(
-                        "Third fallback-v7 attempt blocked: OK"
+                        "Third fallback-v8 attempt blocked: OK"
                     )
                 else:
                     raise AssertionError(
-                        "После двух fallback-v7 failures "
+                        "После двух fallback-v8 failures "
                         "третья попытка не была заблокирована."
                     )
 
@@ -969,7 +969,7 @@ async def main() -> int:
             "Telegram requests=not_performed"
         )
         print(
-            "Moderation-safe image fallback v7 test: OK"
+            "Moderation-safe image fallback v8 test: OK"
         )
 
         return 0
