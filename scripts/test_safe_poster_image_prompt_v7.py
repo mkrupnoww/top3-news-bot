@@ -99,6 +99,9 @@ def main() -> int:
         "САМОДЕЛЬНОГО ПОСТЕРА",
         "коллаж из двух или нескольких оригинальных мини-постеров",
         "не должен быть копией официального постера",
+        "По умолчанию предпочитай светлую визуальную подачу.",
+        "Не используй тёмные, ночные или слабо освещённые сцены без явной",
+        "равнозначен, выбирай светлое.",
         '"title":"Practical Magic 2 challenges Spider-Man: Brand New Day"',
         '"summary":"The release is compared with Spider-Man: Brand New Day at the box office."',
     )
@@ -106,7 +109,7 @@ def main() -> int:
     for fragment in required_normal_fragments:
         if fragment not in normal_request.prompt:
             raise AssertionError(
-                "NORMAL v5 missing fragment: "
+                "NORMAL v6 missing fragment: "
                 f"{fragment!r}"
             )
 
@@ -129,12 +132,15 @@ def main() -> int:
         "Это НЕ режим абстрактных универсальных картинок",
         "сделай свой оригинальный постер, а не копию официального",
         "коллаж из нескольких",
+        "По умолчанию предпочитай светлую визуальную подачу.",
+        "Не используй тёмные, ночные или слабо освещённые сцены без явной",
+        "равнозначен, выбирай светлое.",
     )
 
     for fragment in required_fallback_fragments:
         if fragment not in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v7 missing fragment: "
+                "Fallback v8 missing fragment: "
                 f"{fragment!r}"
             )
 
@@ -146,7 +152,7 @@ def main() -> int:
     for fragment in forbidden_fallback_fragments:
         if fragment in fallback_request.prompt:
             raise AssertionError(
-                "Fallback v7 still contains legacy semantic fallback: "
+                "Fallback v8 still contains legacy semantic fallback: "
                 f"{fragment!r}"
             )
 
@@ -156,16 +162,16 @@ def main() -> int:
         )
 
     print(
-        "NORMAL v5 safe custom-poster strategy: OK"
+        "NORMAL v6 safe custom-poster strategy: OK"
     )
     print(
-        "NORMAL v5 multi-film poster collage strategy: OK"
+        "NORMAL v6 multi-film poster collage strategy: OK"
     )
     print(
-        "Fallback v7 keeps factual title/summary: OK"
+        "Fallback v8 keeps factual title/summary: OK"
     )
     print(
-        "Fallback v7 avoids legacy semantic abstraction: OK"
+        "Fallback v8 avoids legacy semantic abstraction: OK"
     )
     print(
         "OpenAI requests: not performed"
