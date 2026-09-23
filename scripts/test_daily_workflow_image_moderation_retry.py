@@ -32,13 +32,13 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v5"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v6"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 HISTORICAL_FALLBACK_PROMPT_VERSION = (
     "movie_news_image_moderation_fallback_v1"
 )
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v7"
+    "movie_news_image_moderation_fallback_v8"
 )
 
 EXPECTED_FALLBACK_FACTUAL_TERMS = (
