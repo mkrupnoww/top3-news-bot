@@ -1254,10 +1254,7 @@ async def test_successful_revision_completion(
 
     assert (
         record["metadata_revision_prompt_version"]
-        == (
-            "movie_news_telegram_post_"
-            "revision_prompt_v1"
-        )
+        == OPENAI_POST_REVISION_PROMPT_VERSION
     )
 
     assert record["metadata_news_count"] == 3
