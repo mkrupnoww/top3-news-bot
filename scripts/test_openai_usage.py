@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from app.ranking.openai_usage import (
     GPT_5_6_TERRA_PRICING,
+    GPT_6_SOL_PRICING,
     calculate_openai_cost,
     extract_response_usage,
     get_model_pricing,
@@ -182,6 +183,59 @@ def test_cost_calculation() -> None:
     )
 
 
+def test_gpt_6_sol_cost_calculation() -> None:
+    """Проверяет расчёт стоимости GPT-6 Sol."""
+
+    usage = extract_response_usage(
+        build_response()
+    )
+
+    pricing = get_model_pricing(
+        "gpt-6-sol"
+    )
+
+    assert pricing == GPT_6_SOL_PRICING
+
+    cost = calculate_openai_cost(
+        usage,
+        pricing,
+    )
+
+    assert str(
+        cost.regular_input_cost_usd
+    ) == "0.00200000"
+
+    assert str(
+        cost.cached_input_cost_usd
+    ) == "0.00008000"
+
+    assert str(
+        cost.cache_write_cost_usd
+    ) == "0.00025000"
+
+    assert str(
+        cost.output_cost_usd
+    ) == "0.00300000"
+
+    assert str(
+        cost.total_cost_usd
+    ) == "0.00533000"
+
+    print()
+    print("GPT-6 Sol cost calculation: OK")
+    print(
+        f"model={cost.model_name}"
+    )
+    print(
+        "pricing_version="
+        f"{cost.pricing_version}"
+    )
+    print(
+        "total_cost_usd="
+        f"{cost.total_cost_usd}"
+    )
+
+
 def test_missing_usage_blocking() -> None:
     """Проверяет ответ без usage."""
 
@@ -237,6 +291,7 @@ def main() -> int:
 
     test_usage_extraction()
     test_cost_calculation()
+    test_gpt_6_sol_cost_calculation()
     test_missing_usage_blocking()
     test_unknown_model_blocking()
 

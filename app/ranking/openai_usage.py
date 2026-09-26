@@ -10,6 +10,10 @@ GPT_5_6_TERRA_PRICING_VERSION = (
     "2026-07-31"
 )
 
+GPT_6_SOL_PRICING_VERSION = (
+    "2026-09-26"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OpenAITokenUsage:
@@ -180,12 +184,29 @@ GPT_5_6_TERRA_PRICING = OpenAIModelPricing(
 )
 
 
+GPT_6_SOL_PRICING = OpenAIModelPricing(
+    model_name="gpt-6-sol",
+    input_usd_per_million=Decimal("2.00"),
+    cached_input_usd_per_million=(
+        Decimal("0.20")
+    ),
+    output_usd_per_million=Decimal("10.00"),
+    cache_write_multiplier=Decimal("1.25"),
+    pricing_version=(
+        GPT_6_SOL_PRICING_VERSION
+    ),
+)
+
+
 MODEL_PRICING: dict[
     str,
     OpenAIModelPricing,
 ] = {
     GPT_5_6_TERRA_PRICING.model_name: (
         GPT_5_6_TERRA_PRICING
+    ),
+    GPT_6_SOL_PRICING.model_name: (
+        GPT_6_SOL_PRICING
     ),
 }
 

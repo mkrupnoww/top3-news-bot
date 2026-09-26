@@ -128,6 +128,7 @@ def build_test_batch_request_key() -> str:
 def build_revision_result(
     selection: GenerationTop3Selection,
     *,
+    model_name: str,
     post_suffix: str = "",
 ) -> OpenAIPostGenerationResult:
     """Создаёт локальный результат revision-модели."""
@@ -220,7 +221,7 @@ def build_revision_result(
     )
 
     pricing = get_model_pricing(
-        "gpt-5.6-terra"
+        model_name
     )
 
     cost_estimate = calculate_openai_cost(
@@ -707,7 +708,8 @@ async def test_successful_revision_completion(
     )
 
     result = build_revision_result(
-        selection
+        selection,
+        model_name=generator.metadata.model_name,
     )
 
     completion = (
@@ -1214,6 +1216,7 @@ async def test_successful_revision_completion(
 
     changed_result = build_revision_result(
         selection,
+        model_name=generator.metadata.model_name,
         post_suffix=(
             "\n\nТестовое изменение."
         ),
@@ -1553,7 +1556,8 @@ async def test_revision_failure(
     )
 
     result = build_revision_result(
-        selection
+        selection,
+        model_name=generator.metadata.model_name,
     )
 
     try:
@@ -1624,15 +1628,6 @@ async def main() -> int:
     """Запускает интеграционный тест."""
 
     settings = get_settings()
-
-    if (
-        settings.openai_generation_model
-        != "gpt-5.6-terra"
-    ):
-        raise ValueError(
-            "Тестовая телеметрия настроена "
-            "для модели gpt-5.6-terra."
-        )
 
     pool = await create_database_pool(
         settings
