@@ -44,8 +44,6 @@ from app.ranking.openai_usage import (
 )
 
 
-TEST_RANKING_RUN_ID = 18
-
 SOURCE_POST_TEXT = (
     "**TOP-3 НОВОСТЕЙ КИНО "
     "ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n"
@@ -115,6 +113,100 @@ def build_test_publication_date() -> date:
         date(2400, 1, 1)
         + timedelta(days=random_offset)
     )
+
+
+async def load_latest_completed_top3_selection(
+    pool: asyncpg.Pool,
+) -> GenerationTop3Selection:
+    """Выбирает свежий completed ranking с полным TOP-3."""
+
+    async with pool.acquire() as connection:
+        ranking_run_id = await connection.fetchval(
+            """
+            SELECT rr.ranking_run_id
+            FROM top3_news.ranking_runs AS rr
+            WHERE rr.run_status = 'completed'
+              AND (
+                    SELECT COUNT(*)
+                    FROM top3_news.news_scores AS ns
+                    WHERE ns.ranking_run_id = rr.ranking_run_id
+                      AND ns.selected_for_top3 IS TRUE
+                      AND ns.top3_position BETWEEN 1 AND 3
+                  ) = 3
+              AND (
+                    SELECT COUNT(DISTINCT ns.top3_position)
+                    FROM top3_news.news_scores AS ns
+                    WHERE ns.ranking_run_id = rr.ranking_run_id
+                      AND ns.selected_for_top3 IS TRUE
+                      AND ns.top3_position BETWEEN 1 AND 3
+                  ) = 3
+            ORDER BY rr.ranking_run_id DESC
+            LIMIT 1
+            """
+        )
+
+    if ranking_run_id is None:
+        raise LookupError(
+            "Не найден completed ranking_run "
+            "с полноценным сохранённым TOP-3."
+        )
+
+    normalized_ranking_run_id = int(
+        ranking_run_id
+    )
+
+    selection = await load_generation_top3(
+        pool,
+        ranking_run_id=(
+            normalized_ranking_run_id
+        ),
+    )
+
+    if selection.run_status != "completed":
+        raise AssertionError(
+            "Динамический ranking fixture "
+            "не имеет статус completed."
+        )
+
+    if len(selection.items) != 3:
+        raise AssertionError(
+            "Динамический ranking fixture "
+            "не содержит ровно три новости."
+        )
+
+    if len(set(selection.news_ids)) != 3:
+        raise AssertionError(
+            "Динамический ranking fixture "
+            "содержит дублирующиеся news_id."
+        )
+
+    positions = tuple(
+        item.position
+        for item in selection.items
+    )
+
+    if positions != (1, 2, 3):
+        raise AssertionError(
+            "Динамический ranking fixture "
+            "не содержит позиции 1, 2, 3."
+        )
+
+    print(
+        "Dynamic ranking fixture: OK"
+    )
+    print(
+        "test_ranking_run_id="
+        f"{selection.ranking_run_id}"
+    )
+    print(
+        "test_news_ids="
+        + ",".join(
+            str(news_id)
+            for news_id in selection.news_ids
+        )
+    )
+
+    return selection
 
 
 def build_test_batch_request_key() -> str:
@@ -621,6 +713,7 @@ async def assert_test_batch_deleted(
     pool: asyncpg.Pool,
     *,
     batch_id: int,
+    ranking_run_id: int,
 ) -> None:
     """Проверяет каскадную очистку."""
 
@@ -661,7 +754,7 @@ async def assert_test_batch_deleted(
                 ) AS ranking_run_exists
             """,
             batch_id,
-            TEST_RANKING_RUN_ID,
+            ranking_run_id,
         )
 
     if record is None:
@@ -1592,6 +1685,7 @@ async def cleanup_test_batches(
     pool: asyncpg.Pool,
     *,
     created_batch_ids: set[int],
+    ranking_run_id: int,
 ) -> None:
     """Удаляет созданные тестом выпуски."""
 
@@ -1606,6 +1700,7 @@ async def cleanup_test_batches(
         await assert_test_batch_deleted(
             pool,
             batch_id=batch_id,
+            ranking_run_id=ranking_run_id,
         )
 
         print()
@@ -1620,7 +1715,8 @@ async def cleanup_test_batches(
             "temporary_revision_requests_deleted=true"
         )
         print(
-            "ranking_run_18_preserved=true"
+            "ranking_run_preserved="
+            f"{ranking_run_id}"
         )
 
 
@@ -1637,11 +1733,8 @@ async def main() -> int:
 
     try:
         selection = (
-            await load_generation_top3(
-                pool,
-                ranking_run_id=(
-                    TEST_RANKING_RUN_ID
-                ),
+            await load_latest_completed_top3_selection(
+                pool
             )
         )
 
@@ -1705,6 +1798,9 @@ async def main() -> int:
                 pool,
                 created_batch_ids=(
                     created_batch_ids
+                ),
+                ranking_run_id=(
+                    selection.ranking_run_id
                 ),
             )
         finally:
