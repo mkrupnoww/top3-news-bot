@@ -26,6 +26,7 @@ from app.db.pool import (
     create_database_pool,
 )
 from app.generation.openai_generator import (
+    OPENAI_POST_REVISION_PROMPT_VERSION,
     GenerationModelRequest,
     GenerationModelResponse,
     OpenAIGeneratedNewsPayload,
@@ -1158,10 +1159,7 @@ async def test_successful_revision_completion(
 
     assert (
         record["target_text_prompt_version"]
-        == (
-            "movie_news_telegram_post_"
-            "revision_prompt_v1"
-        )
+        == OPENAI_POST_REVISION_PROMPT_VERSION
     )
 
     assert (
