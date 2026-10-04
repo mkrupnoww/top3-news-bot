@@ -87,14 +87,14 @@ usage/cost и image request payload; секретов в trace нет.
 commit, clean tracked working tree и отсутствие работающего daily workflow,
 делает приватную backup .env/schema, применяет migration от владельца схемы,
 меняет только image-related .env settings, запускает штатный deploy script и
-проверяет commit/migration/timer. Production выполнение ещё не подтверждено.
+проверяет commit/migration/timer. На этом этапе production выполнение ещё не было подтверждено.
 
 Первая попытка rollout 2026-10-04 остановилась до применения SQL: приватная
 backup directory (0700, владелец michael) не позволяла psql от postgres читать
 019.sql через `-f path`. Production остался на 3309878, миграциях 001–018 и
 gpt-image-2; bot и daily timer active. Исправлено: shell текущего пользователя
 открывает файл и передаёт SQL через stdin (`-f - < file`), сохраняя приватные
-права backup и SET ROLE в той же psql session. Повторный rollout ещё не подтверждён.
+права backup и SET ROLE в той же psql session. На этом этапе повторный rollout ещё не был подтверждён.
 На cloud-001 пройдены bash syntax check и read-only проверка реальным psql:
 SET ROLE и SQL из stdin выполняются в одной сессии; transaction ROLLBACK.
 Исправление готовится на cloud-002, публикуется в GitHub, rollout на cloud-001
@@ -111,3 +111,27 @@ rollout проверяет его до изменения БД/.env и запу�
 и `uv sync --frozen --no-dev --dry-run --offline`: 32 packages, would make no
 changes. Production и целевой commit имеют одинаковые uv.lock/pyproject.toml;
 установленные systemd units совпадают с production source. Новых платных вызовов нет.
+
+## Production rollout подтверждён
+
+2026-10-04 третья попытка завершилась успешно. Независимая SSH/read-only проверка
+подтвердила production code commit **4427b5c9f3a1190a99fa10e12c68fd8712f93406**
+и clean tracked working tree. Deployment backup:
+`/tmp/top3-image-agent-rollout.QGBW87` (приватный, содержит .env).
+
+- Migration **019** применена 2026-10-04 **12:49:51 UTC**; владелец новой таблицы
+  michael_psql, права приложения на таблицу/sequence и FK image requests корректны.
+- Runtime factory создаёт OpenAIMovieNewsImageGenerator с **ImagePromptAgent**;
+  agent model **gpt-6.1-sol**, image model **gpt-image-2.5-flare**, medium, 1024×1024.
+- Ranking и text generation остаются **gpt-6-sol**.
+- Bot service перезапущен **12:54:19 UTC**, PostgreSQL pool и Telegram polling
+  успешно стартовали, Result=success, NRestarts=0.
+- Bot и collector/cleanup/daily timers active. Daily oneshot inactive между
+  выпусками; последний Result=success. Следующий выпуск: **2026-10-05 07:30 UTC**.
+
+APP_ENV в существующем production .env остаётся development; rollout его не
+менял. В текущем runtime эта метка не управляет scheduled workflow или выбором
+моделей; отдельные тестовые scripts используют её как защиту тестового запуска.
+Проверка runtime factory не отправляет запросы API; дополнительных платных
+вызовов или ручного production выпуска не было. Первый scheduled выпуск с новым
+image stage на момент проверки ещё не выполнялся.
