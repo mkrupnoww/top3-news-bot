@@ -37,8 +37,10 @@ git show "${EXPECTED_COMMIT}:migrations/019_image_prompt_plans.sql" > "${BACKUP_
 
 APPLIED="$(sudo -u postgres psql -X -A -t -d top3_news_db -c "SELECT EXISTS (SELECT 1 FROM top3_news.schema_migrations WHERE version='019')")"
 if [[ "${APPLIED}" == f ]]; then
+    # Файл открывает текущий пользователь до sudo: приватная backup directory
+    # остаётся 0700, postgres получает SQL через stdin в той же psql session.
     sudo -u postgres psql -X -v ON_ERROR_STOP=1 -d top3_news_db \
-        -c 'SET ROLE michael_psql' -f "${BACKUP_DIR}/019.sql"
+        -c 'SET ROLE michael_psql' -f - < "${BACKUP_DIR}/019.sql"
 fi
 
 # Environment-specific настройки — разрешённая эксплуатационная конфигурация.

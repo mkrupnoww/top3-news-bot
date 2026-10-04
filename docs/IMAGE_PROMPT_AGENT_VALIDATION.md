@@ -88,3 +88,14 @@ commit, clean tracked working tree и отсутствие работающег�
 делает приватную backup .env/schema, применяет migration от владельца схемы,
 меняет только image-related .env settings, запускает штатный deploy script и
 проверяет commit/migration/timer. Production выполнение ещё не подтверждено.
+
+Первая попытка rollout 2026-10-04 остановилась до применения SQL: приватная
+backup directory (0700, владелец michael) не позволяла psql от postgres читать
+019.sql через `-f path`. Production остался на 3309878, миграциях 001–018 и
+gpt-image-2; bot и daily timer active. Исправлено: shell текущего пользователя
+открывает файл и передаёт SQL через stdin (`-f - < file`), сохраняя приватные
+права backup и SET ROLE в той же psql session. Повторный rollout ещё не подтверждён.
+На cloud-001 пройдены bash syntax check и read-only проверка реальным psql:
+SET ROLE и SQL из stdin выполняются в одной сессии; transaction ROLLBACK.
+Исправление готовится на cloud-002, публикуется в GitHub, rollout на cloud-001
+извлекается из fetched origin/main, без прямого копирования production-кода.
