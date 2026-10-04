@@ -542,4 +542,5 @@ class OpenAIImagesGenerationClient:
             ),
             usage=usage,
             revised_prompt=revised_prompt,
+            request_id=_get_value(response, "_request_id"),
         )

@@ -3,6 +3,9 @@ import json
 import re
 from typing import Literal, Protocol, runtime_checkable
 
+IMAGE_PROMPT_NORMAL_VERSION = "movie_news_image_agent_normal_v1"
+IMAGE_PROMPT_RECOVERY_VERSION = "movie_news_image_agent_recovery_v1"
+
 
 OPENAI_IMAGE_GENERATOR_VERSION = (
     "openai_movie_news_image_generator_v4"
@@ -169,6 +172,7 @@ class ImageModelResponse:
     background: str | None
     usage: OpenAIImageUsage | None = None
     revised_prompt: str | None = None
+    request_id: str | None = None
 
     def __post_init__(self) -> None:
         """Проверяет базовую целостность ответа."""
@@ -1080,6 +1084,7 @@ class OpenAIMovieNewsImageGenerator:
         quality: ImageQuality = (
             DEFAULT_IMAGE_QUALITY
         ),
+        prompt_agent: object | None = None,
     ) -> None:
         if not isinstance(
             client,
@@ -1091,6 +1096,7 @@ class OpenAIMovieNewsImageGenerator:
             )
 
         self._client = client
+        self.prompt_agent = prompt_agent
         self._model_name = _normalize_required_text(
             model_name,
             field_name="model_name",
@@ -1149,12 +1155,20 @@ class OpenAIMovieNewsImageGenerator:
                 "openai_movie_news_image_generator"
             ),
             generator_version=(
-                OPENAI_IMAGE_GENERATOR_VERSION
+                "openai_movie_news_image_generator_v5"
+                if self.prompt_agent is not None
+                else OPENAI_IMAGE_GENERATOR_VERSION
             ),
             prompt_version=(
-                OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
-                if self._moderation_safe_editorial_fallback
-                else OPENAI_IMAGE_PROMPT_VERSION
+                (
+                    IMAGE_PROMPT_RECOVERY_VERSION
+                    if self._moderation_safe_editorial_fallback
+                    else IMAGE_PROMPT_NORMAL_VERSION
+                ) if self.prompt_agent is not None else (
+                    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
+                    if self._moderation_safe_editorial_fallback
+                    else OPENAI_IMAGE_PROMPT_VERSION
+                )
             ),
             model_name=self._model_name,
         )
@@ -1168,17 +1182,25 @@ class OpenAIMovieNewsImageGenerator:
         ],
         editorial_comment: str | None = None,
         issues: tuple[str, ...] = (),
+        final_image_prompt: str | None = None,
     ) -> ImageModelRequest:
         """Строит точный запрос к Image API."""
 
-        prompt = build_image_prompt(
-            items=items,
-            editorial_comment=editorial_comment,
-            issues=issues,
-            moderation_safe_editorial_fallback=(
-                self._moderation_safe_editorial_fallback
-            ),
-        )
+        if self.prompt_agent is not None and final_image_prompt is None:
+            raise RuntimeError("Image Prompt Agent требует сохранённый final_image_prompt: используй protected pipeline.")
+        if final_image_prompt is not None:
+            prompt = _normalize_required_text(final_image_prompt, field_name="final_image_prompt")
+            if len(prompt.encode("utf-8")) > 4000:
+                raise ValueError("final_image_prompt превышает 4000 UTF-8 bytes.")
+        else:
+            prompt = build_image_prompt(
+                items=items,
+                editorial_comment=editorial_comment,
+                issues=issues,
+                moderation_safe_editorial_fallback=(
+                    self._moderation_safe_editorial_fallback
+                ),
+            )
 
         return ImageModelRequest(
             model=self._model_name,
@@ -1214,6 +1236,13 @@ class OpenAIMovieNewsImageGenerator:
             editorial_comment=editorial_comment,
             issues=issues,
         )
+
+        return await self.generate_request(model_request)
+
+    async def generate_request(
+        self, model_request: ImageModelRequest
+    ) -> OpenAIImageGenerationResult:
+        """Исполняет уже сохранённый запрос без пересборки промпта."""
 
         model_response = (
             await self._client.create_image(

@@ -440,6 +440,7 @@ async def _load_image_generation_record(
             igr.generator_version,
             igr.prompt_version,
             igr.request_payload,
+            igr.image_prompt_id,
             igr.response_metadata,
             igr.openai_usage,
             igr.openai_cost,
@@ -454,6 +455,7 @@ async def _load_image_generation_record(
             gp.batch_id
                 AS post_batch_id,
             gp.post_status,
+            gp.post_text,
             gp.image_path
                 AS post_image_path,
             gp.image_sha256
@@ -1171,6 +1173,17 @@ async def complete_reserved_image_generation(
                 record,
                 request_kind=request_kind,
             )
+
+            if record["image_prompt_id"] is not None:
+                saved_plan = await connection.fetchrow(
+                    "SELECT final_image_prompt, input_payload FROM top3_news.image_prompt_plans WHERE image_prompt_id=$1 FOR UPDATE",
+                    record["image_prompt_id"],
+                )
+                if (
+                    saved_plan is None or saved_plan["final_image_prompt"] != prompt
+                    or json.loads(saved_plan["input_payload"])["approved_post_text"] != record["post_text"]
+                ):
+                    raise ValueError("Image completion не соответствует сохранённому prompt/final post context.")
 
             post_update_result = (
                 await connection.execute(

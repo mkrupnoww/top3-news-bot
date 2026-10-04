@@ -11,6 +11,7 @@ from app.generation.openai_image_client import (
     AsyncOpenAIImageClientProtocol,
     OpenAIImagesGenerationClient,
 )
+from app.generation.image_prompt_agent import ImagePromptAgent
 from app.ranking.openai_factory import (
     require_openai_api_key,
 )
@@ -84,6 +85,14 @@ def create_openai_image_generation_runtime(
             ),
             size=(
                 settings.openai_image_size
+            ),
+            quality=settings.openai_image_quality,
+            prompt_agent=ImagePromptAgent(
+                client=(
+                    sdk_client.with_options(max_retries=0)
+                    if hasattr(sdk_client, "with_options") else sdk_client
+                ),
+                model_name=settings.openai_image_prompt_agent_model,
             ),
         )
     )

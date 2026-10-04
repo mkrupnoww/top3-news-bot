@@ -247,10 +247,22 @@ GPT_IMAGE_2_PRICING = (
 )
 
 
+GPT_IMAGE_2_5_FLARE_PRICING = OpenAIImageModelPricing(
+    model_name="gpt-image-2.5-flare",
+    text_input_usd_per_million=Decimal("5.00"),
+    text_cached_input_usd_per_million=Decimal("1.25"),
+    image_input_usd_per_million=Decimal("8.00"),
+    image_cached_input_usd_per_million=Decimal("2.00"),
+    image_output_usd_per_million=Decimal("30.00"),
+    pricing_version="2026-10-04",
+)
+
+
 IMAGE_MODEL_PRICING: dict[
     str,
     OpenAIImageModelPricing,
 ] = {
+    GPT_IMAGE_2_5_FLARE_PRICING.model_name: GPT_IMAGE_2_5_FLARE_PRICING,
     GPT_IMAGE_2_PRICING.model_name: (
         GPT_IMAGE_2_PRICING
     ),

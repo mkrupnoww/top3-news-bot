@@ -1319,6 +1319,7 @@ async def reserve_image_generation(
         ImageGenerationNewsItem,
         ...,
     ],
+    image_prompt_id: int | None = None,
 ) -> ImageGenerationReservation:
     """
     Резервирует image-generation до платного Image API.
@@ -1436,6 +1437,31 @@ async def reserve_image_generation(
                 """,
                 normalized_generated_post_id,
             )
+
+            if image_prompt_id is not None:
+                prompt = await connection.fetchrow(
+                    """SELECT batch_id, generated_post_id, prompt_status,
+                              final_image_prompt, image_prompt_version, request_kind, review_action_id,
+                              input_payload
+                       FROM top3_news.image_prompt_plans WHERE image_prompt_id=$1 FOR UPDATE""",
+                    image_prompt_id,
+                )
+                if (
+                    prompt is None or prompt["batch_id"] != normalized_batch_id
+                    or prompt["generated_post_id"] != normalized_generated_post_id
+                    or prompt["prompt_status"] != "completed"
+                    or prompt["final_image_prompt"] != normalized_model_request.prompt
+                    or prompt["image_prompt_version"] != normalized_metadata.prompt_version
+                    or prompt["request_kind"] != normalized_request_kind
+                    or prompt["review_action_id"] != normalized_review_action_id
+                ):
+                    raise ValueError("Image request не соответствует сохранённому completed ImagePromptPlan.")
+                current_text = await connection.fetchval(
+                    "SELECT post_text FROM top3_news.generated_posts WHERE generated_post_id=$1 FOR UPDATE",
+                    normalized_generated_post_id,
+                )
+                if json.loads(prompt["input_payload"])["approved_post_text"] != current_text:
+                    raise ValueError("Post изменился после Prompt Agent: Image API запрещён.")
 
             existing_record = (
                 await _find_existing_active_reservation(
@@ -1737,7 +1763,8 @@ async def reserve_image_generation(
                             background,
                             moderation,
                             image_count,
-                            request_payload
+                            request_payload,
+                            image_prompt_id
                         )
                     VALUES (
                         $1,
@@ -1758,7 +1785,8 @@ async def reserve_image_generation(
                         $15,
                         $16,
                         $17,
-                        $18::jsonb
+                        $18::jsonb,
+                        $19
                     )
                     RETURNING image_generation_id
                     """,
@@ -1784,6 +1812,7 @@ async def reserve_image_generation(
                     _encode_json(
                         request_payload
                     ),
+                    image_prompt_id,
                 )
             )
 

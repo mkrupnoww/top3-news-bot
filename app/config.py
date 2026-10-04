@@ -120,12 +120,24 @@ class Settings(BaseSettings):
     )
 
     openai_image_model: str = Field(
-        default="gpt-image-2",
+        default="gpt-image-2.5-flare",
         min_length=1,
         max_length=128,
         validation_alias=(
             "OPENAI_IMAGE_MODEL"
         ),
+    )
+
+    openai_image_prompt_agent_model: str = Field(
+        default="gpt-6.1-sol",
+        min_length=1,
+        max_length=128,
+        validation_alias="OPENAI_IMAGE_PROMPT_AGENT_MODEL",
+    )
+
+    openai_image_quality: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        validation_alias="OPENAI_IMAGE_QUALITY",
     )
 
     openai_image_size: str = Field(
@@ -189,6 +201,7 @@ class Settings(BaseSettings):
         "openai_ranking_model",
         "openai_generation_model",
         "openai_image_model",
+        "openai_image_prompt_agent_model",
     )
     @classmethod
     def validate_openai_model_name(

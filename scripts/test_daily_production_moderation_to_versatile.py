@@ -20,15 +20,16 @@ from app.db.pool import (
     create_database_pool,
 )
 from app.generation.image_generator import (
-    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
-    OPENAI_IMAGE_PROMPT_VERSION,
-    OPENAI_IMAGE_VERSATILE_PROMPT_VERSION,
+    IMAGE_PROMPT_RECOVERY_VERSION as OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
+    IMAGE_PROMPT_NORMAL_VERSION as OPENAI_IMAGE_PROMPT_VERSION,
+)
+from app.generation.editorial_image_fallback import (
+    EDITORIAL_FALLBACK_VERSION as OPENAI_IMAGE_VERSATILE_PROMPT_VERSION,
 )
 from app.generation.openai_image_pipeline import (
     run_reserved_openai_image_generation,
 )
 from app.workflows.daily_production import (
-    VERSATILE_OPTION_IMAGE_PATH,
     _create_versatile_option_generator,
     _fallback_budget_is_exhausted,
     _resolve_active_selection,
@@ -40,7 +41,7 @@ RANKING_RUN_ID = 142
 BATCH_ID = 67
 GENERATED_POST_ID = 64
 
-CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_v6"
+CURRENT_NORMAL_PROMPT_VERSION = "movie_news_image_agent_normal_v1"
 HISTORICAL_NORMAL_PROMPT_VERSION = "movie_news_image_v2"
 
 WINNER_COMBINATION_ID = 1844
@@ -540,12 +541,6 @@ async def main() -> int:
             f"{OPENAI_IMAGE_PROMPT_VERSION}"
         )
 
-    if not VERSATILE_OPTION_IMAGE_PATH.is_file():
-        raise AssertionError(
-            "Universal image asset не найден: "
-            f"{VERSATILE_OPTION_IMAGE_PATH}"
-        )
-
     versatile_generator = (
         _create_versatile_option_generator()
     )
@@ -910,7 +905,7 @@ async def main() -> int:
                 assert state["image_status"] == "completed"
                 assert (
                     state["model_name"]
-                    == "local_static_png_asset"
+                    == "local_editorial_title_card"
                 )
                 assert (
                     state["prompt_version"]
@@ -918,7 +913,7 @@ async def main() -> int:
                 )
                 assert (
                     state["image_model_name"]
-                    == "local_static_png_asset"
+                    == "local_editorial_title_card"
                 )
                 assert (
                     state["image_prompt_version"]
