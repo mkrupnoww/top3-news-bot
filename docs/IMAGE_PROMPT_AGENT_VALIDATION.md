@@ -99,3 +99,15 @@ gpt-image-2; bot и daily timer active. Исправлено: shell текуще
 SET ROLE и SQL из stdin выполняются в одной сессии; transaction ROLLBACK.
 Исправление готовится на cloud-002, публикуется в GitHub, rollout на cloud-001
 извлекается из fetched origin/main, без прямого копирования production-кода.
+
+Вторая попытка применила migration 019 от michael_psql и image-related .env
+settings, затем остановилась до обновления Git checkout: SSH PATH не включал
+/home/michael/.local/bin, где установлен uv 0.12.0. Независимо подтверждены
+migration 019, таблица и владелец; production HEAD остался 3309878, bot и daily
+timer active. Rollout и штатный deploy теперь находят пользовательский uv;
+rollout проверяет его до изменения БД/.env и запускает deploy из проверенного
+целевого Git commit. Повторный запуск пропускает уже применённую migration 019.
+На cloud-001 пройдены syntax checks обоих scripts, поиск uv в реальном SSH PATH
+и `uv sync --frozen --no-dev --dry-run --offline`: 32 packages, would make no
+changes. Production и целевой commit имеют одинаковые uv.lock/pyproject.toml;
+установленные systemd units совпадают с production source. Новых платных вызовов нет.

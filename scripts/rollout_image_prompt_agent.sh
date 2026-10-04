@@ -28,12 +28,28 @@ git fetch origin main
     printf 'origin/main не совпадает с проверенным commit; rollout остановлен.\n' >&2
     exit 1
 }
+git merge-base --is-ancestor HEAD "${EXPECTED_COMMIT}" || {
+    printf 'Production HEAD нельзя fast-forward до проверенного commit; rollout остановлен.\n' >&2
+    exit 1
+}
+
+# Non-interactive SSH обычно не добавляет ~/.local/bin в PATH.
+if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME}/.local/bin/uv" ]]; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
+command -v uv >/dev/null 2>&1 || {
+    printf 'uv недоступен; rollout остановлен до изменения БД и .env.\n' >&2
+    exit 1
+}
+uv --version
 
 umask 077
 BACKUP_DIR="$(mktemp -d /tmp/top3-image-agent-rollout.XXXXXX)"
 cp .env "${BACKUP_DIR}/production.env"
 sudo -u postgres pg_dump --schema-only --no-owner --schema=top3_news top3_news_db > "${BACKUP_DIR}/schema-before.sql"
 git show "${EXPECTED_COMMIT}:migrations/019_image_prompt_plans.sql" > "${BACKUP_DIR}/019.sql"
+git show "${EXPECTED_COMMIT}:scripts/deploy_server.sh" > "${BACKUP_DIR}/deploy_server.sh"
+bash -n "${BACKUP_DIR}/deploy_server.sh"
 
 APPLIED="$(sudo -u postgres psql -X -A -t -d top3_news_db -c "SELECT EXISTS (SELECT 1 FROM top3_news.schema_migrations WHERE version='019')")"
 if [[ "${APPLIED}" == f ]]; then
@@ -63,7 +79,8 @@ path.write_text(text)
 print('Image environment settings updated; ranking/generation preserved')
 PY
 
-bash scripts/deploy_server.sh
+# Запускаем deploy из целевого commit, даже если production checkout ещё старый.
+bash "${BACKUP_DIR}/deploy_server.sh"
 [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
 sudo -u postgres psql -X -d top3_news_db -c \
     "SELECT version, applied_at FROM top3_news.schema_migrations WHERE version='019'"
