@@ -35,7 +35,7 @@ clean tree, idle daily service, uv/dependencies и прежний PNG asset, д�
 приватный backup .env, обновляет три model settings, убирает настройки агента
 и запускает штатный deploy из целевого commit. Внешние .env/API/Telegram
 секреты не выводятся. Migration rollback и удаление production данных отсутствуют.
-На момент подготовки этого документа production rollout ещё не выполнен.
+До запуска rollout production оставался на 05ad8f5.
 
 ## Проверка на cloud-001
 
@@ -81,3 +81,21 @@ publication/review components с fake Telegram. Пройдены compileall и b
 `test-logs/` и `baseline-logs/` на cloud-001; после проверки тестовая PostgreSQL
 остановлена, snapshot и её данные удалены. Применённая production migration 019
 оставлена как история; rollback script не выполняет SQL миграций.
+
+## Production подтверждён
+
+2026-10-06 rollout **ac87f8af9b91b47063231920076995409667ab99** завершён.
+Независимая SSH/read-only проверка подтвердила clean tree и точное совпадение
+image generator/factory/pipeline и daily workflow с 3309878. Отличия приложения
+от baseline ограничены указанными выше config и двумя pricing registries.
+
+Runtime использует gpt-6.1-sol для ranking/text и gpt-image-2.5-flare для
+изображений, medium, 1024×1024; отдельного агента нет, прежний static fallback
+PNG доступен. Migration 019 и две исторические prompt plan записи сохранены.
+Приватная backup .env: `/tmp/top3-model-only-rollout.dKMW6c`.
+
+Bot перезапущен **2026-10-06 11:28:00 UTC**; PostgreSQL pool и Telegram polling
+стартовали успешно, Result=success, NRestarts=0. Bot и collector/cleanup/daily
+timers active. Daily oneshot inactive между выпусками; следующий автоматический
+выпуск — **2026-10-07 07:30 UTC**. Проверка не вызывала платные API и не запускала
+ручной выпуск. Первый scheduled выпуск после отката ещё предстоит.
