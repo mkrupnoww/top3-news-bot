@@ -17,7 +17,6 @@ from app.generation.image_generator import (
     ImageModelResponse,
     OpenAIImageUsage,
     OpenAIMovieNewsImageGenerator,
-    OPENAI_IMAGE_PROMPT_VERSION,
 )
 from app.generation.openai_image_pipeline import (
     run_reserved_openai_image_generation,
@@ -34,7 +33,7 @@ from scripts import (
 
 TEST_IMAGE_MODEL = "gpt-image-2"
 
-TEST_IMAGE_SIZE = "64x64"
+TEST_IMAGE_SIZE = "64x96"
 
 EXPECTED_USAGE_PAYLOAD = {
     "input_tokens": 120,
@@ -67,7 +66,7 @@ SYNTHETIC_API_ERROR = (
 def build_png_bytes(
     *,
     width: int = 64,
-    height: int = 64,
+    height: int = 96,
     value: int = 72,
 ) -> bytes:
     """Создаёт настоящий синтетический PNG."""
@@ -309,7 +308,7 @@ async def test_initial_success_and_duplicate(
         == client.image_bytes
     )
     assert artifact.width == 64
-    assert artifact.height == 64
+    assert artifact.height == 96
     assert artifact.already_stored is False
 
     state = await load_image_state(
@@ -339,7 +338,7 @@ async def test_initial_success_and_duplicate(
     )
     assert (
         state["image_prompt_version"]
-        == OPENAI_IMAGE_PROMPT_VERSION
+        == "movie_news_image_v1"
     )
     assert decode_json_object(
         state["openai_usage"],

@@ -238,8 +238,7 @@ def test_factory_arguments() -> None:
             build_news_item(1, 101),
             build_news_item(2, 102),
             build_news_item(3, 103),
-        ),
-        final_image_prompt="Короткий сохранённый image prompt.",
+        )
     )
 
     assert request.size == "1024x1024"

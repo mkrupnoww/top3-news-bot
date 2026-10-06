@@ -77,10 +77,6 @@ for unit_name in "${UNIT_NAMES[@]}"; do
         || fail "systemd unit file is missing: ${unit_source}"
 done
 
-# SSH без login shell может не включать пользовательскую установку uv в PATH.
-if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME}/.local/bin/uv" ]]; then
-    export PATH="${HOME}/.local/bin:${PATH}"
-fi
 command -v uv >/dev/null 2>&1 \
     || fail "uv command is not available"
 

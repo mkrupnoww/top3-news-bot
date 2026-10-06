@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,8 +36,6 @@ from app.generation.image_storage import (
     StoredImageArtifact,
     store_png_image,
 )
-from app.db.image_prompt_plans import prepare_saved_image_prompt
-from app.generation.moderation_diagnostics import extract_image_error_diagnostics
 
 
 ImageRequestKind = Literal[
@@ -384,7 +382,6 @@ def _build_response_metadata(
 
     payload: dict[str, Any] = {
         "created": response.created,
-        "request_id": response.request_id,
         "output_format": (
             response.output_format
         ),
@@ -513,9 +510,6 @@ async def _record_image_pipeline_failure(
         else:
             usage = None
 
-    response_metadata = dict(response_metadata or {})
-    response_metadata["openai_error"] = extract_image_error_diagnostics(error)
-
     try:
         await fail_reserved_image_generation(
             pool,
@@ -628,27 +622,12 @@ async def run_reserved_openai_image_generation(
         selection
     )
 
-    saved_prompt = None
-    metadata = generator.metadata
-    if getattr(generator, "prompt_agent", None) is not None:
-        saved_prompt = await prepare_saved_image_prompt(
-            pool, agent=generator.prompt_agent, batch_id=batch_id,
-            generated_post_id=generated_post_id, ranking_run_id=selection.ranking_run_id,
-            request_kind=normalized_request_kind, review_action_id=review_action_id,
-            editorial_comment=normalized_editorial_comment, issues=normalized_issues, items=items,
-        )
-        metadata = replace(metadata, prompt_version=saved_prompt.image_prompt_version)
-
-    prompt_kwargs = (
-        {"final_image_prompt": saved_prompt.plan.final_image_prompt} if saved_prompt else {}
-    )
     model_request = generator.build_request(
         items=items,
         editorial_comment=(
             normalized_editorial_comment
         ),
         issues=normalized_issues,
-        **prompt_kwargs,
     )
 
     request_key = (
@@ -663,7 +642,7 @@ async def run_reserved_openai_image_generation(
             review_action_id=(
                 review_action_id
             ),
-            metadata=metadata,
+            metadata=generator.metadata,
             model_request=model_request,
             items=items,
         )
@@ -689,10 +668,9 @@ async def run_reserved_openai_image_generation(
             normalized_editorial_comment
         ),
         issues=normalized_issues,
-        metadata=metadata,
+        metadata=generator.metadata,
         model_request=model_request,
         items=items,
-        image_prompt_id=saved_prompt.image_prompt_id if saved_prompt else None,
     )
 
     if reservation_observer is not None:
@@ -726,14 +704,13 @@ async def run_reserved_openai_image_generation(
     ) = None
 
     try:
-        if saved_prompt is not None:
-            generation = await generator.generate_request(model_request)
-        else:
-            generation = await generator.generate(
-                items=items,
-                editorial_comment=normalized_editorial_comment,
-                issues=normalized_issues,
-            )
+        generation = await generator.generate(
+            items=items,
+            editorial_comment=(
+                normalized_editorial_comment
+            ),
+            issues=normalized_issues,
+        )
 
         if (
             generation.model_request

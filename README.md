@@ -2,10 +2,6 @@
 
 TOP 3 NEWS — production-проект для автоматического поиска, анализа, отбора, подготовки и публикации трёх главных киноновостей дня в Telegram.
 
-Новый image pipeline описан в [Image Prompt Agent v1](docs/IMAGE_PROMPT_AGENT.md):
-финальный TOP-3 → `gpt-6.1-sol` → сохранённый короткий промпт →
-`gpt-image-2.5-flare`, medium. Все тесты проекта выполняются на `cloud-001`.
-
 Система строится как ежедневный restart-safe pipeline:
 
 ```text
@@ -310,12 +306,6 @@ Target:              850–950 символов
 ---
 
 # Каскад восстановления после image moderation
-
-**Историческое описание.** Разделы о semantic fallback, image-driven TOP-3
-replacement и планируемом hard fallback ниже отражают прежние этапы развития.
-Актуальная реализация и state machine описаны в [Image Prompt Agent v1](docs/IMAGE_PROMPT_AGENT.md).
-Moderation сейчас не меняет TOP-3: после NORMAL и двух recovery attempts
-используется локальная карточка трёх выбранных заголовков без платного API.
 
 Одна из ключевых частей проекта — **production recovery при отказе Image API по `moderation_blocked`**.
 

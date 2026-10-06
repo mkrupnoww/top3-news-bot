@@ -1,8 +1,10 @@
 import inspect
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import AsyncIterator, Callable
 
 import asyncpg
@@ -59,14 +61,23 @@ from app.generation.openai_factory import (
     create_openai_generation_runtime,
 )
 from app.generation.image_generator import (
-    IMAGE_PROMPT_RECOVERY_VERSION as OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
-    IMAGE_PROMPT_NORMAL_VERSION as OPENAI_IMAGE_PROMPT_VERSION,
+    DEFAULT_IMAGE_BACKGROUND,
+    DEFAULT_IMAGE_COUNT,
+    DEFAULT_IMAGE_MODERATION,
+    DEFAULT_IMAGE_OUTPUT_FORMAT,
+    OPENAI_IMAGE_FALLBACK_PROMPT_VERSION,
+    OPENAI_IMAGE_PROMPT_VERSION,
+    OPENAI_IMAGE_VERSATILE_PROMPT_VERSION,
+    ImageGenerationNewsItem,
+    ImageModelRequest,
+    ImageModelResponse,
+    OpenAIImageGenerationResult,
+    OpenAIImageGeneratorMetadata,
 )
 from app.generation.openai_image_factory import (
     OpenAIImageGenerationRuntime,
     create_openai_image_generation_runtime,
 )
-from app.generation.editorial_image_fallback import LocalEditorialImageGenerator
 from app.generation.openai_image_pipeline import (
     run_reserved_openai_image_generation,
 )
@@ -116,10 +127,113 @@ _DAILY_WORKFLOW_LOCK_BASE = (
 
 MAX_TOP3_REPLACEMENTS = 3
 
+VERSATILE_OPTION_IMAGE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data/images/versatile_option/versatile_option.png"
+)
 
-def _create_versatile_option_generator(*, post_text: str | None = None) -> LocalEditorialImageGenerator:
-    """Финальный бесплатный fallback сохраняет конкретные три новости."""
-    return LocalEditorialImageGenerator(post_text=post_text)
+
+class _StaticPNGImageGenerator:
+    """Локальный генератор, завершающий pipeline готовым PNG-файлом."""
+
+    def __init__(
+        self,
+        *,
+        image_path: str | Path,
+        prompt_version: str,
+        prompt: str,
+        model_name: str = "local_static_png_asset",
+        size: str = "1024x1024",
+        quality: str = "medium",
+    ) -> None:
+        self._image_path = Path(image_path)
+        self._prompt_version = prompt_version
+        self._prompt = prompt.strip()
+        self._model_name = model_name
+        self._size = size
+        self._quality = quality
+
+    @property
+    def metadata(self) -> OpenAIImageGeneratorMetadata:
+        return OpenAIImageGeneratorMetadata(
+            generator_name=(
+                "local_static_png_image_generator"
+            ),
+            generator_version=(
+                "local_static_png_image_generator_v1"
+            ),
+            prompt_version=self._prompt_version,
+            model_name=self._model_name,
+        )
+
+    def build_request(
+        self,
+        *,
+        items: tuple[ImageGenerationNewsItem, ...],
+        editorial_comment: str | None = None,
+        issues: tuple[str, ...] = (),
+    ) -> ImageModelRequest:
+        return ImageModelRequest(
+            model=self._model_name,
+            prompt=self._prompt,
+            size=self._size,
+            quality=self._quality,
+            output_format=DEFAULT_IMAGE_OUTPUT_FORMAT,
+            background=DEFAULT_IMAGE_BACKGROUND,
+            moderation=DEFAULT_IMAGE_MODERATION,
+            n=DEFAULT_IMAGE_COUNT,
+        )
+
+    async def generate(
+        self,
+        *,
+        items: tuple[ImageGenerationNewsItem, ...],
+        editorial_comment: str | None = None,
+        issues: tuple[str, ...] = (),
+    ) -> OpenAIImageGenerationResult:
+        model_request = self.build_request(
+            items=items,
+            editorial_comment=editorial_comment,
+            issues=issues,
+        )
+
+        image_bytes = self._image_path.read_bytes()
+
+        model_response = ImageModelResponse(
+            image_bytes=image_bytes,
+            created=int(time.time()),
+            output_format=DEFAULT_IMAGE_OUTPUT_FORMAT,
+            quality=self._quality,
+            size=self._size,
+            background=DEFAULT_IMAGE_BACKGROUND,
+            usage=None,
+            revised_prompt=self._prompt,
+        )
+
+        return OpenAIImageGenerationResult(
+            model_request=model_request,
+            model_response=model_response,
+        )
+
+
+def _build_versatile_option_prompt() -> str:
+    return (
+        "Используй заранее подготовленную универсальную резервную PNG-иллюстрацию "
+        "для ежедневного TOP-3 киноновостей. Это финальный локальный fallback, "
+        "который применяется только после исчерпания normal image и moderation-safe "
+        "fallback попыток. Не вызывай внешнюю модель. Сохрани файл как итоговую "
+        "картинку выпуска без дополнительных изменений."
+    )
+
+
+def _create_versatile_option_generator() -> _StaticPNGImageGenerator:
+    return _StaticPNGImageGenerator(
+        image_path=VERSATILE_OPTION_IMAGE_PATH,
+        prompt_version=(
+            OPENAI_IMAGE_VERSATILE_PROMPT_VERSION
+        ),
+        prompt=_build_versatile_option_prompt(),
+    )
 
 
 class DailyProductionWorkflowError(RuntimeError):
@@ -1001,7 +1115,7 @@ async def run_daily_production_workflow(
       prompt_version/request key и текущий retry budget;
     - после двух definitive moderation-blocked fallback attempts
       TOP-3 больше не меняется из-за картинки;
-    - workflow рисует локальную карточку трёх выбранных заголовков как
+    - workflow использует локальный versatile_option.png как
       финальный резерв без дополнительного OpenAI Image API call.
 
     Replacement TOP-3 остаётся только для независимых
@@ -1804,19 +1918,24 @@ async def run_daily_production_workflow(
                     return result_image_id
 
                 async def run_versatile_option_image_once() -> int:
-                    """Завершает image stage локальной содержательной PNG-карточкой."""
+                    """Завершает image stage локальной универсальной PNG-картинкой."""
 
-                    async with pool.acquire() as connection:
-                        final_post_text = await connection.fetchval(
-                            "SELECT post_text FROM top3_news.generated_posts WHERE generated_post_id=$1", generated_post_id
+                    versatile_path = VERSATILE_OPTION_IMAGE_PATH
+
+                    if not versatile_path.is_file():
+                        raise DailyProductionWorkflowError(
+                            "Не найден файл универсального image fallback: "
+                            f"{versatile_path}"
                         )
+
                     local_generator = (
-                        _create_versatile_option_generator(post_text=final_post_text)
+                        _create_versatile_option_generator()
                     )
 
                     _report_progress(
                         progress,
-                        "[image] moderation exhausted; render local editorial TOP-3 title card",
+                        "[image] moderation exhausted; use local versatile option "
+                        f"path={versatile_path}",
                     )
 
                     async def image_observer(
@@ -2166,7 +2285,7 @@ async def run_daily_production_workflow(
                     _report_progress(
                         progress,
                         "[image] moderation fallback exhausted; "
-                        "switch to local editorial TOP-3 card "
+                        "switch to local versatile option "
                         f"combination_id={combination_id}; "
                         f"failed_image_generation_id={failed_image_generation_id}",
                     )
