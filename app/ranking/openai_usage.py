@@ -198,10 +198,21 @@ GPT_6_SOL_PRICING = OpenAIModelPricing(
 )
 
 
+GPT_6_1_SOL_PRICING = OpenAIModelPricing(
+    model_name="gpt-6.1-sol",
+    input_usd_per_million=Decimal("2.00"),
+    cached_input_usd_per_million=Decimal("0.10"),
+    output_usd_per_million=Decimal("10.00"),
+    cache_write_multiplier=Decimal("1.25"),
+    pricing_version="2026-10-06",
+)
+
+
 MODEL_PRICING: dict[
     str,
     OpenAIModelPricing,
 ] = {
+    GPT_6_1_SOL_PRICING.model_name: GPT_6_1_SOL_PRICING,
     GPT_5_6_TERRA_PRICING.model_name: (
         GPT_5_6_TERRA_PRICING
     ),

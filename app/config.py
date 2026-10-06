@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     )
 
     openai_ranking_model: str = Field(
-        default="gpt-6-sol",
+        default="gpt-6.1-sol",
         min_length=1,
         max_length=128,
         validation_alias=(
@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     )
 
     openai_generation_model: str = Field(
-        default="gpt-6-sol",
+        default="gpt-6.1-sol",
         min_length=1,
         max_length=128,
         validation_alias=(
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     )
 
     openai_image_model: str = Field(
-        default="gpt-image-2",
+        default="gpt-image-2.5-flare",
         min_length=1,
         max_length=128,
         validation_alias=(
