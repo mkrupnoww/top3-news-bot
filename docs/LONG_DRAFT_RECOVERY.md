@@ -38,3 +38,43 @@ allowance; следующий запрос запрещается, если allo
 Пройдены regression long draft/overflow, existing integrity repair/post generator/
 generation client/factory/request-key/completion/revision completion и manual
 retry history/budget. Production запуск ещё не выполнен на этапе подготовки.
+
+## Результат ручного запуска
+
+2026-10-07 manual retry выполнен на cloud-001 без запуска таймера. Ranking 235,
+combination 54034, news IDs 6319/6387/6320 и исходный cutoff сохранены.
+Новый batch 147 / post 148 успешно прошёл text generation/self-review; итог —
+890 символов. Исходный failed batch 146 остаётся в истории.
+
+Первый Image API запрос отклонён output moderation (категория `other`,
+request ID `req_5a14e8fc29f24617a032d2d799f78886`). Ответ не содержит usage.
+Image 147 сохранён как failed. Перед следующим Image API вызовом бюджетный
+guard остановил retry: 0.652107 USD уже учтено/зарезервировано, следующий
+allowance 0.499025 USD превышал оставшийся бюджет. Image 148 failed;
+для этой записи API не вызывался.
+
+Отдельный `complete_budget_retry_with_local_image.py` завершил image stage
+существующим локальным PNG fallback, без OpenAI client и платных запросов.
+Скрипт проверяет identity/state, наличие PNG и отсутствие delivery attempts,
+сохраняет аудит до UPDATE, использует workflow lock и штатные image completion /
+Telegram delivery routines. Его read-only preflight и syntax check выполнены
+на cloud-001 до запуска.
+
+Image 149 completed (`local_static_png_asset`, `movie_news_image_versatile_option_v2`).
+Telegram review delivery 63 имеет status sent / message 446; workflow 82 и
+post 148 — awaiting_review. Это отправка редактору на проверку; публикация
+в канале остаётся штатным следующим действием редактора.
+
+Ledger `/tmp/top3-text-retry-20261007/cost-ledger.json`: два Responses вызова,
+usage estimate 0.012886 + 0.046896 = **0.059782 USD**; один Image API запрос
+без usage, его conservative allowance **0.592325 USD** сохранён. Всего
+учтено/зарезервировано **0.652107 USD**, лимит 1 USD не исчерпан. Эта сумма
+не является подтверждённым billing charge. Дополнительных платных запросов
+при локальном завершении — 0. Аудит бесплатного завершения находится в
+`/tmp/top3-text-local-completion-20261007`.
+
+Bot service и daily timer active; следующий запуск — 2026-10-08 07:30 UTC.
+Свежий daily процесс и ручной запуск загружают generator v9. Долго работающий
+bot process ещё не перезапущен: `sudo -n systemctl restart top3-news-bot.service`
+вернул `sudo: a password is required`. Для загрузки v9 в ручные bot handlers
+нужен обычный интерактивный restart; это не мешает следующему daily oneshot.
