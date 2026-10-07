@@ -33,7 +33,7 @@ from app.generation.post_contract import (
 )
 
 OPENAI_POST_GENERATOR_VERSION = (
-    "openai_telegram_post_generator_v8"
+    "openai_telegram_post_generator_v9"
 )
 
 OPENAI_POST_PROMPT_VERSION = (
@@ -1256,6 +1256,33 @@ def _parse_response(
             )
         )
     except ValidationError as error:
+        errors = error.errors()
+        if errors and all(
+            item["loc"] == ("post_text",)
+            and item["type"] == "string_too_long"
+            for item in errors
+        ):
+            # post_text — черновик; финальный текст всегда собирается из items.
+            # Не обрезаем строку модели и не ослабляем публичный контракт:
+            # повторно валидируем структуру, затем используем прежний compactor.
+            draft = json.loads(normalized_response)
+            draft["post_text"] = "Черновик для канонической сборки."
+            payload = OpenAIGeneratedPostPayload.model_validate(draft)
+            try:
+                canonical_text = build_top3_post_text(payload.items)
+                return OpenAIGeneratedPostPayload(
+                    post_text=canonical_text, items=payload.items
+                )
+            except PostTextLengthOverflowError:
+                # Локальный import избегает цикла post_integrity -> generator.
+                from app.generation.post_integrity import (
+                    build_deterministic_integrity_fallback,
+                )
+
+                compacted = build_deterministic_integrity_fallback(payload)
+                return OpenAIGeneratedPostPayload.model_validate(
+                    compacted.model_dump()
+                )
         raise ValueError(
             "Ответ модели не соответствует "
             "схеме Telegram-поста."
