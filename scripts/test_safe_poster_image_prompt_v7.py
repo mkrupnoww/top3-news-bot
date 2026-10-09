@@ -8,9 +8,9 @@ from app.generation.image_generator import (
 )
 
 
-EXPECTED_NORMAL_PROMPT_VERSION = "movie_news_image_v6"
+EXPECTED_NORMAL_PROMPT_VERSION = "movie_news_image_v7"
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v8"
+    "movie_news_image_moderation_fallback_v9"
 )
 
 
