@@ -1,9 +1,11 @@
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
 import asyncpg
+import json
+from app.ranking.background_snapshot import encode_snapshot, decode_snapshot
 
 from app.db.event_ranking_run_completion import (
     EventRankingRunCompletionResult,
@@ -393,6 +395,7 @@ async def run_reserved_openai_event_ranking(
         RankingReservationObserver
         | None
     ) = None,
+    resume_ranking_run_id: int | None = None,
 ) -> ReservedOpenAIEventRankingResult:
     """
     Выполняет защищённое полное ранжирование v2.
@@ -415,33 +418,21 @@ async def run_reserved_openai_event_ranking(
     SDK-клиента управляет вызывающий код.
     """
 
-    candidate_selection = (
-        await select_news_candidates(
-            pool,
-            as_of=as_of,
-            window_hours=window_hours,
-            limit=limit,
-            source_codes=source_codes,
-        )
-    )
-
-    relevance_filter_result = (
-        filter_cinema_relevance(
-            candidate_selection
-        )
-    )
-
-    candidate_selection = (
-        relevance_filter_result.selection
-    )
-
-    _validate_candidate_selection(
-        candidate_selection
-    )
-
-    model_request = evaluator.build_request(
-        candidate_selection
-    )
+    if resume_ranking_run_id is not None:
+        async with pool.acquire() as connection:
+            parameters = await connection.fetchval('SELECT parameters FROM top3_news.ranking_runs WHERE ranking_run_id=$1',resume_ranking_run_id)
+        params = json.loads(parameters)
+        candidate_selection, model_request, audience_metrics = decode_snapshot(params['background_snapshot'])
+        if candidate_selection.window_end != as_of:
+            raise ValueError('Background snapshot cutoff differs from requested workflow')
+        evaluator.resume_saved_response_only()
+    else:
+        candidate_selection = await select_news_candidates(pool,as_of=as_of,
+            window_hours=window_hours,limit=limit,source_codes=source_codes)
+        relevance_filter_result = filter_cinema_relevance(candidate_selection)
+        candidate_selection = relevance_filter_result.selection
+        model_request = evaluator.build_request(candidate_selection)
+    _validate_candidate_selection(candidate_selection)
 
     news_ids = tuple(
         candidate.news_id
@@ -484,6 +475,22 @@ async def run_reserved_openai_event_ranking(
         ),
         news_ids=news_ids,
     )
+
+    if resume_ranking_run_id is not None:
+        if reservation.ranking_run_id != resume_ranking_run_id or reservation.run_status not in ('running','failed'):
+            raise ValueError('Background recovery changed ranking identity/status')
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute("""UPDATE top3_news.ranking_runs SET run_status='running',
+                finished_at=NULL,error_message=NULL,parameters=jsonb_set(parameters,'{background_recoveries}',
+                COALESCE(parameters->'background_recoveries','[]'::jsonb) || jsonb_build_array(
+                jsonb_build_object('at',now(),'failure',parameters->'failure')))
+                WHERE ranking_run_id=$1""",resume_ranking_run_id)
+        reservation = replace(reservation,created_new=True,run_status='running')
+    elif reservation.should_call_model:
+        snapshot = encode_snapshot(candidate_selection, model_request, audience_metrics)
+        async with pool.acquire() as connection:
+            await connection.execute("UPDATE top3_news.ranking_runs SET parameters=jsonb_set(parameters,'{background_snapshot}',$2::jsonb) WHERE ranking_run_id=$1",
+                                     reservation.ranking_run_id,snapshot)
 
     if reservation_observer is not None:
         await reservation_observer(

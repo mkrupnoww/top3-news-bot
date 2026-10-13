@@ -53,6 +53,17 @@ async def main():
         await BackgroundRankingResponses(resource,interrupted_dir,poll_seconds=0).create(model='fake')
         assert resource.posts == 1  # После restart читается тот же response ID.
 
+        resource = Resource()
+        runner = BackgroundRankingResponses(resource,Path(root)/'resume_missing',poll_seconds=0)
+        runner.require_existing_first = True
+        try:
+            await runner.create(model='fake')
+        except BackgroundRankingError:
+            pass
+        else:
+            raise AssertionError('Recovery dispatched fresh POST')
+        assert resource.posts == resource.reads == 0
+
         resource = Resource(lost_post=True)
         runner = BackgroundRankingResponses(resource,Path(root)/'unknown',poll_seconds=0)
         try:

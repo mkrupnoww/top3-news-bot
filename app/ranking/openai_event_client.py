@@ -247,6 +247,13 @@ class OpenAIResponsesEventRankingClient(
 
         self._client = client
 
+    def resume_saved_response_only(self) -> None:
+        from app.ranking.background_response import BackgroundRankingResponses
+        resource = self._client.responses
+        if not isinstance(resource, BackgroundRankingResponses):
+            raise TypeError('Recovery requires checkpointed background transport')
+        resource.require_existing_first = True
+
     async def create_response(
         self,
         request: EventRankingModelRequest,

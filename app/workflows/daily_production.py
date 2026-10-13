@@ -32,6 +32,7 @@ from app.db.daily_workflow import (
 from app.db.daily_workflow_trailer_replacement import (
     replace_daily_workflow_after_trailer_unverified,
 )
+from app.db.daily_background_ranking_recovery import reopen_background_ranking_workflow
 from app.db.daily_workflow_selection_attempts import (
     DailyWorkflowSelectionAttempt,
     ensure_initial_daily_workflow_selection,
@@ -1186,6 +1187,12 @@ async def run_daily_production_workflow(
         image_use_moderation_safe_fallback = False
         image_fallback_attempts_used = 0
 
+        background_resume_id = await reopen_background_ranking_workflow(
+            pool, daily_workflow_run_id=workflow.daily_workflow_run_id)
+        if background_resume_id is not None:
+            workflow = await load_daily_workflow(pool,daily_workflow_run_id=workflow.daily_workflow_run_id)
+            _report_progress(progress,f'[ranking] resume saved background ranking_run_id={background_resume_id}')
+
         if workflow.failed:
             try:
                 workflow = (
@@ -1301,7 +1308,7 @@ async def run_daily_production_workflow(
                         ),
                     )
 
-            if ranking_run_id is None:
+            if ranking_run_id is None or background_resume_id is not None:
 
                 async def ranking_observer(
                     reservation,
@@ -1334,6 +1341,8 @@ async def run_daily_production_workflow(
                         reservation_observer=(
                             ranking_observer
                         ),
+                        **({'resume_ranking_run_id':background_resume_id}
+                           if background_resume_id is not None else {}),
                     )
                 )
 

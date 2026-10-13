@@ -57,6 +57,13 @@ async def async_main() -> int:
     )
 
     try:
+        # Recovery timers сохраняют исходное окно и identity уже созданного выпуска.
+        async with pool.acquire() as connection:
+            saved_as_of = await connection.fetchval(
+                'SELECT as_of FROM top3_news.daily_workflow_runs WHERE publication_date=$1',publication_date)
+        if saved_as_of is not None:
+            as_of = saved_as_of
+            _progress(f'Reusing saved workflow as_of={as_of.isoformat()}')
         result = (
             await run_daily_production_workflow(
                 pool,

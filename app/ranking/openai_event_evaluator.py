@@ -1668,6 +1668,9 @@ class OpenAIEventRankingEvaluator:
 
         return self._metadata
 
+    def resume_saved_response_only(self) -> None:
+        self._client.resume_saved_response_only()
+
     def build_request(
         self,
         selection: CandidateSelectionResult,

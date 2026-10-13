@@ -26,6 +26,7 @@ class BackgroundRankingResponses:
     def __init__(self, resource, directory: Path, *, poll_seconds=10, deadline_seconds=1800):
         self.resource, self.directory = resource, directory
         self.poll_seconds, self.deadline_seconds = poll_seconds, deadline_seconds
+        self.require_existing_first = False
 
     async def create(self, **kwargs):
         key = sha256(json.dumps(kwargs, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -45,6 +46,10 @@ class BackgroundRankingResponses:
             except BlockingIOError as error:
                 raise BackgroundRankingError('Background ranking already has an active reader') from error
             state = json.loads(path.read_text()) if path.exists() else None
+            if self.require_existing_first:
+                if not state or not state.get('response_id'):
+                    raise BackgroundRankingError('Recovery requires saved response ID; new POST forbidden')
+                self.require_existing_first = False
             if state and state.get('completed'):
                 return _namespace(state['completed'])
             if state and not state.get('response_id'):
