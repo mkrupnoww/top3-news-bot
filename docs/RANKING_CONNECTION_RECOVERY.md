@@ -36,3 +36,49 @@ cancelled не принимаются за успешное ранжирован
 Manual ranking output limit 30000 tokens, text 5000, reasoning low,
 search max_tool_calls=1; queued response allowance освобождается только после
 получения completed usage. Unknown errors сохраняют резерв.
+
+## Автоматическое продолжение того же ranking run
+
+До вызова модели в ranking_runs.parameters сохраняется background_snapshot:
+полный состав кандидатов, даты/веса/метрики и точный EventRankingModelRequest.
+После interrupted GET или остановки процесса daily workflow может вернуть
+незавершённый background ranking в running и продолжить тот же ranking ID/key.
+Кандидаты заново не выбираются. Первый POST при recovery запрещён: обязателен
+checkpoint с response ID. Неизвестный исход POST остаётся blocked, новый запрос
+не создаётся. История ошибок сохраняется в background_recoveries.
+Последующие ещё не начатые проверки/исправления результата следуют обычному
+evaluator; completed ответы читаются из cache. Завершённый daily workflow
+возвращается до создания SDK runtimes и Telegram Bot.
+
+Scheduled runner использует saved as_of при повторном входе в тот же день.
+Предложение дополнительных recovery timers описано отдельно в
+DAILY_RECOVERY_TIMER_PROPOSAL.md; production timer не изменён, поскольку
+автоматическая проверка разрешений потребовала отдельного согласия.
+
+## Проверенный результат 2026-10-13
+
+Повторный ranking 242 completed (основное ранжирование + global story-cluster
+verification); TOP-3 combination 75007, news IDs 7072/7079/7068.
+Post 154 / batch 153 содержит 849 символов и прошёл self-review / repair.
+Первый Image API запрос отклонён moderation; image 155 failed. Запрос не вернул
+usage, поэтому conservative allowance 0.592645 USD сохранён. Следующая попытка
+image 156 остановлена бюджетом ДО API: accounted 0.92787150 USD + allowance
+0.499090 USD не помещались в разрешённый $1.
+
+Штатный local PNG fallback завершил image 157 без дополнительного OpenAI call.
+Workflow 89 и post 154 — awaiting_review. Review delivery 69: sent, message 464.
+Это доставка редактору на проверку, не обход обычного approval/publication flow.
+Исходный ranking 241 остаётся failed. Дата и cutoff 07:30:05 UTC сохранены.
+
+Ledger /tmp/top3-ranking-retry-20261013/cost-ledger.json: пять completed Responses
+вызовов (ranking, verifier, text, self-review, repair) с суммарной оценкой
+**0.33522650 USD**, один moderation-rejected Image request с неизвестным usage
+и резервом **0.592645 USD**. Итого учтено/зарезервировано **0.92787150 USD**.
+Это не billing invoice; стоимость утреннего оборванного автоматического запроса
+неизвестна и не объявляется нулевой.
+
+На cloud-001 прошли 8 offline scripts, бюджетная queued/GET проверка и 2 теста
+изолированной PostgreSQL 55432: manual recovery history/duplicate blocking и
+полное восстановление background ranking с тем же ID/key/frozen request до
+completion. Compileall и systemd unit verification прошли. Production данные
+тестами БД не менялись; PostgreSQL 55432 остановлен, snapshot/pgdata удалены.
