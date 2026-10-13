@@ -509,7 +509,7 @@ def test_build_request() -> None:
     ] == [3, 2, 1]
 
     assert EVENT_EVALUATOR_VERSION == (
-        "event_ranking_evaluator_v8"
+        "event_ranking_evaluator_v9"
     )
     assert EVENT_PROMPT_VERSION == (
         "movie_news_event_ranking_prompt_v6"

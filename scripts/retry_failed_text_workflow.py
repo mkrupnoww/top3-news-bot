@@ -53,11 +53,12 @@ class RetryBudget:
 
 
 class BudgetClient:
-    def __init__(self, budget, *, deny_ranking=False, **kwargs):
-        self.budget, self.deny_ranking = budget, deny_ranking
+    def __init__(self, budget, *, deny_ranking=False, ranking=False, **kwargs):
+        self.budget, self.deny_ranking, self.ranking = budget, deny_ranking, ranking
         kwargs['max_retries'] = 0
         self.raw = AsyncOpenAI(**kwargs)
-        self.responses = SimpleNamespace(create=self.create_response)
+        self.responses = SimpleNamespace(create=self.create_response, retrieve=self.retrieve_response)
+        self.pending = {}
         self.images = SimpleNamespace(generate=self.create_image)
 
     async def close(self):
@@ -68,28 +69,45 @@ class BudgetClient:
             raise RuntimeError('Paid ranking replay is forbidden; reuse saved ranking')
         if kwargs['model'] != 'gpt-6.1-sol':
             raise ValueError('Unexpected retry text model')
-        kwargs.update(max_output_tokens=5000, reasoning={'effort': 'low'}, max_tool_calls=1)
+        output_limit = 30000 if self.ranking else 5000
+        kwargs.update(max_output_tokens=output_limit, reasoning={'effort': 'low'}, max_tool_calls=1)
         size = len(json.dumps(kwargs, ensure_ascii=False).encode('utf-8')) + 1024
         # Worst input/cache-write rate; bounded output includes reasoning.
-        allowance = Decimal(size) * Decimal('0.0000025') + Decimal('0.05')
+        allowance = Decimal(size) * Decimal('0.0000025') + Decimal(output_limit) * Decimal('0.00001')
         if kwargs.get('tools'):
             # One hosted search, conservative 128K search context + tool fee.
             allowance += Decimal('0.34')
         call = self.budget.reserve('responses', allowance)
         try:
             response = await self.raw.responses.create(**kwargs)
-            usage = extract_response_usage(response)
-            cost = calculate_openai_cost(usage, get_model_pricing(kwargs['model'])).total_cost_usd
-            searches = sum(getattr(item, 'type', None) == 'web_search_call' for item in response.output)
-            cost += Decimal(searches) * Decimal('0.01')
-            self.budget.complete(call, cost, response, asdict(usage))
-            (self.budget.directory/f"response-{len(self.budget.calls)}.json").write_text(response.output_text)
+            if kwargs.get('background') and response.status in ('queued', 'in_progress'):
+                call['response_id'] = response.id
+                self.pending[response.id] = (call, kwargs['model'])
+                self.budget.save()
+            else:
+                self.complete_response(call, kwargs['model'], response)
             return response
         except Exception as error:
             if call['status'] == 'reserved':
                 call.update(status='uncertain', error_type=type(error).__name__)
                 self.budget.save()
             raise
+
+    def complete_response(self, call, model, response):
+        usage = extract_response_usage(response)
+        cost = calculate_openai_cost(usage, get_model_pricing(model)).total_cost_usd
+        searches = sum(getattr(item, 'type', None) == 'web_search_call' for item in response.output)
+        cost += Decimal(searches) * Decimal('0.01')
+        self.budget.complete(call, cost, response, asdict(usage))
+        index = next(i for i, entry in enumerate(self.budget.calls, 1) if entry is call)
+        (self.budget.directory/f'response-{index}.json').write_text(response.output_text)
+
+    async def retrieve_response(self, response_id, **kwargs):
+        response = await self.raw.responses.retrieve(response_id, **kwargs)
+        if response.status == 'completed' and response_id in self.pending:
+            call, model = self.pending.pop(response_id)
+            self.complete_response(call, model, response)
+        return response
 
     async def create_image(self, **kwargs):
         if (kwargs['model'], kwargs['size'], kwargs['quality'], kwargs['n']) != (

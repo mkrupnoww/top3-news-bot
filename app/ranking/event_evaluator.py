@@ -13,7 +13,7 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v8"
+    "event_ranking_evaluator_v9"
 )
 
 EVENT_PROMPT_VERSION = (

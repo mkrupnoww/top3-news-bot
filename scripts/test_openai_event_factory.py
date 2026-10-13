@@ -138,7 +138,7 @@ def test_factory_arguments() -> None:
         == 17.5
     )
     assert call["timeout"] == 17.5
-    assert call["max_retries"] == 1
+    assert call["max_retries"] == 0
 
     assert runtime.sdk_client is (
         factory.client

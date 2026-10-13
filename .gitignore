@@ -21,6 +21,7 @@ logs/*
 # Generated images and temporary data
 data/images/*
 !data/images/.gitkeep
+data/openai_event_responses/
 
 # Tests and linters
 .pytest_cache/

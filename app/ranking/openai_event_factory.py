@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 
 from openai import AsyncOpenAI
 
@@ -6,6 +8,7 @@ from app.config import Settings
 from app.ranking.openai_event_client import (
     OpenAIResponsesEventRankingClient,
 )
+from app.ranking.background_response import BackgroundRankingResponses
 from app.ranking.openai_event_evaluator import (
     OpenAIEventRankingEvaluator,
 )
@@ -53,14 +56,13 @@ def create_openai_event_ranking_runtime(
             settings
             .openai_ranking_timeout_seconds
         ),
-        max_retries=(
-            settings.openai_max_retries
-        ),
+        max_retries=0,
     )
 
     responses_client = (
         OpenAIResponsesEventRankingClient(
-            client=sdk_client
+            client=SimpleNamespace(responses=BackgroundRankingResponses(
+                sdk_client.responses, Path('data/openai_event_responses')))
         )
     )
 
