@@ -42,6 +42,7 @@ async def main():
         async with pool.acquire() as c:
             w = await c.fetchrow('SELECT * FROM top3_news.daily_workflow_runs WHERE daily_workflow_run_id=89')
         original_selection = await original_select(pool,as_of=w['as_of'],limit=500)
+        original_selection = pipeline.filter_cinema_relevance(original_selection).selection
         selection = replace(original_selection,candidates=original_selection.candidates[:3])
         assert len(selection.candidates)==3
         async def fixed_selection(*args,**kwargs): return selection
