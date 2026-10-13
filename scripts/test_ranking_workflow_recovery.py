@@ -22,7 +22,8 @@ async def main(fixture_file):
         async with pool.acquire() as c:
             await c.execute("""UPDATE top3_news.daily_workflow_runs SET workflow_status='failed',
                 current_stage='failed',ranking_run_id=$2,batch_id=NULL,generated_post_id=NULL,
-                image_generation_id=NULL,error_type='APIConnectionError',error_message='Connection error.'
+                image_generation_id=NULL,error_type='APIConnectionError',error_message='Connection error.',
+                finished_at=now()
                 WHERE daily_workflow_run_id=$1""",workflow_id,ranking_id)
             before = dict(await c.fetchrow('SELECT * FROM top3_news.daily_workflow_runs WHERE daily_workflow_run_id=$1',workflow_id))
             ranking_before = dict(await c.fetchrow('SELECT * FROM top3_news.ranking_runs WHERE ranking_run_id=$1',ranking_id))
