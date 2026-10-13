@@ -68,6 +68,8 @@ image 156 остановлена бюджетом ДО API: accounted 0.92787150
 Штатный local PNG fallback завершил image 157 без дополнительного OpenAI call.
 Workflow 89 и post 154 — awaiting_review. Review delivery 69: sent, message 464.
 Это доставка редактору на проверку, не обход обычного approval/publication flow.
+После подтверждения редактором в 08:53:10 UTC post 154 имеет status published:
+publication attempt 72, channel message 3605. Проверено по БД и журналу бота.
 Исходный ranking 241 остаётся failed. Дата и cutoff 07:30:05 UTC сохранены.
 
 Ledger /tmp/top3-ranking-retry-20261013/cost-ledger.json: пять completed Responses
@@ -82,3 +84,6 @@ Ledger /tmp/top3-ranking-retry-20261013/cost-ledger.json: пять completed Res
 полное восстановление background ranking с тем же ID/key/frozen request до
 completion. Compileall и systemd unit verification прошли. Production данные
 тестами БД не менялись; PostgreSQL 55432 остановлен, snapshot/pgdata удалены.
+Отдельно на production проверен повторный вход scheduled runner в завершённый
+workflow с запрещёнными SDK factories и Telegram Bot: завершился без API
+runtime, новой доставки и повторной публикации, сохранив исходный cutoff.
