@@ -29,5 +29,18 @@ primary prompt v8, revision prompt v6. Новый request key отделяет �
 от прошлых попыток. Прежняя защита незавершённого длинного текста сохранена
 независимо от нового целевого объёма. Расписание и модели не меняются.
 
-Проверки выполняются на cloud-001 из GitHub snapshot, без платных вызовов
-и без Telegram отправки. Реальную стилистику оцениваем на следующем выпуске.
+Проверки выполнены на cloud-001 из GitHub snapshot, без платных вызовов
+и без Telegram отправки: 9 offline scripts (inline paragraphs, generator,
+integrity repair, long draft, generation client/factory, Telegram markup,
+image prompt, background ranking) и 2 интеграционных проверки на отдельной
+UTF-8 PostgreSQL 55432. Тестовый канонический выпуск имеет длину 942 символа;
+проверены отсутствие дубля ключевой фразы, HTML bold, generation/self-review/
+revision, trailer compaction, legacy items и строгий максимум 1000.
+Через production completion SQL сохранены full body длиннее старых 210 символов;
+отдельно проверены SQL completion редакторских ревизий. Compileall прошёл.
+Тестовая БД остановлена, snapshot и pgdata удалены. Production данные не менялись.
+Реальную стилистику оцениваем на следующем плановом выпуске.
+
+Git checkout на cloud-001 обновляется через GitHub; обычный интерактивный deploy
+нужен для загрузки generator v10 в постоянно работающий bot process. Свежий
+scheduled daily процесс читает обновлённый код при следующем запуске.
