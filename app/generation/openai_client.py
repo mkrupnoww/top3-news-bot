@@ -55,11 +55,13 @@ OPENAI_GENERATION_RESPONSE_SCHEMA: dict[
                     },
                     "headline": {
                         "type": "string",
+                        "description": "Начальная ключевая фраза из body, без Markdown; отдельного заголовка нет.",
                         "minLength": 1,
                         "maxLength": MAXIMUM_HEADLINE_LENGTH,
                     },
                     "body": {
                         "type": "string",
+                        "description": "Полный связный абзац новости, начинающийся с headline дословно; включает ключевую фразу.",
                         "minLength": 1,
                         "maxLength": MAXIMUM_BODY_LENGTH,
                     },

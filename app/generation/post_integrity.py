@@ -10,7 +10,6 @@ from app.generation.openai_generator import (
 )
 from app.generation.post_contract import (
     MAXIMUM_POST_LENGTH,
-    TARGET_BODY_LENGTH_MAX,
 )
 
 
@@ -45,9 +44,8 @@ _COMPLETE_SENTENCE_END_PATTERN = re.compile(
     r"[.!?…](?:[\"'»”’)\]}›*_]{0,6})(?=\s|$)"
 )
 
-_SUSPICIOUS_UNTERMINATED_BODY_MIN_LENGTH = (
-    TARGET_BODY_LENGTH_MAX
-)
+# Keep the existing incomplete-tail protection for legacy and longer paragraphs.
+_SUSPICIOUS_UNTERMINATED_BODY_MIN_LENGTH = 205
 
 
 def _strip_trailing_formatting(

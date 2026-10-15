@@ -254,19 +254,19 @@ def build_expected_post_text() -> str:
         "ЗА ПОСЛЕДНИЕ 24 ЧАСА**\n"
         "_______________\n\n"
         "1️⃣ **Студия отчиталась "
-        "о снижении выручки**\n\n"
+        "о снижении выручки** "
         "Киноподразделение сообщило "
         "о снижении квартальной выручки, "
         "тогда как другое направление "
         "развлекательного бизнеса выросло.\n\n"
         "2️⃣ **Фестиваль добавил "
-        "конкурс AI-фильмов**\n\n"
+        "конкурс AI-фильмов** "
         "Международный фестиваль "
         "короткометражного кино расширил "
         "программу конкурсами "
         "**AI-фильмов** и экранного танца.\n\n"
         "3️⃣ **У кинокомпании появился "
-        "руководитель коммуникаций**\n\n"
+        "руководитель коммуникаций** "
         "Компания впервые назначила "
         "специалиста, который возглавит "
         "коммуникации и маркетинг.\n\n"
@@ -376,15 +376,15 @@ def test_metadata_and_request() -> None:
     )
 
     assert OPENAI_POST_GENERATOR_VERSION == (
-        "openai_telegram_post_generator_v9"
+        "openai_telegram_post_generator_v10"
     )
 
     assert OPENAI_POST_PROMPT_VERSION == (
-        "movie_news_telegram_post_prompt_v7"
+        "movie_news_telegram_post_prompt_v8"
     )
 
     assert OPENAI_POST_REVISION_PROMPT_VERSION == (
-        "movie_news_telegram_post_revision_prompt_v5"
+        "movie_news_telegram_post_revision_prompt_v6"
     )
 
     request = generator.build_request(
