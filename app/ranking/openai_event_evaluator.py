@@ -313,7 +313,7 @@ class _ValidatedPayload:
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v6.txt"
+    "ranking/movie_news_event_ranking_prompt_v7.txt"
 )
 
 REPAIR_INSTRUCTIONS = (
