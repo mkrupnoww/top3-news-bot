@@ -38,6 +38,12 @@ async def run_auto_publication(
         return AutoPublicationResult(skipped_reason='disabled')
     now = now or datetime.now(UTC)
     plan = await get_auto_plan(pool, now=now)
+    if plan is not None and plan['published_at'] is not None:
+        statuses = await auto_delivery_statuses(pool, generated_post_id=plan['generated_post_id'])
+        return AutoPublicationResult(
+            generated_post_id=plan['generated_post_id'], published=True,
+            channel_statuses=statuses, skipped_reason='already_published',
+        )
     if plan is None:
         source = await find_due_auto_post(pool, now=now)
     else:

@@ -58,3 +58,9 @@ sudo. Скрипт делает backup `.env`, применяет 020 через
 Проверяются deadline, все три кнопки, старые версии, пропущенная доставка,
 частичный успех, неизвестный исход, сбой фиксации, повтор, параллельные запуски
 и обе стороны гонки с кнопкой. Отдельно проверяется реальный handler «Изменить».
+
+2026-10-19: на cloud-001 прошли 22 сценария `test_auto_publication`,
+`test_review_draft`, `test_approved_native_photo_publication`,
+`test_telegram_text`, compileall и bash syntax checks.
+Проверки используют UTF-8 snapshot только схемы production, отдельную БД
+`top3_auto_test` на порту 55432 и fake Telegram; платных вызовов нет.
