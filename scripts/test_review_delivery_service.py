@@ -138,7 +138,7 @@ def build_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Одобрить",
+                    text="✅ В тест",
                     callback_data=(
                         "review:approve:"
                         f"{generated_post_id}"

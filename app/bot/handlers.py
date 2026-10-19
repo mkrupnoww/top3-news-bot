@@ -65,7 +65,7 @@ def build_review_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Одобрить",
+                    text="✅ В тест",
                     callback_data=(
                         f"review:approve:{generated_post_id}"
                     ),
@@ -96,7 +96,7 @@ def build_publish_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📢 Опубликовать в канал",
+                    text="📢 Опубликовать в тест",
                     callback_data=(
                         f"publish:approved:{generated_post_id}"
                     ),
