@@ -5,6 +5,7 @@ from pydantic import (
     Field,
     SecretStr,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -62,6 +63,21 @@ class Settings(BaseSettings):
     telegram_channel_id: int = Field(
         validation_alias="TELEGRAM_CHANNEL_ID",
     )
+
+    channel_prod_id: int | None = Field(default=None, validation_alias="CHANNEL_PROD_ID")
+    channel_prod_vip_id: int | None = Field(default=None, validation_alias="CHANNEL_PROD_VIP_ID")
+    auto_publication_enabled: bool = Field(default=False, validation_alias="AUTO_PUBLICATION_ENABLED")
+
+    @model_validator(mode="after")
+    def validate_auto_publication(self) -> "Settings":
+        """При включении нужны два разных канала; ручной канал не меняется."""
+        channels = (self.channel_prod_id, self.channel_prod_vip_id)
+        for channel in channels:
+            if channel is not None and not str(channel).startswith("-100"):
+                raise ValueError("CHANNEL_PROD_ID и CHANNEL_PROD_VIP_ID должны начинаться с -100")
+        if self.auto_publication_enabled and (None in channels or channels[0] == channels[1]):
+            raise ValueError("Для AUTO_PUBLICATION_ENABLED нужны два разных production-канала")
+        return self
 
     db_host: str = Field(
         default="127.0.0.1",

@@ -8,12 +8,15 @@ BRANCH="main"
 BOT_SERVICE_NAME="top3-news-bot.service"
 
 TIMER_NAMES=(
+    "top3-news-auto-publish.timer"
     "top3-news-collector.timer"
     "top3-news-cleanup.timer"
     "top3-news-daily.timer"
 )
 
 UNIT_NAMES=(
+    "top3-news-auto-publish.service"
+    "top3-news-auto-publish.timer"
     "top3-news-bot.service"
     "top3-news-collector.service"
     "top3-news-collector.timer"
@@ -157,3 +160,4 @@ log "Bot service: active"
 log "Collector timer: active"
 log "Cleanup timer: active"
 log "Daily timer: active"
+log "Auto publication timer: active"

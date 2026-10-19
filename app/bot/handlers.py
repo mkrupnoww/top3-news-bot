@@ -21,6 +21,7 @@ from app.bot.review_preview import (
     send_review_draft_preview,
 )
 from app.config import get_settings
+from app.db.review_interactions import record_review_button_interaction
 from app.db.review_queue import (
     get_latest_review_draft,
     record_human_review_decision,
@@ -476,6 +477,19 @@ async def handle_review_callback(
             "Недостаточно прав.",
             show_alert=True,
         )
+        return
+
+    try:
+        await record_review_button_interaction(
+            db_pool, generated_post_id=generated_post_id,
+            telegram_user_id=bot_user.telegram_user_id, action=action,
+        )
+    except (LookupError, ValueError, PermissionError) as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+    except Exception:
+        logger.exception("Не удалось сохранить нажатие review-кнопки")
+        await callback.answer("Не удалось сохранить нажатие. Попробуйте ещё раз.", show_alert=True)
         return
 
     if action == "change":
