@@ -13,12 +13,12 @@ from app.db.pool import create_database_pool, close_database_pool
 from app.db.published_news_history import load_published_news_history
 from app.ranking.openai_event_client import OpenAIResponsesEventRankingClient
 from app.ranking.openai_event_evaluator import OpenAIEventRankingEvaluator, OpenAIEventRankingPayload
-from scripts.retry_failed_text_workflow import Budget, BudgetClient
+from scripts.retry_failed_text_workflow import RetryBudget, BudgetClient
 
 
 async def main(output_dir: Path):
     settings=get_settings()
-    budget=Budget(output_dir,Decimal('1'))
+    budget=RetryBudget(output_dir,Decimal('1'))
     pool=await create_database_pool(settings)
     as_of=datetime(2026,10,25,7,30,tzinfo=UTC)
     try:

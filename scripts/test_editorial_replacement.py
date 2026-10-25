@@ -17,6 +17,7 @@ from app.db.review_delivery import get_review_draft_by_id
 from app.generation.openai_generator import OpenAITelegramPostGenerator, GenerationModelResponse, OpenAIGeneratedNewsPayload, build_top3_post_text
 from app.generation.openai_pipeline import run_reserved_openai_generation
 from app.generation.openai_image_pipeline import run_reserved_openai_image_generation
+from app.generation.image_generator import OpenAIMovieNewsImageGenerator
 import app.generation.editorial_replacement as replacement
 from scripts.test_openai_generation_pipeline import build_telemetry, FakeOfficialTrailerEnricher
 from scripts.test_openai_image_pipeline import SyntheticImageClient, build_generator, build_png_bytes, EXPECTED_COST_PAYLOAD
@@ -61,9 +62,9 @@ async def main():
 
         async def text_runner(*args, **kwargs):
             return await run_reserved_openai_generation(*args, **kwargs,trailer_enricher=FakeOfficialTrailerEnricher())
-        image_client = SyntheticImageClient(image_bytes=build_png_bytes())
+        image_client = SyntheticImageClient(image_bytes=build_png_bytes(width=64,height=64))
         def runtime_factory(settings):
-            return SimpleNamespace(generator=build_generator(image_client),sdk_client=FakeSDK())
+            return SimpleNamespace(generator=OpenAIMovieNewsImageGenerator(client=image_client,model_name="gpt-image-2",size="64x64"),sdk_client=FakeSDK())
         async def image_runner(*args, **kwargs):
             assert await get_review_draft_by_id(pool,generated_post_id=kwargs['generated_post_id']) is None
             try:
