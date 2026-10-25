@@ -141,6 +141,18 @@ async def main():
         assert any(isinstance(x,ValueError) for x in results)
         print('Concurrent replacement is serialized: OK')
 
+        action = await reset()
+        before = client.calls,len(image_client.requests)
+        async def no_alternative(*args, **kwargs): return None
+        with patch.object(replacement, 'choose_next_generation_combination', no_alternative):
+            try: await run(action)
+            except ValueError: pass
+            else: raise AssertionError('Отсутствие альтернативы не обнаружено')
+        assert await get_review_draft_by_id(pool,generated_post_id=168) is not None
+        assert before==(client.calls,len(image_client.requests))
+        assert await pool.fetchval('SELECT decision FROM review_actions WHERE review_action_id=$1',action)=='comment'
+        print('No alternative: original draft remains reviewable, human reaction retained, no API calls: OK')
+
         # Чисто текстовое замечание по-прежнему использует старый revision pipeline.
         await reset()
         await pool.execute('DELETE FROM review_actions WHERE generated_post_id=168')
