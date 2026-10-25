@@ -10,7 +10,7 @@ import asyncpg
 
 from app.db.generation_selection import choose_next_generation_combination, load_generation_batch_selection, load_generation_combination
 from app.generation.openai_pipeline import run_reserved_openai_generation
-from app.generation.openai_image_factory import create_openai_image_runtime
+from app.generation.openai_image_factory import create_openai_image_generation_runtime
 from app.generation.openai_image_pipeline import run_reserved_openai_image_generation
 
 
@@ -94,7 +94,7 @@ async def _activate(pool, *, source, plan, post_id):
 async def run_editorial_replacement(
     pool: asyncpg.Pool, *, generator, settings, review_action_id: int, positions: tuple[int,...],
     text_runner=run_reserved_openai_generation, image_runner=run_reserved_openai_image_generation,
-    image_runtime_factory=create_openai_image_runtime,
+    image_runtime_factory=create_openai_image_generation_runtime,
 ) -> EditorialReplacementResult:
     if not positions or any(p not in (1,2,3) for p in positions) or len(set(positions)) != len(positions):
         raise ValueError('Нужны уникальные номера новостей от 1 до 3')
