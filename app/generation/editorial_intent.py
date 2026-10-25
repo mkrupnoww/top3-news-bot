@@ -14,6 +14,8 @@ def replacement_positions(comment: str) -> tuple[int, ...]:
         return ()
     if replace and re.search(r'\b(?:замен\w*|убер\w*|исключ\w*)\s+(?:формулиров\w*|слов\w*|фраз\w*|дат[ауые]|названи\w*|имя|текст)', text):
         return ()
+    if re.search(r'повтор\w*\s+(?:слов|фраз)', text):
+        return ()
     if not replace and not duplicate:
         return ()
     if re.search(r'\bвсе\s+(?:три\s+)?новост', text):

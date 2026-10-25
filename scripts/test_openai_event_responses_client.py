@@ -325,6 +325,7 @@ async def test_successful_request() -> None:
     assert set(
         event_item_schema["required"]
     ) == {
+        "duplicate_of_published_news_id",
         "representative_news_id",
         "event_title",
         "event_time_utc",

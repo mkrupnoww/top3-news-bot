@@ -975,6 +975,7 @@ async def choose_next_generation_combination(
     current_news_ids: tuple[int, int, int],
     excluded_combination_ids: tuple[int, ...] = (),
     excluded_news_ids: tuple[int, ...] = (),
+    excluded_news_sets: tuple[tuple[int, ...], ...] = (),
 ) -> GenerationCombinationReplacement | None:
     """
     Выбирает следующую комбинацию для replacement cascade.
@@ -1115,6 +1116,9 @@ async def choose_next_generation_combination(
             )
 
             if candidate_news_set & excluded_news_set:
+                continue
+
+            if any(candidate_news_set == set(ids) for ids in excluded_news_sets):
                 continue
 
             if candidate_news_set == current_news_set:

@@ -54,19 +54,16 @@ async def _prepare_plan(pool, *, source, positions):
     )
     excluded.update(r['news_id'] for r in members)
     used = await pool.fetch('SELECT combination_id FROM editorial_replacement_requests WHERE combination_id IN (SELECT combination_id FROM ranking_combinations WHERE ranking_run_id=$1)', source['ranking_run_id'])
+    used_sets = await pool.fetch("SELECT metadata->'news_ids' AS ids FROM publication_batches WHERE ranking_run_id=$1", source['ranking_run_id'])
+    excluded_sets = tuple(tuple(json.loads(row['ids']) if isinstance(row['ids'], str) else row['ids']) for row in used_sets if row['ids'])
     replacement = await choose_next_generation_combination(
         pool, ranking_run_id=source['ranking_run_id'], current_news_ids=current.news_ids,
         excluded_news_ids=tuple(sorted(excluded)), excluded_combination_ids=tuple(r['combination_id'] for r in used),
+        excluded_news_sets=excluded_sets,
     )
     kept = set(current.news_ids) - set(removed)
     if replacement is None or not kept.issubset(replacement.selection.news_ids):
         raise ValueError('В сохранённом ранжировании нет подходящей замены с сохранением остальных новостей. Исходный выпуск не изменён.')
-    # Не используем уже сгенерированный/опубликованный batch чужого запроса.
-    used_sets = await pool.fetch('SELECT metadata->\'news_ids\' AS ids FROM publication_batches WHERE ranking_run_id=$1', source['ranking_run_id'])
-    for row in used_sets:
-        ids = json.loads(row['ids']) if isinstance(row['ids'], str) else row['ids']
-        if ids and set(ids) == set(replacement.selection.news_ids):
-            raise ValueError('Выбранная замена уже использовалась; нужен другой вариант ранжирования')
     return await pool.fetchrow(
         """INSERT INTO editorial_replacement_requests
            (review_action_id,source_generated_post_id,combination_id,source_news_ids,
