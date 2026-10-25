@@ -140,6 +140,14 @@ async def run_editorial_replacement(
             return EditorialReplacementResult(new_batch_id,post_id,selection.news_ids)
         except Exception as error:
             await pool.execute('UPDATE editorial_replacement_requests SET error_message=$2 WHERE review_action_id=$1',review_action_id,f'{type(error).__name__}: {error}')
+            # Если даже план не создан, возвращаем исходный черновик в ручную
+            # очередь. Сам факт человеческой реакции остаётся и отменяет auto publish.
+            await pool.execute("""UPDATE review_actions ra SET decision='comment',requested_action=NULL,
+                review_details=review_details || jsonb_build_object('replacement_preflight_error',$2::text)
+                WHERE ra.review_action_id=$1 AND ra.requested_action='replace_news'
+                AND NOT EXISTS(SELECT 1 FROM editorial_replacement_requests e WHERE e.review_action_id=ra.review_action_id)
+                AND EXISTS(SELECT 1 FROM generated_posts p JOIN publication_batches b USING(batch_id)
+                    WHERE p.generated_post_id=ra.generated_post_id AND p.post_status='awaiting_review' AND b.batch_status='awaiting_review')""",review_action_id,f'{type(error).__name__}: {error}')
             raise
         finally:
             await lock_connection.execute('SELECT pg_advisory_unlock(21821,$1::integer)',review_action_id)

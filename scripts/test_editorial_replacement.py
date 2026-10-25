@@ -73,7 +73,7 @@ async def main():
                 pass
             else:
                 raise AssertionError('Недоделанную замену можно одобрить')
-            return await run_reserved_openai_image_generation(*args, **kwargs,output_dir=tmp,cost_estimator=lambda **kwargs:EXPECTED_COST_PAYLOAD)
+            return await run_reserved_openai_image_generation(*args, **kwargs,output_dir=tmp,cost_estimator=lambda *args, **kwargs:EXPECTED_COST_PAYLOAD)
         client = FakeTextClient()
         generator = OpenAITelegramPostGenerator(client=client,model_name='test-editorial-no-network')
         async def run(action, **kwargs):

@@ -834,7 +834,7 @@ async def handle_revision_comment(
                 review_action_id=review_action_id,
             )
         )
-    except Exception:
+    except Exception as error:
         logger.exception(
             "OpenAI review revision failed: "
             "user_id=%s, generated_post_id=%s, "
@@ -843,6 +843,10 @@ async def handle_revision_comment(
             generated_post_id,
             review_action_id,
         )
+
+        if positions_to_replace and isinstance(error, ValueError):
+            await message.answer(f"Замена не выполнена: {error}\nПроверьте черновик через /review.")
+            return
 
         await message.answer(
             "⚠️ Замечания сохранены, но новую версию "
