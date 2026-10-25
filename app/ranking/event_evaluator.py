@@ -13,11 +13,11 @@ from app.ranking.openai_usage import (
 
 
 EVENT_EVALUATOR_VERSION = (
-    "event_ranking_evaluator_v10"
+    "event_ranking_evaluator_v11"
 )
 
 EVENT_PROMPT_VERSION = (
-    "movie_news_event_ranking_prompt_v7"
+    "movie_news_event_ranking_prompt_v8"
 )
 
 STORY_CLUSTER_VERIFIER_PROMPT_VERSION = (

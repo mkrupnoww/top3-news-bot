@@ -34,6 +34,7 @@ class CandidateSelectionResult:
     window_end: datetime
     window_hours: float
     candidates: tuple[NewsCandidate, ...]
+    published_history: tuple[dict, ...] = ()
 
 
 def _normalize_datetime(

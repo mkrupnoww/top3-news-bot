@@ -6,6 +6,7 @@ from decimal import Decimal
 import asyncpg
 import json
 from app.ranking.background_snapshot import encode_snapshot, decode_snapshot
+from app.db.published_news_history import load_published_news_history
 
 from app.db.event_ranking_run_completion import (
     EventRankingRunCompletionResult,
@@ -431,6 +432,7 @@ async def run_reserved_openai_event_ranking(
             window_hours=window_hours,limit=limit,source_codes=source_codes)
         relevance_filter_result = filter_cinema_relevance(candidate_selection)
         candidate_selection = relevance_filter_result.selection
+        candidate_selection = replace(candidate_selection, published_history=await load_published_news_history(pool, as_of=as_of))
         model_request = evaluator.build_request(candidate_selection)
     _validate_candidate_selection(candidate_selection)
 

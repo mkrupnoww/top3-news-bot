@@ -13,6 +13,7 @@ ReviewDecision = Literal[
 ]
 
 ReviewRequestedAction = Literal[
+    "replace_news",
     "regenerate_text",
 ]
 
@@ -57,10 +58,10 @@ def _normalize_changes_required_input(
 ]:
     """Проверяет параметры редакционной доработки."""
 
-    if requested_action != "regenerate_text":
+    if requested_action not in {"regenerate_text", "replace_news"}:
         raise ValueError(
             "Для changes_required требуется "
-            "requested_action='regenerate_text'."
+            "requested_action='regenerate_text' или 'replace_news'."
         )
 
     if not isinstance(comment_text, str):
@@ -148,6 +149,7 @@ async def get_latest_review_draft(
             ON p.batch_id = b.batch_id
         WHERE b.batch_status = 'awaiting_review'
           AND p.post_status = 'awaiting_review'
+          AND COALESCE(b.metadata->>'editorial_replacement_pending','false') <> 'true'
           AND NOT EXISTS (
               SELECT 1
               FROM review_actions AS ra
@@ -156,8 +158,7 @@ async def get_latest_review_draft(
                 AND ra.reviewer_type = 'human'
                 AND ra.decision =
                     'changes_required'
-                AND ra.requested_action =
-                    'regenerate_text'
+                AND ra.requested_action IN ('regenerate_text', 'replace_news')
           )
         ORDER BY
             b.publication_date DESC,
@@ -334,6 +335,7 @@ async def record_human_review_decision(
                     p.generated_post_id,
                     p.batch_id,
                     p.post_status,
+                    b.metadata->>'editorial_replacement_pending' AS replacement_pending,
                     b.batch_status
                 FROM generated_posts AS p
                 JOIN publication_batches AS b
@@ -343,6 +345,9 @@ async def record_human_review_decision(
                 """,
                 generated_post_id,
             )
+
+            if record is not None and record["replacement_pending"] == "true":
+                raise ValueError("Новая подборка ещё готовится; дождитесь завершения замены")
 
             if record is None:
                 raise LookupError(
@@ -392,8 +397,7 @@ async def record_human_review_decision(
                       AND reviewer_type = 'human'
                       AND decision =
                           'changes_required'
-                      AND requested_action =
-                          'regenerate_text'
+                      AND requested_action IN ('regenerate_text', 'replace_news')
                     ORDER BY review_action_id DESC
                     LIMIT 1
                     """,

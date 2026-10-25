@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 from app.prompt_loader import load_prompt
+from app.db.published_news_history import published_news_ids
 from app.db.news_candidates import (
     CandidateSelectionResult,
     NewsCandidate,
@@ -112,6 +113,7 @@ class OpenAIEventPayload(BaseModel):
     )
 
     representative_news_id: int = Field(gt=0)
+    duplicate_of_published_news_id: int | None = Field(default=None, gt=0)
     event_title: str = Field(
         min_length=1,
         max_length=500,
@@ -313,7 +315,7 @@ class _ValidatedPayload:
 
 
 SYSTEM_INSTRUCTIONS = load_prompt(
-    "ranking/movie_news_event_ranking_prompt_v7.txt"
+    "ranking/movie_news_event_ranking_prompt_v8.txt"
 )
 
 REPAIR_INSTRUCTIONS = (
@@ -540,6 +542,7 @@ def _build_input_text(
     """Формирует JSON-запрос для модели."""
 
     payload = {
+        "published_history": list(selection.published_history),
         "task": (
             "group_assess_and_cluster_"
             "movie_news_events"
@@ -1213,6 +1216,18 @@ def _build_events(
         candidate.news_id: candidate
         for candidate in selection.candidates
     }
+
+    historical_ids = published_news_ids(selection.published_history)
+    for event in payload.events:
+        if historical_ids and 'duplicate_of_published_news_id' not in event.model_fields_set:
+            raise ValueError('Модель не вернула результат проверки опубликованной истории')
+        duplicate = event.duplicate_of_published_news_id
+        if duplicate is not None:
+            if duplicate not in historical_ids:
+                raise ValueError('Ссылка на дубль отсутствует в опубликованной истории')
+            # Запрет программный: высокие баллы и fallback не вернут дубль в TOP-3.
+            event.q_score = Decimal('0')
+            event.q_reason = f'Повтор опубликованного факта news_id={duplicate}. ' + event.q_reason[:1850]
 
     return tuple(
         EventAssessment(

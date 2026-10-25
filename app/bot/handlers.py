@@ -20,6 +20,8 @@ from app.bot.review_preview import (
     ReviewImageUnavailableError,
     send_review_draft_preview,
 )
+from app.generation.editorial_intent import replacement_positions, ReplacementPositionRequired
+from app.generation.editorial_replacement import run_editorial_replacement
 from app.config import get_settings
 from app.db.review_interactions import record_review_button_interaction
 from app.db.review_queue import (
@@ -711,6 +713,12 @@ async def handle_revision_comment(
         )
         return
 
+    try:
+        positions_to_replace = replacement_positions(comment_text)
+    except ReplacementPositionRequired as error:
+        await message.answer(str(error))
+        return
+
     issues = tuple(
         line.strip()
         for line in comment_text.splitlines()
@@ -733,7 +741,7 @@ async def handle_revision_comment(
                     bot_user.telegram_user_id
                 ),
                 decision="changes_required",
-                requested_action="regenerate_text",
+                requested_action="replace_news" if positions_to_replace else "regenerate_text",
                 comment_text=comment_text,
                 issues=issues,
             )
@@ -792,7 +800,7 @@ async def handle_revision_comment(
 
     await message.answer(
         "Замечания сохранены. "
-        "Создаю новую версию текста…"
+        + ("Заменяю выбранную новость и изображение…" if positions_to_replace else "Создаю новую версию текста…")
     )
 
     runtime = None
@@ -803,6 +811,20 @@ async def handle_revision_comment(
         runtime = create_openai_generation_runtime(
             settings
         )
+
+        if positions_to_replace:
+            replacement = await run_editorial_replacement(
+                db_pool, generator=runtime.generator, settings=settings,
+                review_action_id=review_action_id, positions=positions_to_replace,
+            )
+            await state.clear()
+            await message.answer(
+                "✅ Подборка заменена: выбран другой инфоповод, созданы новый текст и изображение. "
+                "Новая версия ожидает проверки. Отправьте /review."
+            )
+            logger.info("Editorial replacement completed: review_action_id=%s, batch_id=%s, post_id=%s, news_ids=%s",
+                        review_action_id, replacement.batch_id, replacement.generated_post_id, replacement.news_ids)
+            return
 
         revision_result = (
             await run_reserved_openai_generation_revision(

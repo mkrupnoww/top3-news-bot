@@ -23,5 +23,5 @@ def decode_snapshot(snapshot):
         candidates.append(NewsCandidate(**item))
     return (CandidateSelectionResult(window_start=datetime.fromisoformat(selection['window_start']),
         window_end=datetime.fromisoformat(selection['window_end']),window_hours=selection['window_hours'],
-        candidates=tuple(candidates)), EventRankingModelRequest(**snapshot['request']),
+        candidates=tuple(candidates), published_history=tuple(selection.get('published_history', ()))), EventRankingModelRequest(**snapshot['request']),
         tuple(EventAudienceMetrics(**v) for v in snapshot['audience_metrics']))

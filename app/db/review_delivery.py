@@ -129,6 +129,7 @@ async def get_review_draft_by_id(
         WHERE p.generated_post_id = $1
           AND b.batch_status = 'awaiting_review'
           AND p.post_status = 'awaiting_review'
+          AND COALESCE(b.metadata->>'editorial_replacement_pending','false') <> 'true'
           AND NOT EXISTS (
               SELECT 1
               FROM review_actions AS ra
@@ -137,8 +138,7 @@ async def get_review_draft_by_id(
                 AND ra.reviewer_type = 'human'
                 AND ra.decision =
                     'changes_required'
-                AND ra.requested_action =
-                    'regenerate_text'
+                AND ra.requested_action IN ('regenerate_text','replace_news')
           )
     """
 

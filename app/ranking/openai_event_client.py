@@ -37,6 +37,10 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                         "type": "integer",
                         "minimum": 1,
                     },
+                    "duplicate_of_published_news_id": {
+                        "type": ["integer", "null"],
+                        "description": "ID из published_history для повтора того же факта без существенного нового развития; иначе null",
+                    },
                     "event_title": {
                         "type": "string",
                         "minLength": 1,
@@ -154,6 +158,7 @@ OPENAI_EVENT_RANKING_RESPONSE_SCHEMA: dict[
                     },
                 },
                 "required": [
+                    "duplicate_of_published_news_id",
                     "representative_news_id",
                     "event_title",
                     "event_time_utc",
