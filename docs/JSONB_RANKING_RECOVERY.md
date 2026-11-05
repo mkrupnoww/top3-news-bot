@@ -43,3 +43,27 @@ review-процессу и защите от повторной отправки
 из GitHub код обновляется fast-forward; новый daily/recovery Python-процесс
 загружает исправление сразу. Полный перезапуск Telegram polling для исправления
 этого CLI ranking пути не требуется.
+
+## Завершённое восстановление 2026-11-05
+
+Шесть проверок прошли на cloud-001, включая PostgreSQL JSONB round trip и
+reopen копий incident-строк. Production обновлён из GitHub; исходный response ID
+прочитан повторно через GET, его checkpoint теперь completed. Ranking 265 завершён:
+91 кандидат, 72 scored records, 27 eligible; сохранённая комбинация 108296.
+
+Workflow 159 / batch 176 / post 180 восстановлены. Текст — 960 символов.
+Основной Image API запрос отклонён output-модерацией; резервная платная попытка
+не отправлялась, потому что консервативный allowance превысил бы $1.
+Использован существующий `complete_budget_retry_with_local_image.py`:
+локальная универсальная PNG, image_generation_id=182, SHA-256 проверен.
+Пост доставлен редактору в 09:02:54 UTC, review_delivery_attempt_id=92,
+telegram_message_id=544; workflow/post/batch awaiting_review. Публикации в каналы
+при восстановлении не выполнялись. Таймер 12:00 UTC активен.
+
+Дополнительные подтверждённые расходы Responses: $0.07378700.
+Резерв за отклонённый image call: $0.592350 (usage не получен, резерв не снимается).
+Всего spent/reserved $0.66613700 из $1. Первый из трёх дополнительных Responses
+был узким story-cluster verifier, не повтором основного ranking.
+Ledger/state-before: `/tmp/top3-recovery-20261105`; завершение локальной картинкой:
+`/tmp/top3-recovery-local-image-20261105`. Изолированная тестовая PostgreSQL
+остановлена, pgdata и schema snapshot удалены.
