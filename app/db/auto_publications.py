@@ -12,7 +12,21 @@ def publication_deadline(now: datetime) -> datetime:
     return datetime.combine(now.astimezone(UTC).date(), time(12), UTC)
 
 
-_DUE_POST_SQL = """
+# Выполненное техническое image-only восстановление не является нажатием review-кнопки.
+# Неоконченные правки и все реальные решения/кнопки продолжают блокировать auto publish.
+_HUMAN_REVIEW_BLOCKS_AUTO = """
+    ra.reviewer_type='human' AND NOT (
+        COALESCE(ra.requested_action,'')='regenerate_image'
+        AND COALESCE(ra.review_details->>'source','')='explicit_codex_chat_request'
+        AND COALESCE(ra.review_details->>'operator_image_update_complete','false')='true'
+        AND EXISTS (SELECT 1 FROM image_generation_requests igr
+            WHERE igr.review_action_id=ra.review_action_id AND igr.generated_post_id=bp.generated_post_id
+              AND igr.image_status='completed' AND igr.image_sha256=bp.image_sha256
+              AND igr.image_path=bp.image_path)
+    )
+"""
+
+_DUE_POST_SQL = f"""
     SELECT p.*, b.batch_status, b.publication_date
     FROM daily_workflow_runs d
     JOIN generated_posts p ON p.generated_post_id=d.generated_post_id
@@ -20,13 +34,14 @@ _DUE_POST_SQL = """
     WHERE d.publication_date=$1 AND b.publication_date=$1
       AND d.workflow_status='awaiting_review'
       AND p.post_status='awaiting_review' AND b.batch_status='awaiting_review'
+      AND COALESCE(b.metadata->>'editorial_replacement_pending','false') <> 'true'
       AND p.created_at < $2
       AND EXISTS (SELECT 1 FROM review_delivery_attempts r
                   WHERE r.generated_post_id=p.generated_post_id
                     AND r.delivery_status='sent' AND r.sent_at < $2)
       AND NOT EXISTS (SELECT 1 FROM generated_posts bp
                       JOIN review_actions ra USING (generated_post_id)
-                      WHERE bp.batch_id=b.batch_id AND ra.reviewer_type='human')
+                      WHERE bp.batch_id=b.batch_id AND {_HUMAN_REVIEW_BLOCKS_AUTO})
       AND NOT EXISTS (SELECT 1 FROM generated_posts bp
                       JOIN publication_attempts pa USING (generated_post_id)
                       WHERE bp.batch_id=b.batch_id)
@@ -72,9 +87,9 @@ async def claim_auto_post(
             # Новый READ COMMITTED snapshot после получения блокировок:
             # конкурентный click мог записать comment, не меняя статусы p/b.
             touched = await connection.fetchval(
-                """SELECT EXISTS (SELECT 1 FROM generated_posts bp
+                f"""SELECT EXISTS (SELECT 1 FROM generated_posts bp
                    JOIN review_actions ra USING (generated_post_id)
-                   WHERE bp.batch_id=$1 AND ra.reviewer_type='human')""", post['batch_id'],
+                   WHERE bp.batch_id=$1 AND {_HUMAN_REVIEW_BLOCKS_AUTO})""", post['batch_id'],
             )
             if touched:
                 return None

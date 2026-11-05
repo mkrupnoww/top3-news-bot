@@ -93,6 +93,7 @@ async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
                 reply_markup=daily.build_review_keyboard(post_id))
             async with pool.acquire() as c,c.transaction():
                 await c.execute('UPDATE daily_workflow_runs SET image_generation_id=$2 WHERE daily_workflow_run_id=$1 AND generated_post_id=$3',workflow_id,result.image_generation_id,post_id)
+                await c.execute("UPDATE review_actions SET review_details=review_details || jsonb_build_object('operator_image_update_complete',true,'completed_image_generation_id',$2::bigint) WHERE review_action_id=$1",review_id,result.image_generation_id)
                 await c.execute("UPDATE publication_batches SET metadata=jsonb_set(metadata,'{editorial_replacement_pending}','false'::jsonb) WHERE batch_id=$1",post['batch_id'])
                 await c.execute("UPDATE review_delivery_attempts SET response_payload=response_payload || $2::jsonb WHERE review_delivery_attempt_id=$1",delivery['review_delivery_attempt_id'],json.dumps({'operator_image_update':{'image_generation_id':result.image_generation_id,'review_action_id':review_id}}))
             payload={'post_id':post_id,'image_generation_id':result.image_generation_id,'image_path':str(path),'review_message_id':delivery['telegram_message_id'],'review_action_id':review_id,'new_api_calls':len(budget.calls),'accounted_usd':str(budget.total),'text_unchanged':True,'preview_updated':True,'requires_human_review':True}
