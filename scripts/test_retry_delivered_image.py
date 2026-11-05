@@ -36,7 +36,7 @@ class FakeClient:
         self.budget=budget;self.reserve=reserve;self.calls=0
         self.delegate=SyntheticImageClient(image_bytes=build_png_bytes(width=64,height=64))
     async def create_image(self,request):
-        assert 'semantic_visual_brief' in request.prompt
+        assert 'retry_after_output_moderation_blocked' in request.prompt
         call=self.budget.reserve('images',self.reserve)
         self.calls+=1
         if self.calls==1:
