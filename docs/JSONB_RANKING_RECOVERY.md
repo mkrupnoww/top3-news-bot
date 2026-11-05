@@ -67,3 +67,34 @@ telegram_message_id=544; workflow/post/batch awaiting_review. Публикаци
 Ledger/state-before: `/tmp/top3-recovery-20261105`; завершение локальной картинкой:
 `/tmp/top3-recovery-local-image-20261105`. Изолированная тестовая PostgreSQL
 остановлена, pgdata и schema snapshot удалены.
+
+## Дополнительный image-only повтор по разрешению владельца
+
+Позднее 2026-11-05 владелец отдельно разрешил ещё $1 на нормальную картинку.
+`scripts/retry_delivered_image.py` использует существующий `regenerate_image`
+контракт: в аудите явно записывается запрос из Codex-чата, а не нажатие кнопки.
+Готовые ranking/selection/post_text сохраняются, локальная PNG остаётся до успеха.
+Повтор начинается с moderation-safe prompt v9 и ограничен двумя попытками,
+консервативным ledger и запретом повторов при неизвестном сетевом исходе.
+
+Первая безопасная попытка успешна: image_generation_id=183,
+`gpt-image-2.5-flare`, PNG 1024×1024, SHA-256
+`1d01c325bd93c6490296c3209d11e95a535aa88d5a6eccc30c82382d3e059a86`.
+Дополнительная стоимость $0.02016000, один Image API вызов. Текст 180 не изменён.
+Через [Telegram editMessageMedia](https://core.telegram.org/bots/api#editmessagemedia)
+картинка обновлена в том же review-сообщении 544, кнопки сохранены.
+Ledger/result: `/tmp/top3-image-safe-retry-20261105`.
+
+Автопубликация по отсутствию нажатых кнопок сохраняется. Завершённая техническая
+правка из Codex игнорируется как блокирующая реакция только при явном marker
+`operator_image_update_complete=true`, source `explicit_codex_chat_request`,
+`requested_action=regenerate_image`, completed image request того же поста и
+совпадающих пути/SHA. Marker ставится только после успешного обновления preview.
+Незавершённый image edit, несовпадение PNG, обычная редакционная правка и любое
+реальное нажатие review-кнопки продолжают блокировать auto publish. Пока идёт
+генерация, pending-флаг скрывает пост от ручного одобрения и auto publication.
+
+На cloud-001 с отдельной PostgreSQL и fake API проверены: безопасный повтор после
+moderation block, сохранение текста/сообщения/кнопок, budget stop до следующего
+API, запрет для published posts; пять состояний auto eligibility и все прежние
+22 сценария автопубликации. Изолированные PostgreSQL и snapshots удалены.

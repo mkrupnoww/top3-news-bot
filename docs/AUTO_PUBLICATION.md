@@ -64,3 +64,9 @@ sudo. Скрипт делает backup `.env`, применяет 020 через
 `test_telegram_text`, compileall и bash syntax checks.
 Проверки используют UTF-8 snapshot только схемы production, отдельную БД
 `top3_auto_test` на порту 55432 и fake Telegram; платных вызовов нет.
+
+Техническое image-only восстановление из Codex-чата после успешного обновления
+PNG и preview сохраняет исходное расписание, если review-кнопки не нажимались.
+Это узкое исключение для source `explicit_codex_chat_request` с marker завершения
+и совпадающим completed image request. Вся незавершённая работа и обычные
+человеческие решения/кнопки остаются блокирующими.
