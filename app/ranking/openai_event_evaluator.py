@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 from app.prompt_loader import load_prompt
+from app.ranking.request_identity import PREPARED_REQUEST_MISMATCH, same_event_ranking_request
 from app.db.published_news_history import published_news_ids
 from app.db.news_candidates import (
     CandidateSelectionResult,
@@ -1723,13 +1724,8 @@ class OpenAIEventRankingEvaluator:
             selection
         )
 
-        if request != expected_request:
-            raise ValueError(
-                "Подготовленный event-level "
-                "запрос не соответствует "
-                "текущей выборке, модели "
-                "или промпту."
-            )
+        if not same_event_ranking_request(request, expected_request):
+            raise ValueError(PREPARED_REQUEST_MISMATCH)
 
         primary_response = (
             await self._client.create_response(
