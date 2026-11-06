@@ -15,6 +15,7 @@ from app.db.pool import create_database_pool, close_database_pool
 from app.db.generation_selection import load_generation_batch_selection
 from app.generation.openai_image_factory import create_openai_image_generation_runtime
 from app.generation.openai_image_pipeline import run_reserved_openai_image_generation
+from app.generation.image_generator import OPENAI_IMAGE_FALLBACK_PROMPT_VERSION
 from app.publication.telegram_text import prepare_telegram_text
 from scripts.retry_failed_text_workflow import RetryBudget, BudgetClient
 import app.workflows.daily_production as daily
@@ -28,8 +29,10 @@ def image_runtime(settings, budget):
 
 
 async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
-              check_only=False, runtime_factory=image_runtime, bot_factory=Bot,
+              check_only=False, refresh_fallback_style=False, runtime_factory=image_runtime, bot_factory=Bot,
               image_runner=run_reserved_openai_image_generation):
+    comment='Вернуть насыщенные цвета, контраст и фотографическую реалистичность.' if refresh_fallback_style else COMMENT
+    issues=(comment,)
     row=await pool.fetchrow('SELECT * FROM daily_workflow_runs WHERE daily_workflow_run_id=$1',workflow_id)
     if row is None or row['generated_post_id']!=post_id:
         raise ValueError('Неверная связь workflow/post')
@@ -47,8 +50,11 @@ async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
             if await c.fetchval("SELECT EXISTS(SELECT 1 FROM image_generation_requests WHERE generated_post_id=$1 AND image_status='reserved')",post_id):
                 raise ValueError('Image request уже выполняется; повтор запрещён')
             blocked=await c.fetchval("SELECT EXISTS(SELECT 1 FROM image_generation_requests WHERE generated_post_id=$1 AND image_status='failed' AND error_message LIKE '%moderation_blocked%')",post_id)
-            if not blocked or post['image_model_name']!='local_static_png_asset':
-                raise ValueError('Ожидалась универсальная картинка после доказанной блокировки модерацией')
+            old_fallback = (refresh_fallback_style and post['image_model_name']==settings.openai_image_model
+                and (post['image_prompt_version'] or '').startswith('movie_news_image_moderation_fallback_')
+                and post['image_prompt_version']!=OPENAI_IMAGE_FALLBACK_PROMPT_VERSION)
+            if not blocked or not (post['image_model_name']=='local_static_png_asset' or old_fallback):
+                raise ValueError('Ожидалась универсальная картинка или явно выбранный старый fallback после moderation block')
             selection=await load_generation_batch_selection(pool,ranking_run_id=row['ranking_run_id'],batch_id=post['batch_id'])
             if check_only:
                 print('Preflight OK: unpublished delivered post, source text/selection preserved, moderation-safe regeneration supported')
@@ -58,8 +64,8 @@ async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
             review_id=await c.fetchval("""INSERT INTO review_actions(generated_post_id,reviewer_type,reviewer_telegram_user_id,
                  decision,requested_action,requires_human_review,comment_text,issues,review_details)
                  VALUES($1,'human',$2,'changes_required','regenerate_image',true,$3,$4::jsonb,$5::jsonb)
-                 RETURNING review_action_id""",post_id,deliveries[0]['telegram_user_id'],COMMENT,json.dumps(ISSUES,ensure_ascii=False),
-                 json.dumps({'source':'explicit_codex_chat_request','additional_budget_usd':str(maximum),'resume_after':'first_moderation_block','audit_directory':str(directory)},ensure_ascii=False))
+                 RETURNING review_action_id""",post_id,deliveries[0]['telegram_user_id'],comment,json.dumps(issues,ensure_ascii=False),
+                 json.dumps({'source':'explicit_codex_chat_request','additional_budget_usd':str(maximum),'resume_after':'first_moderation_block','refresh_fallback_style':refresh_fallback_style,'audit_directory':str(directory)},ensure_ascii=False))
             await c.execute("UPDATE publication_batches SET metadata=jsonb_set(metadata,'{editorial_replacement_pending}','true'::jsonb) WHERE batch_id=$1",post['batch_id'])
         runtime=None;bot=None;result=None
         try:
@@ -69,7 +75,7 @@ async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
                 print(f'Moderation-safe Image API attempt {attempt}/2; additional budget <= ${maximum}',flush=True)
                 try:
                     result=await image_runner(pool,generator=runtime.generator,selection=selection,batch_id=post['batch_id'],generated_post_id=post_id,
-                         request_kind='regenerate',review_action_id=review_id,editorial_comment=COMMENT,issues=ISSUES)
+                         request_kind='regenerate',review_action_id=review_id,editorial_comment=comment,issues=issues)
                     if not result.completed:
                         raise RuntimeError('Image generation не завершена')
                     break
@@ -114,7 +120,7 @@ async def run(pool, *, settings, workflow_id, post_id, directory, maximum,
 async def main(args):
     settings=Settings();pool=await create_database_pool(settings)
     try:
-        await run(pool,settings=settings,workflow_id=args.workflow_id,post_id=args.post_id,directory=args.audit_directory,maximum=args.max_usd,check_only=args.check_only)
+        await run(pool,settings=settings,workflow_id=args.workflow_id,post_id=args.post_id,directory=args.audit_directory,maximum=args.max_usd,check_only=args.check_only,refresh_fallback_style=args.refresh_fallback_style)
     finally: await close_database_pool(pool)
 
 
@@ -125,4 +131,5 @@ if __name__=='__main__':
     parser.add_argument('--audit-directory',type=Path,required=True)
     parser.add_argument('--max-usd',type=Decimal,required=True)
     parser.add_argument('--check-only',action='store_true')
+    parser.add_argument('--refresh-fallback-style',action='store_true',help='Обновить явно устаревший сгенерированный fallback новым промптом')
     asyncio.run(main(parser.parse_args()))

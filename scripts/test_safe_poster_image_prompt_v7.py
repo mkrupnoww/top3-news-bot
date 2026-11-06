@@ -10,7 +10,7 @@ from app.generation.image_generator import (
 
 EXPECTED_NORMAL_PROMPT_VERSION = "movie_news_image_v7"
 EXPECTED_FALLBACK_PROMPT_VERSION = (
-    "movie_news_image_moderation_fallback_v9"
+    "movie_news_image_moderation_fallback_v10"
 )
 
 
@@ -122,11 +122,11 @@ def main() -> int:
     )
 
     required_fallback_fragments = (
-        "квадратную редакционную иллюстрацию",
+        "квадратную фотографическую композицию",
         "НЕ добавляй на изображение",
         "годы жизни, даты рождения или смерти",
         "«1945–2026»",
-        '"mode":"safer_title_poster_editorial_v6"',
+        '"mode":"safer_photographic_editorial_v7"',
         '"title":"Practical Magic 2 challenges Spider-Man: Brand New Day"',
         '"summary":"The release is compared with Spider-Man: Brand New Day at the box office."',
         "Это НЕ режим абстрактных универсальных картинок",
